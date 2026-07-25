@@ -44,12 +44,14 @@ jobs:
 
       - name: Start mock LDAP
         run: |
-          docker run -d --name munin_ldap_mock -p 389:1389 \
-            -e LDAP_ROOT="dc=meli,dc=com" \
-            -e LDAP_ADMIN_USERNAME="admin" \
+          docker run -d --name munin_ldap_mock -p 389:389 \
+            -e LDAP_ORGANISATION="MELI" \
+            -e LDAP_DOMAIN="meli.com" \
+            -e LDAP_BASE_DN="dc=meli,dc=com" \
             -e LDAP_ADMIN_PASSWORD="itachi" \
-            -e LDAP_SKIP_DEFAULT_TREE="yes" \
-            bitnami/openldap:latest
+            -e LDAP_CONFIG_PASSWORD="itachi" \
+            -e LDAP_TLS="false" \
+            osixia/openldap:1.5.0
 
       - name: Wait for LDAP
         run: |
