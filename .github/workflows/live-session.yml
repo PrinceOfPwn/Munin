@@ -80,7 +80,7 @@ jobs:
         run: |
           if [ -d "app" ]; then
             cd app
-            npm ci || npm install
+            npm install
             npm run build
           fi
 
