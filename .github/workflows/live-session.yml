@@ -96,8 +96,16 @@ jobs:
           import uvicorn
           from starlette.staticfiles import StaticFiles
           from starlette.middleware.cors import CORSMiddleware
+          from starlette.middleware.base import BaseHTTPMiddleware
+
+          class NoCacheMiddleware(BaseHTTPMiddleware):
+              async def dispatch(self, request, call_next):
+                  response = await call_next(request)
+                  response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                  return response
 
           app = munin.mcp.main.MCP.streamable_http_app()
+          app.add_middleware(NoCacheMiddleware)
           app.add_middleware(
               CORSMiddleware,
               allow_origins=['*'],
