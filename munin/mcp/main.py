@@ -1,0 +1,1244 @@
+from __future__ import annotations
+
+import argparse
+import functools
+import logging
+import os
+import shlex
+import signal
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+from mcp.server.fastmcp import FastMCP
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from munin.mcp.audit import AuditTrailLogger
+    from munin.mcp.config import get_settings, safe_slug
+    from munin.mcp.intel import VulnIntelService
+    from munin.mcp.jobs import JobManager
+    from munin.mcp.opsec import ExecutionEngine, OpsecError, command_exists
+    from munin.mcp.shared_state import SharedStateStore
+    from munin.mcp.syncer import WikiGitSyncer
+    from munin.mcp.utils import parse_targets, shell_join, split_extra_args, utc_now_iso
+else:
+    from .audit import AuditTrailLogger
+    from .config import get_settings, safe_slug
+    from .intel import VulnIntelService
+    from .jobs import JobManager
+    from .opsec import ExecutionEngine, OpsecError, command_exists
+    from .shared_state import SharedStateStore
+    from .syncer import WikiGitSyncer
+    from .utils import parse_targets, shell_join, split_extra_args, utc_now_iso
+
+logging.basicConfig(level=logging.INFO, format="[munin-mcp] %(levelname)s %(message)s")
+logger = logging.getLogger("munin-mcp")
+
+SETTINGS = get_settings()
+ENGINE = ExecutionEngine(SETTINGS)
+AUDIT = AuditTrailLogger(SETTINGS.workspace_root)
+JOBS = JobManager(SETTINGS.job_workers)
+INTEL = VulnIntelService(SETTINGS)
+SYNCER = WikiGitSyncer(SETTINGS)
+STATE = SharedStateStore(SETTINGS)
+MCP = FastMCP("munin-mcp")
+ORPHAN_TTL_SECONDS = 600
+HOST_OPSEC_SNAPSHOT = SETTINGS.workspace_root / "intel" / "host_opsec_snapshot.json"
+
+
+def _kill_orphaned_stdio_processes() -> int:
+    """Kill stdio processes older than ORPHAN_TTL. Portable across macOS + Linux.
+
+    Uses `ps -eo pid,etime,args` (POSIX) without the GNU-only --no-headers flag and
+    parses etime manually. Silently no-ops on Windows or if ps is missing.
+    """
+    my_pid = os.getpid()
+    killed = 0
+    try:
+        import subprocess
+
+        if os.name == "nt":
+            return 0
+        out = subprocess.run(
+            ["ps", "-eo", "pid,etime,args"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        for line in (out.stdout or "").strip().splitlines()[1:]:
+            parts = line.strip().split(None, 2)
+            if len(parts) < 3:
+                continue
+            pid_str, etime_str, args_str = parts
+            if "munin/mcp/main.py --transport stdio" not in args_str and "munin.mcp.main --transport stdio" not in args_str:
+                continue
+            try:
+                pid = int(pid_str)
+                seconds = _etime_to_seconds(etime_str)
+            except ValueError:
+                continue
+            if pid == my_pid or seconds < ORPHAN_TTL_SECONDS:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+    except Exception:  # pragma: no cover - guardrail
+        pass
+    return killed
+
+
+def _etime_to_seconds(etime: str) -> int:
+    """`ps` etime: `[[DD-]HH:]MM:SS`."""
+    days = 0
+    if "-" in etime:
+        d, etime = etime.split("-", 1)
+        days = int(d)
+    parts = [int(p) for p in etime.split(":")]
+    if len(parts) == 3:
+        h, m, s = parts
+    elif len(parts) == 2:
+        h, m, s = 0, parts[0], parts[1]
+    else:
+        return 0
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
+ORPHANS_KILLED = _kill_orphaned_stdio_processes()
+if ORPHANS_KILLED:
+    logger.info("killed %d orphaned stdio processes at startup", ORPHANS_KILLED)
+
+
+def _artifact_path(run_id: str, *parts: str) -> Path:
+    path = SETTINGS.workspace_root / "runs" / run_id
+    for part in parts:
+        path = path / part
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _load_host_opsec_snapshot() -> dict[str, Any]:
+    if not HOST_OPSEC_SNAPSHOT.exists():
+        return {}
+    try:
+        import json
+
+        return json.loads(HOST_OPSEC_SNAPSHOT.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _httpx_binary() -> str:
+    for candidate in ("pd-httpx", "/usr/local/bin/pd-httpx"):
+        if command_exists(candidate) or Path(candidate).exists():
+            return candidate
+    return "httpx"
+
+
+def _result_from_exception(tool: str, exc: Exception, mode: str = "sync") -> dict[str, Any]:
+    code = "opsec_failed" if isinstance(exc, OpsecError) else "tool_failed"
+    return {
+        "ok": False,
+        "tool": tool,
+        "mode": mode,
+        "summary": f"{tool} failed: {exc}",
+        "error": {"code": code, "message": str(exc)},
+    }
+
+
+def audited_tool(
+    tool_name: str,
+    level: str,
+    mode_resolver: Callable[..., str] | None = None,
+) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
+    def decorator(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            run_id = kwargs.get("run_id", "").strip() or safe_slug([utc_now_iso(), tool_name])
+            kwargs["run_id"] = run_id
+            started_at = utc_now_iso()
+            mode = mode_resolver(*args, **kwargs) if mode_resolver else str(kwargs.get("mode", "sync"))
+            target = str(
+                kwargs.get("target") or kwargs.get("url") or kwargs.get("targets") or kwargs.get("cve_id") or ""
+            )
+            source_context = "munin-mcp"
+            try:
+                result = func(*args, **kwargs)
+            except Exception as exc:  # pragma: no cover - guardrail
+                result = _result_from_exception(tool_name, exc, mode=mode)
+            artifacts = result.get("artifacts", []) or []
+            data = result.get("data", {}) or {}
+            try:
+                AUDIT.record(
+                    run_id=run_id,
+                    tool=tool_name,
+                    level=level,
+                    mode=mode,
+                    status="ok" if result.get("ok", False) else "error",
+                    target=target,
+                    source_context=source_context,
+                    command_or_params={k: v for k, v in kwargs.items() if k != "run_id"},
+                    job_id=result.get("job_id", ""),
+                    artifacts=artifacts,
+                    opsec_preflight=data.get("opsec_preflight", {}),
+                    started_at=started_at,
+                    finished_at=utc_now_iso(),
+                    summary=result.get("summary", ""),
+                )
+            except Exception as audit_exc:
+                logger.warning("AUDIT.record failed for %s: %s", tool_name, audit_exc)
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def _submit_command_job(
+    *,
+    tool: str,
+    level: str,
+    target: str,
+    command: str,
+    timeout: int,
+    run_id: str,
+    artifacts: list[str] | None = None,
+) -> dict[str, Any]:
+    started_at = utc_now_iso()
+
+    def on_finish(job: Any) -> None:
+        result = job.result or {}
+        data = result.get("data", {}) or {}
+        try:
+            AUDIT.record(
+                run_id=run_id,
+                tool=tool,
+                level=level,
+                mode="async",
+                status=job.status,
+                target=target,
+                source_context="munin-mcp",
+                command_or_params={"command": command, "timeout": timeout},
+                job_id=job.job_id,
+                artifacts=result.get("artifacts", []) or (artifacts or []),
+                opsec_preflight=data.get("opsec_preflight", {}),
+                started_at=job.started_at or started_at,
+                finished_at=job.finished_at or utc_now_iso(),
+                summary=result.get("summary", ""),
+            )
+        except Exception as audit_exc:
+            logger.warning("AUDIT.record failed in on_finish for %s: %s", tool, audit_exc)
+
+    job = JOBS.submit(
+        tool=tool,
+        level=level,
+        target=target,
+        command_preview=command[:200],
+        fn=lambda current_job: ENGINE.execute_job(
+            job=current_job,
+            tool=tool,
+            level=level,
+            command=command,
+            timeout=timeout,
+            target=target,
+            artifacts=artifacts,
+        ),
+        on_finish=on_finish,
+    )
+    return {
+        "ok": True,
+        "tool": tool,
+        "mode": "async",
+        "job_id": job.job_id,
+        "summary": f"{tool} job submitted",
+        "data": {
+            "job_id": job.job_id,
+            "status": job.status,
+            "started_at": job.started_at,
+            "created_at": job.created_at,
+            "target": target,
+        },
+        "artifacts": artifacts or [],
+    }
+
+
+def _run_command(
+    *,
+    tool: str,
+    level: str,
+    command: str,
+    timeout: int,
+    target: str,
+    mode: str,
+    run_id: str,
+    artifacts: list[str] | None = None,
+) -> dict[str, Any]:
+    if mode == "async":
+        return _submit_command_job(
+            tool=tool,
+            level=level,
+            target=target,
+            command=command,
+            timeout=timeout,
+            run_id=run_id,
+            artifacts=artifacts,
+        )
+    return ENGINE.execute_sync(
+        tool=tool,
+        level=level,
+        command=command,
+        timeout=timeout,
+        target=target,
+        artifacts=artifacts,
+    )
+
+
+def _write_target_file(run_id: str, name: str, targets: list[str]) -> Path:
+    path = _artifact_path(run_id, "input", name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(targets) + "\n", encoding="utf-8")
+    return path
+
+
+def _dependency_or_continue(tool: str, dependencies: list[str]) -> dict[str, Any] | None:
+    for dependency in dependencies:
+        if not command_exists(dependency):
+            return ENGINE.dependency_result(tool, dependency)
+    return None
+
+
+# ─────────────────────────────────────────────
+# ADMIN / STATUS TOOLS
+# ─────────────────────────────────────────────
+
+
+@MCP.tool()
+@audited_tool("health_check", "admin", lambda *a, **k: "sync")
+def health_check(run_id: str = "") -> dict[str, Any]:
+    """Return overall MCP health: egress IP, VPN route, binary availability, and host OPSEC snapshot."""
+    preflight = ENGINE.preflight()
+    binaries = {
+        "nmap": command_exists("nmap"),
+        "httpx": command_exists(_httpx_binary()),
+        "nuclei": command_exists("nuclei"),
+        "sqlmap": command_exists("sqlmap"),
+        "EyeWitness": command_exists("EyeWitness"),
+        "ffuf": command_exists("ffuf"),
+        "feroxbuster": command_exists("feroxbuster"),
+        "katana": command_exists("katana"),
+        "hydra": command_exists("hydra"),
+        "searchsploit": command_exists("searchsploit"),
+    }
+    host_snapshot = _load_host_opsec_snapshot()
+    return {
+        "ok": True,
+        "tool": "health_check",
+        "mode": "sync",
+        "summary": "munin mcp healthy",
+        "data": {
+            "workspace_root": str(SETTINGS.workspace_root),
+            "shared_state_db": str(STATE.db_path),
+            "egress_ip": preflight["egress_ip"],
+            "route": preflight["route"],
+            "expected_egress_ip": SETTINGS.expected_egress_ip,
+            "forbidden_egress_ip": SETTINGS.forbidden_egress_ip,
+            "binary_status": binaries,
+            "host_opsec_snapshot": host_snapshot,
+            "opsec_preflight": preflight,
+            "orphans_killed": ORPHANS_KILLED,
+            "preflight_policy": SETTINGS.preflight_policy,
+        },
+    }
+
+
+@MCP.tool()
+@audited_tool("vpn_status", "admin", lambda *a, **k: "sync")
+def vpn_status(run_id: str = "") -> dict[str, Any]:
+    """Check current egress IP against expected VPN exit node."""
+    preflight = ENGINE.preflight()
+    return {
+        "ok": True,
+        "tool": "vpn_status",
+        "mode": "sync",
+        "summary": f"egress {preflight['egress_ip']}",
+        "data": {**preflight, "host_opsec_snapshot": _load_host_opsec_snapshot()},
+    }
+
+
+@MCP.tool()
+def job_status(job_id: str, include_result: bool = False, run_id: str = "") -> dict[str, Any]:
+    """Get the current status of an async job. Use include_result=true to get full stdout/stderr."""
+    return JOBS.status(job_id, include_result=include_result)
+
+
+@MCP.tool()
+def job_cancel(job_id: str, run_id: str = "") -> dict[str, Any]:
+    """Cancel a running or queued async job."""
+    return JOBS.cancel(job_id)
+
+
+@MCP.tool()
+@audited_tool("execute_command", "admin", lambda *a, **k: k.get("mode", "async"))
+def execute_command(
+    command: str,
+    mode: str = "async",
+    timeout: int = SETTINGS.default_timeout,
+    target: str = "",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Execute an arbitrary shell command. Requires OPSEC preflight if policy demands it."""
+    return _run_command(
+        tool="execute_command",
+        level="admin",
+        command=command,
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+# ─────────────────────────────────────────────
+# ACTIVE SCAN TOOLS
+# ─────────────────────────────────────────────
+
+
+def _nmap_command(target: str, scan_type: str, ports: str, extra: str) -> str:
+    parts: list[str] = ["nmap", scan_type]
+    if ports.strip():
+        parts.extend(["-p", ports.strip()])
+    parts.extend(split_extra_args(extra))
+    parts.append(target.strip())
+    return shell_join(parts)
+
+
+@MCP.tool()
+@audited_tool("nmap_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def nmap_scan(
+    target: str,
+    scan_type: str = "-sV",
+    ports: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 600,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Run an nmap scan against a target. Defaults to service version detection (-sV)."""
+    dep = _dependency_or_continue("nmap_scan", ["nmap"])
+    if dep:
+        return dep
+    return _run_command(
+        tool="nmap_scan",
+        level="active",
+        command=_nmap_command(target, scan_type, ports, additional_args),
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("nmap_advanced_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def nmap_advanced_scan(
+    target: str,
+    scan_type: str = "-sS",
+    ports: str = "",
+    timing: str = "T4",
+    nse_scripts: str = "",
+    os_detection: bool = False,
+    version_detection: bool = False,
+    aggressive: bool = False,
+    stealth: bool = False,
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 900,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Advanced nmap scan with NSE scripts, OS detection, stealth options, and timing control."""
+    dep = _dependency_or_continue("nmap_advanced_scan", ["nmap"])
+    if dep:
+        return dep
+    parts: list[str] = ["nmap", scan_type, f"-{timing}"]
+    if ports.strip():
+        parts.extend(["-p", ports.strip()])
+    if nse_scripts.strip():
+        parts.extend(["--script", nse_scripts.strip()])
+    if os_detection:
+        parts.append("-O")
+    if version_detection:
+        parts.append("-sV")
+    if aggressive:
+        parts.append("-A")
+    if stealth:
+        parts.extend(["--defeat-rst-ratelimit", "--max-retries", "2"])
+    parts.extend(split_extra_args(additional_args))
+    parts.append(target.strip())
+    return _run_command(
+        tool="nmap_advanced_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("httpx_probe", "active", lambda *a, **k: k.get("mode", "async"))
+def httpx_probe(
+    targets: str = "",
+    targets_file: str = "",
+    ports: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 300,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Probe HTTP/HTTPS services on targets. Outputs JSON lines with status, title, tech stack, etc."""
+    dep = _dependency_or_continue("httpx_probe", [_httpx_binary()])
+    if dep:
+        return dep
+    parsed_targets = parse_targets(targets)
+    target_file_path = (
+        Path(targets_file) if targets_file.strip() else _write_target_file(run_id, "httpx_targets.txt", parsed_targets)
+    )
+    output_path = _artifact_path(run_id, "evidence", "http", "httpx_probe.jsonl")
+    parts: list[str] = [_httpx_binary(), "-silent", "-json", "-l", str(target_file_path), "-o", str(output_path)]
+    if ports.strip():
+        parts.extend(["-ports", ports.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="httpx_probe",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=",".join(parsed_targets) if parsed_targets else str(target_file_path),
+        mode=mode,
+        run_id=run_id,
+        artifacts=[str(output_path)],
+    )
+
+
+@MCP.tool()
+@audited_tool("netexec_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def netexec_scan(
+    protocol: str,
+    target: str,
+    username: str = "",
+    password: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 600,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Run NetExec against a target for SMB, LDAP, RDP, SSH, WMI or other supported protocols."""
+    dep = _dependency_or_continue("netexec_scan", ["netexec"])
+    if dep:
+        return dep
+    parts: list[str] = ["netexec", protocol.strip(), target.strip()]
+    if username.strip():
+        parts.extend(["-u", username.strip()])
+    if password.strip():
+        parts.extend(["-p", password.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="netexec_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("feroxbuster_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def feroxbuster_scan(
+    url: str,
+    wordlist: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 900,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Directory and file brute-force with feroxbuster."""
+    dep = _dependency_or_continue("feroxbuster_scan", ["feroxbuster"])
+    if dep:
+        return dep
+    parts: list[str] = ["feroxbuster", "-u", url.strip()]
+    if wordlist.strip():
+        parts.extend(["-w", wordlist.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="feroxbuster_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=url,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("ffuf_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def ffuf_scan(
+    url: str,
+    wordlist: str,
+    matcher: str = "",
+    filter_expr: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 900,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Fast web fuzzer (ffuf). Use FUZZ keyword in URL for injection points."""
+    dep = _dependency_or_continue("ffuf_scan", ["ffuf"])
+    if dep:
+        return dep
+    parts: list[str] = ["ffuf", "-u", url.strip(), "-w", wordlist.strip()]
+    if matcher.strip():
+        parts.extend(["-mc", matcher.strip()])
+    if filter_expr.strip():
+        parts.extend(["-fc", filter_expr.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="ffuf_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=url,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("katana_crawl", "active", lambda *a, **k: k.get("mode", "async"))
+def katana_crawl(
+    url: str,
+    depth: int = 3,
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 900,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Crawl a web application with katana to discover endpoints and JavaScript links."""
+    dep = _dependency_or_continue("katana_crawl", ["katana"])
+    if dep:
+        return dep
+    parts: list[str] = ["katana", "-u", url.strip(), "-d", str(depth)]
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="katana_crawl",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=url,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("hydra_attack", "active", lambda *a, **k: k.get("mode", "async"))
+def hydra_attack(
+    target: str,
+    service: str,
+    username: str = "",
+    username_file: str = "",
+    password: str = "",
+    password_file: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 1800,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Credential brute-force with Hydra. Supports ssh, ftp, http-post-form, rdp, smb, etc."""
+    dep = _dependency_or_continue("hydra_attack", ["hydra"])
+    if dep:
+        return dep
+    parts: list[str] = ["hydra"]
+    if username.strip():
+        parts.extend(["-l", username.strip()])
+    if username_file.strip():
+        parts.extend(["-L", username_file.strip()])
+    if password.strip():
+        parts.extend(["-p", password.strip()])
+    if password_file.strip():
+        parts.extend(["-P", password_file.strip()])
+    parts.extend(split_extra_args(additional_args))
+    parts.extend([target.strip(), service.strip()])
+    return _run_command(
+        tool="hydra_attack",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("sqlmap_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def sqlmap_scan(
+    url: str,
+    data: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 1800,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """SQL injection detection and exploitation with sqlmap."""
+    dep = _dependency_or_continue("sqlmap_scan", ["sqlmap"])
+    if dep:
+        return dep
+    parts: list[str] = ["sqlmap", "-u", url.strip(), "--batch"]
+    if data.strip():
+        parts.extend(["--data", data.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="sqlmap_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=url,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("smbmap_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def smbmap_scan(
+    target: str,
+    username: str = "",
+    password: str = "",
+    domain: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 900,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Enumerate SMB shares, permissions, and accessible files with smbmap."""
+    dep = _dependency_or_continue("smbmap_scan", ["smbmap"])
+    if dep:
+        return dep
+    parts: list[str] = ["smbmap", "-H", target.strip()]
+    if username.strip():
+        parts.extend(["-u", username.strip()])
+    if password.strip():
+        parts.extend(["-p", password.strip()])
+    if domain.strip():
+        parts.extend(["-d", domain.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="smbmap_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("nuclei_scan", "active", lambda *a, **k: k.get("mode", "async"))
+def nuclei_scan(
+    target: str,
+    severity: str = "",
+    tags: str = "",
+    template: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 1200,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Vulnerability scanner using Nuclei templates. Filter by severity or tags."""
+    dep = _dependency_or_continue("nuclei_scan", ["nuclei"])
+    if dep:
+        return dep
+    parts: list[str] = ["nuclei", "-u", target.strip()]
+    if severity.strip():
+        parts.extend(["-severity", severity.strip()])
+    if tags.strip():
+        parts.extend(["-tags", tags.strip()])
+    if template.strip():
+        parts.extend(["-t", template.strip()])
+    parts.extend(split_extra_args(additional_args))
+    return _run_command(
+        tool="nuclei_scan",
+        level="active",
+        command=shell_join(parts),
+        timeout=timeout,
+        target=target,
+        mode=mode,
+        run_id=run_id,
+    )
+
+
+@MCP.tool()
+@audited_tool("web_evidence_screenshotter", "documentation", lambda *a, **k: "async")
+def web_evidence_screenshotter(
+    targets: str = "",
+    targets_file: str = "",
+    run_id: str = "",
+    ports: str = "",
+    schemes: str = "http,https",
+    timeout: int = 1800,
+) -> dict[str, Any]:
+    """Take screenshots of live web services using httpx + EyeWitness. Produces an HTML report."""
+    dep = _dependency_or_continue("web_evidence_screenshotter", [_httpx_binary(), "EyeWitness"])
+    if dep:
+        return dep
+    parsed_targets = parse_targets(targets)
+    target_file_path = (
+        Path(targets_file) if targets_file.strip() else _write_target_file(run_id, "web_targets.txt", parsed_targets)
+    )
+    evidence_dir = _artifact_path(run_id, "evidence", "web")
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    input_dir = _artifact_path(run_id, "input", "web")
+    input_dir.mkdir(parents=True, exist_ok=True)
+    httpx_output = input_dir / "httpx_live.jsonl"
+    urls_path = input_dir / "urls.txt"
+    filter_script = "\n".join(
+        [
+            "import json, pathlib",
+            f"src = pathlib.Path({str(httpx_output)!r})",
+            f"dst = pathlib.Path({str(urls_path)!r})",
+            f"allowed = {{item.strip() for item in {schemes.split(',')!r} if item.strip()}}",
+            "urls = []",
+            "for line in src.read_text(encoding='utf-8', errors='ignore').splitlines():",
+            "    if not line.strip():",
+            "        continue",
+            "    row = json.loads(line)",
+            "    scheme = row.get('scheme', '')",
+            "    url = row.get('url', '')",
+            "    if url and (not allowed or scheme in allowed):",
+            "        urls.append(url)",
+            "dst.write_text('\\n'.join(urls) + '\\n', encoding='utf-8')",
+            "print(len(urls))",
+        ]
+    )
+    command = " && ".join(
+        [
+            f"{shlex.quote(_httpx_binary())} -silent -json -l {shlex.quote(str(target_file_path))} -o {shlex.quote(str(httpx_output))}"
+            + (f" -ports {ports.strip()}" if ports.strip() else ""),
+            f"python3 -c {shlex.quote(filter_script)}",
+            f"EyeWitness --web -f {shlex.quote(str(urls_path))} --no-prompt -d {shlex.quote(str(evidence_dir))}",
+        ]
+    )
+    artifacts = [str(httpx_output), str(urls_path), str(evidence_dir / "report.html")]
+    return _submit_command_job(
+        tool="web_evidence_screenshotter",
+        level="documentation",
+        target=",".join(parsed_targets) if parsed_targets else str(target_file_path),
+        command=command,
+        timeout=timeout,
+        run_id=run_id,
+        artifacts=artifacts,
+    )
+
+
+# ─────────────────────────────────────────────
+# PASSIVE INTEL TOOLS
+# ─────────────────────────────────────────────
+
+
+@MCP.tool()
+@audited_tool("cve_lookup", "passive", lambda *a, **k: "sync")
+def cve_lookup(cve_id: str, run_id: str = "") -> dict[str, Any]:
+    """Look up a CVE from NVD, CIRCL, and MITRE. Returns CVSS, EPSS, KEV status, and known exploits."""
+    data = INTEL.cve_lookup(cve_id)
+    return {"ok": True, "tool": "cve_lookup", "mode": "sync", "summary": f"looked up {cve_id.upper()}", "data": data}
+
+
+@MCP.tool()
+@audited_tool("cve_search", "passive", lambda *a, **k: "sync")
+def cve_search(query: str, limit: int = 10, run_id: str = "") -> dict[str, Any]:
+    """Search CVEs by keyword using the NVD API."""
+    return INTEL.cve_search(query, limit)
+
+
+@MCP.tool()
+@audited_tool("cve_enrich", "passive", lambda *a, **k: "sync")
+def cve_enrich(cve_id: str, run_id: str = "") -> dict[str, Any]:
+    """Enrich a CVE with full multi-source data: NVD + CIRCL + MITRE + EPSS + KEV + exploits."""
+    return INTEL.cve_enrich(cve_id)
+
+
+@MCP.tool()
+@audited_tool("exploit_search", "passive", lambda *a, **k: "sync")
+def exploit_search(cve_id: str = "", query: str = "", run_id: str = "") -> dict[str, Any]:
+    """Search for public exploits via SearchSploit, GitHub, and local Nuclei templates."""
+    return INTEL.exploit_search(cve_id=cve_id, query=query)
+
+
+@MCP.tool()
+@audited_tool("package_vuln_lookup", "passive", lambda *a, **k: "sync")
+def package_vuln_lookup(ecosystem: str, package_name: str, version: str, run_id: str = "") -> dict[str, Any]:
+    """Look up known vulnerabilities for a package/version via OSV (PyPI, npm, Go, Maven, etc.)."""
+    return INTEL.package_vuln_lookup(ecosystem, package_name, version)
+
+
+# ─────────────────────────────────────────────
+# DOCUMENTATION / SYNC TOOLS
+# ─────────────────────────────────────────────
+
+
+@MCP.tool()
+@audited_tool("wiki_git_syncer", "documentation", lambda *a, **k: "sync")
+def wiki_git_syncer(run_id: str, mode: str = "prepare", destination: str = "obsidian") -> dict[str, Any]:
+    """Sync run artifacts to a knowledge base. Modes: prepare, commit, push."""
+    return SYNCER.run(run_id=run_id, mode=mode, destination=destination)
+
+
+# ─────────────────────────────────────────────
+# SHARED STATE TOOLS (Multi-Agent Coordination)
+# ─────────────────────────────────────────────
+
+
+@MCP.tool()
+@audited_tool("shared_state_overview", "admin", lambda *a, **k: "sync")
+def shared_state_overview(run_id: str = "") -> dict[str, Any]:
+    """Overview of the shared SQLite state: intel count, running tasks, agents, and unread messages."""
+    data = STATE.overview()
+    return {
+        "ok": True,
+        "tool": "shared_state_overview",
+        "mode": "sync",
+        "summary": f"shared state has {data['intel_total']} intel rows and {data['tasks_running']} running tasks",
+        "data": data,
+    }
+
+
+@MCP.tool()
+@audited_tool("publish_shared_intel", "documentation", lambda *a, **k: "sync")
+def publish_shared_intel(
+    target_ip: str,
+    finding_type: str,
+    details_json: str,
+    source_agent: str,
+    port: int = 0,
+    service: str = "",
+    severity: str = "INFO",
+    status: str = "NEW",
+    tags: str = "",
+    fingerprint: str = "",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Publish a finding to the shared intel SQLite store. Accessible by all agents."""
+    record = STATE.publish_intel(
+        target_ip=target_ip,
+        port=port or None,
+        service=service,
+        finding_type=finding_type,
+        severity=severity,
+        details_json=details_json,
+        source_agent=source_agent,
+        status=status,
+        tags=tags,
+        fingerprint=fingerprint,
+    )
+    return {
+        "ok": True,
+        "tool": "publish_shared_intel",
+        "mode": "sync",
+        "summary": f"intel stored for {record['target_ip']}",
+        "data": record,
+    }
+
+
+@MCP.tool()
+@audited_tool("query_shared_intel", "passive", lambda *a, **k: "sync")
+def query_shared_intel(
+    target_ip: str = "",
+    service: str = "",
+    finding_type: str = "",
+    severity: str = "",
+    status: str = "",
+    limit: int = 50,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Query the shared intel store. Filter by IP, service, finding type, severity, or status."""
+    matches = STATE.query_intel(
+        target_ip=target_ip,
+        service=service,
+        finding_type=finding_type,
+        severity=severity,
+        status=status,
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "tool": "query_shared_intel",
+        "mode": "sync",
+        "summary": f"found {len(matches)} shared intel rows",
+        "data": {"matches": matches, "count": len(matches)},
+    }
+
+
+@MCP.tool()
+@audited_tool("claim_shared_task", "admin", lambda *a, **k: "sync")
+def claim_shared_task(
+    target_ip: str,
+    action: str,
+    assigned_agent: str,
+    lease_seconds: int = 1800,
+    metadata_json: str = "{}",
+    allow_steal_stale: bool = True,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Claim an exclusive task lock for a (target_ip, action) pair."""
+    decision = STATE.claim_task(
+        target_ip=target_ip,
+        action=action,
+        assigned_agent=assigned_agent,
+        lease_seconds=lease_seconds,
+        metadata_json=metadata_json,
+        allow_steal_stale=allow_steal_stale,
+    )
+    return {
+        "ok": decision.success,
+        "tool": "claim_shared_task",
+        "mode": "sync",
+        "summary": decision.message,
+        "data": {
+            "task_id": decision.task_id,
+            "stolen_stale_task_id": decision.stolen_stale_task_id,
+            "target_ip": target_ip,
+            "action": action,
+            "assigned_agent": assigned_agent,
+        },
+        "error": None if decision.success else {"code": "task_claim_failed", "message": decision.message},
+    }
+
+
+@MCP.tool()
+@audited_tool("heartbeat_shared_task", "admin", lambda *a, **k: "sync")
+def heartbeat_shared_task(task_id: int, assigned_agent: str, lease_seconds: int = 1800, run_id: str = "") -> dict[str, Any]:
+    """Renew the lease on a claimed task."""
+    result = STATE.heartbeat_task(task_id=task_id, assigned_agent=assigned_agent, lease_seconds=lease_seconds)
+    return {
+        "ok": bool(result.get("success")),
+        "tool": "heartbeat_shared_task",
+        "mode": "sync",
+        "summary": result["message"],
+        "data": result,
+        "error": None if result.get("success") else {"code": "task_heartbeat_failed", "message": result["message"]},
+    }
+
+
+@MCP.tool()
+@audited_tool("complete_shared_task", "admin", lambda *a, **k: "sync")
+def complete_shared_task(
+    task_id: int,
+    assigned_agent: str,
+    status: str = "COMPLETED",
+    result_json: str = "{}",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Mark a task as COMPLETED, FAILED, or CANCELLED and store the result JSON."""
+    result = STATE.complete_task(task_id=task_id, assigned_agent=assigned_agent, status=status, result_json=result_json)
+    return {
+        "ok": bool(result.get("success")),
+        "tool": "complete_shared_task",
+        "mode": "sync",
+        "summary": result["message"],
+        "data": result,
+        "error": None if result.get("success") else {"code": "task_complete_failed", "message": result["message"]},
+    }
+
+
+@MCP.tool()
+@audited_tool("list_shared_tasks", "passive", lambda *a, **k: "sync")
+def list_shared_tasks(status: str = "", assigned_agent: str = "", target_ip: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
+    """List shared tasks. Filter by status, agent, or target IP."""
+    tasks = STATE.list_tasks(status=status, assigned_agent=assigned_agent, target_ip=target_ip, limit=limit)
+    return {
+        "ok": True,
+        "tool": "list_shared_tasks",
+        "mode": "sync",
+        "summary": f"found {len(tasks)} shared tasks",
+        "data": {"matches": tasks, "count": len(tasks)},
+    }
+
+
+@MCP.tool()
+@audited_tool("upsert_agent_presence", "admin", lambda *a, **k: "sync")
+def upsert_agent_presence(
+    agent_name: str,
+    role: str = "",
+    status: str = "IDLE",
+    current_task_id: int = 0,
+    metadata_json: str = "{}",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Register or update an agent's presence in the shared coordination store."""
+    record = STATE.upsert_presence(
+        agent_name=agent_name,
+        role=role,
+        status=status,
+        current_task_id=current_task_id or None,
+        metadata_json=metadata_json,
+    )
+    return {
+        "ok": True,
+        "tool": "upsert_agent_presence",
+        "mode": "sync",
+        "summary": f"presence updated for {agent_name}",
+        "data": record,
+    }
+
+
+@MCP.tool()
+@audited_tool("list_agent_presence", "passive", lambda *a, **k: "sync")
+def list_agent_presence(stale_after_seconds: int = 3600, run_id: str = "") -> dict[str, Any]:
+    """List all known agents and their last-seen time."""
+    matches = STATE.list_presence(stale_after_seconds=stale_after_seconds)
+    return {
+        "ok": True,
+        "tool": "list_agent_presence",
+        "mode": "sync",
+        "summary": f"found {len(matches)} agent presence rows",
+        "data": {"matches": matches, "count": len(matches)},
+    }
+
+
+@MCP.tool()
+@audited_tool("post_agent_message", "documentation", lambda *a, **k: "sync")
+def post_agent_message(
+    sender_agent: str,
+    recipient_agent: str,
+    body: str,
+    subject: str = "",
+    message_type: str = "INFO",
+    related_task_id: int = 0,
+    related_target_ip: str = "",
+    metadata_json: str = "{}",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Send a message from one agent to another via the shared message queue."""
+    record = STATE.post_message(
+        sender_agent=sender_agent,
+        recipient_agent=recipient_agent,
+        subject=subject,
+        message_type=message_type,
+        body=body,
+        related_task_id=related_task_id or None,
+        related_target_ip=related_target_ip,
+        metadata_json=metadata_json,
+    )
+    return {
+        "ok": True,
+        "tool": "post_agent_message",
+        "mode": "sync",
+        "summary": f"message queued for {recipient_agent}",
+        "data": record,
+    }
+
+
+@MCP.tool()
+@audited_tool("fetch_agent_messages", "passive", lambda *a, **k: "sync")
+def fetch_agent_messages(
+    recipient_agent: str,
+    status: str = "",
+    message_type: str = "",
+    mark_read: bool = False,
+    limit: int = 50,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Fetch messages for an agent. Optionally mark them as READ in one call."""
+    matches = STATE.fetch_messages(
+        recipient_agent=recipient_agent,
+        status=status,
+        message_type=message_type,
+        mark_read=mark_read,
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "tool": "fetch_agent_messages",
+        "mode": "sync",
+        "summary": f"found {len(matches)} messages for {recipient_agent}",
+        "data": {"matches": matches, "count": len(matches)},
+    }
+
+
+@MCP.tool()
+@audited_tool("ack_agent_message", "admin", lambda *a, **k: "sync")
+def ack_agent_message(message_id: int, recipient_agent: str, status: str = "ACKED", run_id: str = "") -> dict[str, Any]:
+    """Acknowledge or mark a message as READ, ACKED, or DONE."""
+    result = STATE.ack_message(message_id=message_id, recipient_agent=recipient_agent, status=status)
+    return {
+        "ok": bool(result.get("success")),
+        "tool": "ack_agent_message",
+        "mode": "sync",
+        "summary": result["message"],
+        "data": result,
+        "error": None if result.get("success") else {"code": "message_ack_failed", "message": result["message"]},
+    }
+
+
+# ─────────────────────────────────────────────
+# MUNIN EXTENSIONS — LDAP, Tavily, Hugin, forge, registry, munin_tools
+# Registered on the MCP instance defined above.
+# ─────────────────────────────────────────────
+
+from .tools import forge_tool  # noqa: E402,F401
+from .tools import graph_forge_tool  # noqa: E402,F401
+from .tools import hugin_tool  # noqa: E402,F401
+from .tools import ldap_tools  # noqa: E402,F401
+from .tools import munin_tools  # noqa: E402,F401
+from .tools import tavily_tool  # noqa: E402,F401
+from . import registry  # noqa: E402
+
+# Hot-load any tools previously forged by tool_forge, so they're available immediately.
+try:
+    registry.rehydrate(MCP, STATE, SETTINGS)
+except Exception as exc:  # pragma: no cover - guardrail; log and keep going
+    logger.warning("registry.rehydrate failed: %s", exc)
+
+
+# ─────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Munin MCP — OFFX + Munin extensions")
+    parser.add_argument("--transport", default="stdio", choices=("stdio", "sse", "streamable-http"))
+    parser.add_argument("--host", default=SETTINGS.mcp_host)
+    parser.add_argument("--port", type=int, default=SETTINGS.mcp_port)
+    args = parser.parse_args()
+    logger.info(
+        "starting munin-mcp transport=%s workspace=%s preflight_policy=%s",
+        args.transport,
+        SETTINGS.workspace_root,
+        SETTINGS.preflight_policy,
+    )
+    if args.transport == "stdio":
+        MCP.run()
+        return
+    MCP.settings.host = args.host
+    MCP.settings.port = args.port
+    if args.transport != "stdio" and not SETTINGS.mcp_auth_token:
+        logger.warning(
+            "MUNIN_MCP_AUTH_TOKEN is empty; MCP is exposed on %s:%s with NO authentication. "
+            "Set MUNIN_MCP_AUTH_TOKEN and put nginx/caddy in front with TLS + Bearer enforcement.",
+            args.host,
+            args.port,
+        )
+    MCP.run(args.transport)
+
+
+if __name__ == "__main__":
+    main()

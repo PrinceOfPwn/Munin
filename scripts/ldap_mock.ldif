@@ -1,0 +1,237 @@
+# Munin Mock LDAP — dominio dc=meli,dc=com
+# Contiene: usuarios normales, service accounts Kerberoastables,
+# usuarios AS-REP Roastables, grupos privilegiados y OUs.
+# Cargar con: ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=meli,dc=com" -w itachi -f ldap_mock.ldif
+
+# ── Organizational Units ──────────────────────────────────────────────────────
+
+dn: ou=users,dc=meli,dc=com
+objectClass: organizationalUnit
+ou: users
+description: Domain users
+
+dn: ou=groups,dc=meli,dc=com
+objectClass: organizationalUnit
+ou: groups
+description: Domain groups
+
+dn: ou=computers,dc=meli,dc=com
+objectClass: organizationalUnit
+ou: computers
+description: Domain computers
+
+dn: ou=service-accounts,dc=meli,dc=com
+objectClass: organizationalUnit
+ou: service-accounts
+description: Service and machine accounts
+
+# ── Regular users ─────────────────────────────────────────────────────────────
+
+dn: uid=jdoe,ou=users,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: jdoe
+cn: John Doe
+sn: Doe
+givenName: John
+mail: jdoe@meli.com
+uidNumber: 1001
+gidNumber: 1001
+homeDirectory: /home/jdoe
+loginShell: /bin/bash
+description: Senior Engineer — IT
+
+dn: uid=asmith,ou=users,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: asmith
+cn: Alice Smith
+sn: Smith
+givenName: Alice
+mail: asmith@meli.com
+uidNumber: 1002
+gidNumber: 1001
+homeDirectory: /home/asmith
+loginShell: /bin/bash
+description: DevOps Engineer
+
+dn: uid=rgarcia,ou=users,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: rgarcia
+cn: Roberto Garcia
+sn: Garcia
+givenName: Roberto
+mail: rgarcia@meli.com
+uidNumber: 1003
+gidNumber: 1001
+homeDirectory: /home/rgarcia
+loginShell: /bin/bash
+description: Junior Developer
+
+dn: uid=htarget,ou=users,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: htarget
+cn: Hugo Target
+sn: Target
+givenName: Hugo
+mail: htarget@meli.com
+uidNumber: 1004
+gidNumber: 1001
+homeDirectory: /home/htarget
+loginShell: /bin/bash
+description: AS-REP Roastable — DONT_REQ_PREAUTH simulado via description
+
+dn: uid=mlopez,ou=users,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: mlopez
+cn: Maria Lopez
+sn: Lopez
+givenName: Maria
+mail: mlopez@meli.com
+uidNumber: 1005
+gidNumber: 1001
+homeDirectory: /home/mlopez
+loginShell: /bin/bash
+description: HR Manager
+
+# ── Privileged user (Domain Admin) ────────────────────────────────────────────
+
+dn: uid=administrator,ou=users,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: administrator
+cn: Domain Administrator
+sn: Administrator
+givenName: Domain
+mail: administrator@meli.com
+uidNumber: 500
+gidNumber: 512
+homeDirectory: /home/administrator
+loginShell: /bin/bash
+description: Built-in domain administrator account
+
+# ── Service Accounts (Kerberoastable via description tag) ────────────────────
+# Note: OpenLDAP no tiene userAccountControl ni servicePrincipalName nativos.
+# Usamos description para marcarlos como kerberoastables en el mock.
+# Las tools de Munin buscan por objectClass y estos atributos en AD real.
+
+dn: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: svc_backup
+cn: Backup Service Account
+sn: svc_backup
+mail: svc_backup@meli.com
+uidNumber: 2001
+gidNumber: 2000
+homeDirectory: /var/lib/backup
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: MSSQLSvc/DBSERVER01.meli.com:1433
+
+dn: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: svc_mssql
+cn: MSSQL Service Account
+sn: svc_mssql
+mail: svc_mssql@meli.com
+uidNumber: 2002
+gidNumber: 2000
+homeDirectory: /var/lib/mssql
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: MSSQLSvc/SQL01.meli.com:1433
+
+dn: uid=svc_http,ou=service-accounts,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: svc_http
+cn: HTTP Service Account
+sn: svc_http
+mail: svc_http@meli.com
+uidNumber: 2003
+gidNumber: 2000
+homeDirectory: /var/www
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: HTTP/intranet.meli.com
+
+dn: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+uid: svc_jenkins
+cn: Jenkins CI Service Account
+sn: svc_jenkins
+mail: svc_jenkins@meli.com
+uidNumber: 2004
+gidNumber: 2000
+homeDirectory: /var/lib/jenkins
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: HTTP/jenkins.meli.com:8080
+
+# ── Groups ────────────────────────────────────────────────────────────────────
+
+dn: cn=Domain Admins,ou=groups,dc=meli,dc=com
+objectClass: groupOfNames
+cn: Domain Admins
+description: Members have full control of the domain
+member: uid=administrator,ou=users,dc=meli,dc=com
+member: uid=jdoe,ou=users,dc=meli,dc=com
+
+dn: cn=IT,ou=groups,dc=meli,dc=com
+objectClass: groupOfNames
+cn: IT
+description: IT department
+member: uid=jdoe,ou=users,dc=meli,dc=com
+member: uid=asmith,ou=users,dc=meli,dc=com
+
+dn: cn=Developers,ou=groups,dc=meli,dc=com
+objectClass: groupOfNames
+cn: Developers
+description: Development team
+member: uid=rgarcia,ou=users,dc=meli,dc=com
+member: uid=asmith,ou=users,dc=meli,dc=com
+
+dn: cn=Service Accounts,ou=groups,dc=meli,dc=com
+objectClass: groupOfNames
+cn: Service Accounts
+description: Service and automation accounts
+member: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_http,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
+
+dn: cn=HR,ou=groups,dc=meli,dc=com
+objectClass: groupOfNames
+cn: HR
+description: Human Resources
+member: uid=mlopez,ou=users,dc=meli,dc=com
+
+# ── Computers ─────────────────────────────────────────────────────────────────
+
+dn: cn=DC01,ou=computers,dc=meli,dc=com
+objectClass: device
+cn: DC01
+description: Primary Domain Controller — Windows Server 2022
+
+dn: cn=SQL01,ou=computers,dc=meli,dc=com
+objectClass: device
+cn: SQL01
+description: SQL Server — Windows Server 2019
+
+dn: cn=JENKINS01,ou=computers,dc=meli,dc=com
+objectClass: device
+cn: JENKINS01
+description: CI/CD Server — Ubuntu 22.04
+
+dn: cn=WS01,ou=computers,dc=meli,dc=com
+objectClass: device
+cn: WS01
+description: Developer Workstation
