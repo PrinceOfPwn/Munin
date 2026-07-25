@@ -454,7 +454,7 @@ function parseSlashCommand(input: string): {
   const stripped = input.replace(/^\//, "");
   const parts = stripped.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
   if (parts.length === 0) return { name: "", args: {} };
-  const name = parts[0];
+  const name = parts[0] || "";
   const args: Record<string, any> = {};
   for (let i = 1; i < parts.length; i++) {
     const p = parts[i];
