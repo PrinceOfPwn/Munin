@@ -8,7 +8,7 @@
 set -euo pipefail
 
 CONTAINER="munin_ldap_mock"
-IMAGE="bitnami/openldap:latest"
+IMAGE="osixia/openldap:1.5.0"
 HOST_PORT="${LDAP_MOCK_PORT:-389}"
 LDAP_ROOT="dc=meli,dc=com"
 ADMIN_PASS="itachi"
@@ -75,11 +75,13 @@ cmd_up() {
         log "Pulling ${IMAGE} and starting container..."
         docker run -d \
             --name "$CONTAINER" \
-            -p "${HOST_PORT}:1389" \
-            -e LDAP_ROOT="${LDAP_ROOT}" \
-            -e LDAP_ADMIN_USERNAME="admin" \
+            -p "${HOST_PORT}:389" \
+            -e LDAP_ORGANISATION="MELI" \
+            -e LDAP_DOMAIN="meli.com" \
+            -e LDAP_BASE_DN="${LDAP_ROOT}" \
             -e LDAP_ADMIN_PASSWORD="${ADMIN_PASS}" \
-            -e LDAP_SKIP_DEFAULT_TREE="yes" \
+            -e LDAP_CONFIG_PASSWORD="${ADMIN_PASS}" \
+            -e LDAP_TLS="false" \
             "$IMAGE"
     fi
 
