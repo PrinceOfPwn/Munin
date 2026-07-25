@@ -456,28 +456,4 @@ function ErrorBox({ message }: { message: string }) {
     </div>
   );
 }
-```
 
----
-
-## Notes on running
-
-1. **Install & run:**
-   ```bash
-   npm install
-   npm run dev
-   ```
-   Open `http://localhost:3000`.
-
-2. **Configure the server:** click the gear icon → set MCP Base URL (`http://localhost:8890`) and Bearer Token → **Test connection** → **Save**. On success the left sidebar shows a green dot and tool count, the Tool Explorer populates, and the right Live panel begins polling every 15s.
-
-3. **Chatting:** Type free text to converse (if Munin exposes a chat-style tool, it is called automatically; otherwise Munin replies with a thoughtful capability summary and instructs the user on slash-command syntax). Slash commands like `/ldap_who_am_i`, `/episodic_query limit=5`, or `/memory_remember key=foo value=bar` invoke tools directly with inline result cards.
-
-4. **Resilience:** Every panel handles a missing/unreachable MCP server with a raven empty-state and the last error string. The Live sidebar's MCP status dot turns red and shows the error inline.
-
-5. **Deviations from spec (deliberate, documented in README):**
-   - Soul "Propose edit" uses a styled `<textarea>` instead of CodeMirror 6 to keep the dependency surface minimal and the build reliable. The diff is still submitted to `soul_propose_edit` exactly as specified.
-   - `memory_forget` is attempted for fact deletion, falling back to `memory_remember` with an empty value if the tool is not present.
-   - Agent-message polling runs every 10s, episodic timeline every 30s, and the right Live panel every 15s — all as specified.
-
-The app requires zero backend changes — only Munin's MCP server at `localhost:8890` with a valid Bearer token.
