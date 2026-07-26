@@ -76,15 +76,31 @@ jobs:
             -D "cn=admin,dc=meli,dc=com" -w "itachi" \
             -f scripts/ldap_mock.ldif 2>&1 | tail -5 || true
 
+      - name: Build Next.js Frontend
+        run: |
+          if [ -d "app" ]; then
+            cd app
+            npm ci || npm install
+            npm run build
+          fi
+
       - name: Start Munin MCP
         run: |
           mkdir -p data soul
           # Lanzar con uvicorn directamente para poder pasar --proxy-headers y
           # --forwarded-allow-ips=* (necesario para que ngrok no de 421)
+          # y montar la app estática de Next.js en /
           nohup poetry run python3 -c "
+          from pathlib import Path
           import munin.mcp.main  # registra todas las tools
           import uvicorn
+          from starlette.staticfiles import StaticFiles
+
           app = munin.mcp.main.MCP.streamable_http_app()
+          static_dir = Path('app/out')
+          if static_dir.exists():
+              app.mount('/', StaticFiles(directory=str(static_dir), html=True), name='frontend')
+
           uvicorn.run(app, host='0.0.0.0', port=8890,
                       proxy_headers=True, forwarded_allow_ips='*')
           " > /tmp/munin.log 2>&1 &
