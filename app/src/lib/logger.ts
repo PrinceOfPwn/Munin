@@ -71,7 +71,7 @@ class Logger {
   }
 
   error(msg: string, err?: unknown, ...data: any[]) {
-    const args = [...fmt("error", this.namespace, msg)];
+    const args: any[] = [...fmt("error", this.namespace, msg)];
     if (err instanceof Error) {
       args.push("\n  message:", err.message);
       if (err.stack) args.push("\n  stack:", err.stack);
