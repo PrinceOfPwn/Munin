@@ -30,9 +30,9 @@ on:
         default: "off"
         type: choice
         options:
-          - off
-          - active_only
-          - always
+          - "off"
+          - "active_only"
+          - "always"
       munin_max_iterations:
         description: "MUNIN_MAX_ITERATIONS — leave blank for no cap"
         required: false
