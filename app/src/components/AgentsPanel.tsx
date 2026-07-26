@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, createContext, useContext } from "react";
 import {
   Users,
   Bell,
@@ -8,28 +8,63 @@ import {
   RefreshCw,
   Loader2,
   Play,
+  Activity,
 } from "lucide-react";
 import EmptyState from "./EmptyState";
 import StatusDot from "./StatusDot";
+import SubagentTrace from "./SubagentTrace";
 import { useMuninStore } from "@/store/muninStore";
 import { getMcpClient, extractToolResultContent } from "@/lib/mcp";
 import { relativeTime, localTime } from "@/lib/format";
 import type { AgentPresence, WakeItem } from "@/types/mcp";
 
+// Trace target context — a click on any presence / wake row sets the currently
+// observed subagent. The trace pane at the right listens.
+const TraceCtx = createContext<{ target: string; setTarget: (n: string) => void }>({
+  target: "",
+  setTarget: () => {},
+});
+
 export default function AgentsPanel() {
+  const [traceTarget, setTraceTarget] = useState<string>("");
+
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
-      <div className="border-b border-border px-4 py-3">
-        <h2 className="font-mono text-accent uppercase tracking-widest text-sm flex items-center gap-2">
-          <Users size={14} /> Agents
-        </h2>
+    <TraceCtx.Provider value={{ target: traceTarget, setTarget: setTraceTarget }}>
+      <div className="flex-1 flex min-h-0">
+        {/* Left column — presence / wake / messages */}
+        <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="font-mono text-accent uppercase tracking-widest text-sm flex items-center gap-2">
+              <Users size={14} /> Agents
+            </h2>
+            <p className="text-[10px] text-muted mt-1 font-mono">
+              Click any agent to watch its ReAct loop in real time.
+            </p>
+          </div>
+          <div className="p-4 space-y-6">
+            <PresenceSection />
+            <WakeSection />
+            <MessagesSection />
+          </div>
+        </div>
+
+        {/* Right column — live trace of the selected subagent */}
+        {traceTarget && (
+          <div className="w-[420px] shrink-0 border-l border-border bg-surface/30 p-3 min-h-0 flex flex-col">
+            <div className="text-[10px] uppercase tracking-widest text-muted font-mono mb-2 flex items-center gap-1.5">
+              <Activity size={12} /> Live trace
+            </div>
+            <div className="flex-1 min-h-0">
+              <SubagentTrace
+                subagent={traceTarget}
+                autoStart
+                onClose={() => setTraceTarget("")}
+              />
+            </div>
+          </div>
+        )}
       </div>
-      <div className="p-4 space-y-6">
-        <PresenceSection />
-        <WakeSection />
-        <MessagesSection />
-      </div>
-    </div>
+    </TraceCtx.Provider>
   );
 }
 
@@ -47,13 +82,7 @@ function PresenceSection() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("list_agent_presence", {});
       const { json } = extractToolResultContent(r);
-      const arr = Array.isArray(json)
-        ? json
-        : json && Array.isArray(json.presence)
-        ? json.presence
-        : json && Array.isArray(json.agents)
-        ? json.agents
-        : [];
+      const arr = Array.isArray(json?.data?.matches) ? json.data.matches : [];
       setRows(arr);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -98,12 +127,11 @@ function PresenceSection() {
                   : /IDLE/i.test(status)
                   ? "idle"
                   : "unknown";
+              const name = r.agent || (r as any).agent_name || r.name || "";
               return (
-                <tr key={i}>
+                <ClickableRow key={i} agent={name}>
                   <Td>
-                    <span className="font-mono text-body">
-                      {r.agent || r.name || "—"}
-                    </span>
+                    <span className="font-mono text-body">{name || "—"}</span>
                   </Td>
                   <Td>
                     <span className="flex items-center gap-1.5 text-xs">
@@ -123,10 +151,14 @@ function PresenceSection() {
                   </Td>
                   <Td>
                     <span className="text-muted text-xs">
-                      {r.last_seen ? relativeTime(r.last_seen) : "—"}
+                      {(r as any).last_seen_at
+                        ? relativeTime((r as any).last_seen_at)
+                        : r.last_seen
+                        ? relativeTime(r.last_seen)
+                        : "—"}
                     </span>
                   </Td>
-                </tr>
+                </ClickableRow>
               );
             })}
           </tbody>
@@ -154,13 +186,7 @@ function WakeSection() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("munin_wake_list", {});
       const { json } = extractToolResultContent(r);
-      const arr = Array.isArray(json)
-        ? json
-        : json && Array.isArray(json.items)
-        ? json.items
-        : json && Array.isArray(json.queue)
-        ? json.queue
-        : [];
+      const arr = Array.isArray(json?.data?.items) ? json.data.items : [];
       setRows(arr);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -180,8 +206,8 @@ function WakeSection() {
     try {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       await client.callTool("munin_wake", {
-        target_agent: wakeTarget.trim(),
-        task: wakeTask || undefined,
+        subagent: wakeTarget.trim(),
+        task_json: JSON.stringify({ prompt: wakeTask.trim() || "Continue your assigned mission." }),
         priority: wakePriority ? Number(wakePriority) : undefined,
       });
       setWakeTarget("");
@@ -281,17 +307,17 @@ function WakeSection() {
                 </Td>
                 <Td>
                   <span className="text-xs text-muted">
-                    {r.task || "—"}
+                    {typeof r.task === "string" ? r.task : JSON.stringify(r.task || {})}
                   </span>
                 </Td>
                 <Td>
                   <span className="text-xs text-amber">
-                    {r.status || "—"}
+                    {r.claimed_at ? "CLAIMED" : "QUEUED"}
                   </span>
                 </Td>
                 <Td>
                   <span className="text-xs text-muted">
-                    {r.claimed_by || "—"}
+                    {r.claimer_pid || "—"}
                   </span>
                 </Td>
               </tr>
@@ -309,24 +335,19 @@ function MessagesSection() {
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [agent, setAgent] = useState("");
+  const [agent, setAgent] = useState("munin");
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
-      const args: Record<string, any> = {};
-      if (agent.trim()) args.agent = agent.trim();
+      const args: Record<string, any> = {
+        recipient_agent: agent.trim() || "munin",
+      };
       const r = await client.callTool("fetch_agent_messages", args);
       const { json } = extractToolResultContent(r);
-      const arr = Array.isArray(json)
-        ? json
-        : json && Array.isArray(json.messages)
-        ? json.messages
-        : json && Array.isArray(json.items)
-        ? json.items
-        : [];
+      const arr = Array.isArray(json?.data?.matches) ? json.data.matches : [];
       setRows(arr);
     } catch (e: any) {
       setError(e?.message || String(e));
@@ -354,7 +375,7 @@ function MessagesSection() {
         <input
           value={agent}
           onChange={(e) => setAgent(e.target.value)}
-          placeholder="Filter by agent (leave empty for all)…"
+          placeholder="Recipient inbox (defaults to munin)…"
           className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm font-mono text-body focus:outline-none focus:border-accent/60"
         />
       </div>
@@ -371,22 +392,23 @@ function MessagesSection() {
               className="border-l-2 border-success/50 bg-surface/60 px-3 py-2 rounded-r"
             >
               <div className="flex items-center gap-2 text-[11px] text-muted font-mono">
-                {m.timestamp && <span>{localTime(m.timestamp)}</span>}
-                {m.from && (
+                {m.created_at && <span>{localTime(m.created_at)}</span>}
+                {m.sender_agent && (
                   <>
                     <span className="text-amber">·</span>
-                    <span className="text-ice">{m.from}</span>
+                    <span className="text-ice">{m.sender_agent}</span>
                   </>
                 )}
-                {m.to && (
+                {m.recipient_agent && (
                   <>
                     <span className="text-amber">→</span>
-                    <span className="text-ice">{m.to}</span>
+                    <span className="text-ice">{m.recipient_agent}</span>
                   </>
                 )}
+                <span className="uppercase">{m.message_type}</span>
               </div>
               <div className="text-sm text-body mt-0.5">
-                {m.content || m.message || m.text || JSON.stringify(m)}
+                {m.body || m.subject || JSON.stringify(m)}
               </div>
             </li>
           ))}
@@ -457,3 +479,25 @@ function ErrorBox({ message }: { message: string }) {
   );
 }
 
+/**
+ * A table row that becomes the current trace target when clicked. If the row
+ * has no agent name (unwakeable placeholder), rendering falls back to a plain
+ * <tr> so the row is still visible but non-interactive.
+ */
+function ClickableRow({ agent, children }: { agent: string; children: React.ReactNode }) {
+  const { target, setTarget } = useContext(TraceCtx);
+  if (!agent) return <tr>{children}</tr>;
+  const isActive = target === agent;
+  return (
+    <tr
+      onClick={() => setTarget(agent)}
+      className={
+        "cursor-pointer transition-colors " +
+        (isActive ? "bg-accent/10" : "hover:bg-surface/40")
+      }
+      title={`Trace ${agent} in real time`}
+    >
+      {children}
+    </tr>
+  );
+}
