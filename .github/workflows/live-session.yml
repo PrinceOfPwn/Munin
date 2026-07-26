@@ -36,6 +36,9 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Install system tools
+        run: sudo apt-get update && sudo apt-get install -y ldap-utils
+
       - name: Install Poetry
         run: pipx install poetry
 
@@ -55,11 +58,15 @@ jobs:
 
       - name: Wait for LDAP
         run: |
+          echo "Esperando LDAP..."
           for i in $(seq 1 30); do
-            ldapsearch -H ldap://localhost:389 -x \
+            if ldapsearch -H ldap://localhost:389 -x \
               -D "cn=admin,dc=meli,dc=com" -w "itachi" \
               -b "dc=meli,dc=com" "(objectClass=*)" dn 2>/dev/null \
-              | grep -q "result: 0" && echo "LDAP listo en ${i}s" && break
+              | grep -q "result: 0"; then
+              echo "LDAP listo en ${i}s"
+              break
+            fi
             sleep 1
           done
 
@@ -67,7 +74,7 @@ jobs:
         run: |
           ldapadd -H ldap://localhost:389 -x \
             -D "cn=admin,dc=meli,dc=com" -w "itachi" \
-            -f scripts/ldap_mock.ldif 2>&1 | tail -5
+            -f scripts/ldap_mock.ldif 2>&1 | tail -5 || true
 
       - name: Start Munin MCP
         run: |
@@ -75,12 +82,11 @@ jobs:
           nohup poetry run munin mcp \
             --transport streamable-http --host 0.0.0.0 --port 8890 \
             > /tmp/munin.log 2>&1 &
-          sleep 5
+          sleep 8
 
       - name: Verify Munin
         run: |
-          sleep 3
-          python3 -c "
+          python3 - <<'PYEOF'
           import os, json, urllib.request
 
           url = 'http://localhost:8890/mcp'
@@ -126,26 +132,89 @@ jobs:
                       tools = data.get('result', {}).get('tools', [])
                       print(f'OK — {len(tools)} tools registered')
                       break
-          "
+          PYEOF
 
       - name: Open public tunnel
-        run: bash scripts/open_tunnel.sh 8890
+        run: |
+          LOG=/tmp/tunnel.log
+          # Intentar localhost.run por SSH (sin instalar nada)
+          ssh -o StrictHostKeyChecking=no \
+              -o ServerAliveInterval=30 \
+              -o ConnectTimeout=10 \
+              -R "80:localhost:8890" \
+              plan.localhost.run 2>"$LOG" &
+          SSH_PID=$!
+          sleep 12
+          # Extraer URL del log (cualquier dominio de localhost.run)
+          TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9.-]+\.(lhr\.life|lhrtunnel\.link|lhr\.rocks)' "$LOG" 2>/dev/null | head -1)
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "localhost.run no funcionó, intentando cloudflared..."
+            BIN=/usr/local/bin/cloudflared
+            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" -o "$BIN" && chmod +x "$BIN"
+            "$BIN" tunnel --url "http://localhost:8890" --no-autoupdate 2>>"$LOG" &
+            for i in $(seq 1 30); do
+              TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$LOG" 2>/dev/null | head -1)
+              [ -n "$TUNNEL_URL" ] && break
+              sleep 2
+            done
+          fi
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "ERROR: No se pudo abrir tunnel"
+            cat "$LOG" >&2
+            exit 1
+          fi
+          echo "MUNIN_PUBLIC_URL=${TUNNEL_URL}" >> "$GITHUB_ENV"
+          echo "Tunnel URL: ${TUNNEL_URL}"
 
       - name: Print connection info
         run: |
           URL="${MUNIN_PUBLIC_URL}"
           TOKEN="${MUNIN_MCP_AUTH_TOKEN}"
-          echo "URL: ${URL}"
-          echo "Token: ${TOKEN}"
+          echo "============================================"
+          echo "  MUNIN EN VIVO"
+          echo "  URL  : ${URL}"
+          echo "  Token: ${TOKEN}"
+          echo "============================================"
           cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
-          ## Munin en vivo
-          | | |
-          |---|---|
-          | **URL** | \`${URL}\` |
-          | **Token** | \`${TOKEN}\` |
-          | **Duracion** | ${{ inputs.duration_minutes }} min |
+          ## Munin en vivo ✅
 
-          Test: \`curl -X POST ${URL}/mcp/ -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'\`
+          | Campo | Valor |
+          |-------|-------|
+          | **MCP URL** | \`${URL}/mcp\` |
+          | **Token** | \`${TOKEN}\` |
+          | **Duración** | ${{ inputs.duration_minutes }} min |
+
+          ### Conectar desde Claude Code (~/.claude.json)
+          \`\`\`json
+          {
+            "mcpServers": {
+              "munin": {
+                "type": "http",
+                "url": "${URL}/mcp",
+                "headers": { "Authorization": "Bearer ${TOKEN}" }
+              }
+            }
+          }
+          \`\`\`
+
+          ### Test rápido (curl)
+          \`\`\`bash
+          # Paso 1 - inicializar sesión y guardar session-id
+          SESSION=\$(curl -s -X POST ${URL}/mcp \\
+            -H "Authorization: Bearer ${TOKEN}" \\
+            -H "Content-Type: application/json" \\
+            -H "Accept: application/json, text/event-stream" \\
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}' \\
+            -D - | grep -i mcp-session-id | awk '{print \$2}' | tr -d '\r')
+
+          # Paso 2 - listar tools
+          curl -s -X POST ${URL}/mcp \\
+            -H "Authorization: Bearer ${TOKEN}" \\
+            -H "Content-Type: application/json" \\
+            -H "Accept: application/json, text/event-stream" \\
+            -H "mcp-session-id: \$SESSION" \\
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          \`\`\`
           SUMMARY
 
       - name: Keep alive
@@ -154,5 +223,7 @@ jobs:
       - name: Logs
         if: always()
         run: |
+          echo "=== Munin log ==="
           tail -50 /tmp/munin.log 2>/dev/null || true
+          echo "=== Tunnel log ==="
           cat /tmp/tunnel.log 2>/dev/null || true
