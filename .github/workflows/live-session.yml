@@ -79,10 +79,17 @@ jobs:
       - name: Start Munin MCP
         run: |
           mkdir -p data soul
-          nohup poetry run munin mcp \
-            --transport streamable-http --host 0.0.0.0 --port 8890 \
-            > /tmp/munin.log 2>&1 &
+          # Lanzar con uvicorn directamente para poder pasar --proxy-headers y
+          # --forwarded-allow-ips=* (necesario para que ngrok no de 421)
+          nohup poetry run python3 -c "
+          import munin.mcp.main  # registra todas las tools
+          import uvicorn
+          app = munin.mcp.main.MCP.streamable_http_app()
+          uvicorn.run(app, host='0.0.0.0', port=8890,
+                      proxy_headers=True, forwarded_allow_ips='*')
+          " > /tmp/munin.log 2>&1 &
           sleep 8
+
 
       - name: Verify Munin
         run: |
