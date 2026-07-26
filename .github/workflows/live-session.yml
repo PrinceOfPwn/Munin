@@ -93,13 +93,24 @@ jobs:
           nohup poetry run python3 -c "
           from pathlib import Path
           from starlette.middleware.base import BaseHTTPMiddleware
-          from starlette.middleware.cors import CORSMiddleware
+          from starlette.responses import Response
           import munin.mcp.main
           import uvicorn
           from starlette.staticfiles import StaticFiles
 
-          class HostFixMiddleware(BaseHTTPMiddleware):
+          class UniversalCorsMiddleware(BaseHTTPMiddleware):
               async def dispatch(self, request, call_next):
+                  if request.method == 'OPTIONS':
+                      return Response(
+                          status_code=200,
+                          headers={
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Methods': '*',
+                              'Access-Control-Allow-Headers': '*',
+                              'Access-Control-Max-Age': '86400',
+                          },
+                      )
+
                   headers = []
                   for k, v in request.scope.get('headers', []):
                       if k.lower() == b'host':
@@ -107,19 +118,16 @@ jobs:
                       else:
                           headers.append((k, v))
                   request.scope['headers'] = headers
+
                   response = await call_next(request)
+                  response.headers['Access-Control-Allow-Origin'] = '*'
+                  response.headers['Access-Control-Allow-Methods'] = '*'
+                  response.headers['Access-Control-Allow-Headers'] = '*'
                   response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
                   return response
 
           app = munin.mcp.main.MCP.streamable_http_app()
-          app.add_middleware(HostFixMiddleware)
-          app.add_middleware(
-              CORSMiddleware,
-              allow_origins=['*'],
-              allow_credentials=False,
-              allow_methods=['*'],
-              allow_headers=['*'],
-          )
+          app.add_middleware(UniversalCorsMiddleware)
           static_dir = Path('app/out')
           if static_dir.exists():
               app.mount('/', StaticFiles(directory=str(static_dir), html=True), name='frontend')
