@@ -111,10 +111,13 @@ jobs:
                           },
                       )
 
+                  # Strip origin and normalize host header in request.scope to bypass FastMCP internal checks
                   headers = []
                   for k, v in request.scope.get('headers', []):
                       if k.lower() == b'host':
                           headers.append((b'host', b'localhost:8890'))
+                      elif k.lower() == b'origin':
+                          continue
                       else:
                           headers.append((k, v))
                   request.scope['headers'] = headers
