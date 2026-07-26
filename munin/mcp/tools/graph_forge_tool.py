@@ -58,6 +58,11 @@ def graph_forge(
         reset_policy=reset_policy,
         created_by_agent=created_by_agent,
     )
+    from ..graph_persist import persist_graph_manifest  # noqa: PLC0415,TID252
+
+    record = STATE.graph_get(outcome["name"])
+    manifest_path = persist_graph_manifest(STATE.settings, record or outcome)
+    outcome["manifest_path"] = str(manifest_path)
     return {
         "ok": True,
         "tool": "graph_forge",
@@ -78,8 +83,8 @@ def list_generated_graphs(include_inactive: bool = False, run_id: str = "") -> d
 @MCP.tool()
 @audited_tool("describe_generated_graph", "passive", lambda *a, **k: "sync")
 def describe_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
-    """Return the full spec of a forged graph."""
-    graph = STATE.graph_get(name)
+    """Return the full spec of a forged graph (including dropped ones — this is introspection)."""
+    graph = STATE.graph_get(name, include_inactive=True)
     if not graph:
         return {"ok": False, "tool": "describe_generated_graph", "mode": "sync", "summary": "not found", "error": {"code": "not_found", "message": name}}
     return {"ok": True, "tool": "describe_generated_graph", "mode": "sync", "summary": name, "data": graph}
@@ -89,5 +94,11 @@ def describe_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
 @audited_tool("drop_generated_graph", "admin", lambda *a, **k: "sync")
 def drop_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
     """Deactivate a forged graph (soft delete)."""
+    graph = STATE.graph_get(name, include_inactive=True)
     ok = STATE.graph_drop(name)
+    if ok and graph:
+        from ..graph_persist import persist_graph_manifest  # noqa: PLC0415,TID252
+
+        graph["active"] = False
+        persist_graph_manifest(STATE.settings, graph)
     return {"ok": ok, "tool": "drop_generated_graph", "mode": "sync", "summary": f"drop {name}: {ok}", "data": {"name": name, "dropped": ok}}

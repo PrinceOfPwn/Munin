@@ -61,8 +61,8 @@ interface MuninState {
   updateToolCall: (messageId: string, callId: string, patch: Partial<ToolCall>) => void;
 }
 
-const DEFAULT_URL = typeof window !== "undefined" ? window.location.origin : "http://localhost:8890";
-const DEFAULT_TOKEN = "munin2024";
+const DEFAULT_URL = "http://localhost:8890";
+const DEFAULT_TOKEN = "";
 const L = log.store;
 
 function loadStoredConfig(): { url: string; token: string } {
@@ -454,10 +454,11 @@ function parseSlashCommand(input: string): {
   const stripped = input.replace(/^\//, "");
   const parts = stripped.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
   if (parts.length === 0) return { name: "", args: {} };
-  const name = parts[0] || "";
+  const name = parts[0] ?? "";
   const args: Record<string, any> = {};
   for (let i = 1; i < parts.length; i++) {
     const p = parts[i];
+    if (!p) continue;
     const eq = p.indexOf("=");
     if (eq === -1) {
       // positional — try to fill by index later; skip for now

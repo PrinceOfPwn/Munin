@@ -191,11 +191,30 @@ def _make_messaging_tools(state: SharedStateStore) -> dict[str, Callable]:
         matches = state.list_presence(stale_after_seconds=stale_after_seconds)
         return {"ok": True, "tool": "list_agent_presence", "summary": f"{len(matches)} agents", "data": {"agents": matches, "count": len(matches)}}
 
+    def upsert_agent_presence(
+        agent_name: str,
+        role: str = "",
+        status: str = "IDLE",
+        current_task_id: int = 0,
+        metadata_json: str = "{}",
+        run_id: str = "",
+    ) -> dict[str, Any]:
+        """Register or update this agent's presence in the shared coordination store."""
+        record = state.upsert_presence(
+            agent_name=agent_name,
+            role=role,
+            status=status,
+            current_task_id=current_task_id or None,
+            metadata_json=metadata_json,
+        )
+        return {"ok": True, "tool": "upsert_agent_presence", "summary": f"presence updated for {agent_name}", "data": record}
+
     return {
         "post_agent_message": post_agent_message,
         "fetch_agent_messages": fetch_agent_messages,
         "ack_agent_message": ack_agent_message,
         "list_agent_presence": list_agent_presence,
+        "upsert_agent_presence": upsert_agent_presence,
     }
 
 
@@ -248,9 +267,20 @@ def _make_intel_tools(state: SharedStateStore) -> dict[str, Callable]:
         )
         return {"ok": True, "tool": "query_shared_intel", "summary": f"{len(matches)} intel rows", "data": {"matches": matches, "count": len(matches)}}
 
+    def shared_state_overview(run_id: str = "") -> dict[str, Any]:
+        """Overview of the shared SQLite state: intel count, running tasks, agents, and unread messages."""
+        data = state.overview()
+        return {
+            "ok": True,
+            "tool": "shared_state_overview",
+            "summary": f"{data['intel_total']} intel rows, {data['tasks_running']} running tasks",
+            "data": data,
+        }
+
     return {
         "publish_shared_intel": publish_shared_intel,
         "query_shared_intel": query_shared_intel,
+        "shared_state_overview": shared_state_overview,
     }
 
 
@@ -327,16 +357,60 @@ def _make_task_tools(state: SharedStateStore) -> dict[str, Callable]:
 
 
 def _make_wake_tools(state: SharedStateStore) -> dict[str, Callable]:
+    """Wake tools exposed to subagents' ReAct catalogs.
+
+    Historical bug: this used to only enqueue into ``agent_wake_queue`` — no
+    runner subprocess was ever spawned, so subagents that woke other subagents
+    produced ghost items forever unclaimed. Now delegates to
+    :class:`Orchestrator.wake` which enqueues AND spawns the runner subprocess,
+    matching the behavior of the MCP-level ``munin_wake`` tool.
+    """
+    from ..core.orchestrator import Orchestrator  # noqa: PLC0415
+    from .runner import _NATIVE_SUBAGENTS  # noqa: PLC0415
+
+    orch = Orchestrator(state)
+
     def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: str = "") -> dict[str, Any]:
-        """Enqueue a wake request for another subagent."""
+        """Wake another subagent: enqueues the task AND spawns the runner subprocess."""
         if not subagent.strip():
             return {"ok": False, "tool": "munin_wake", "error": {"code": "bad_input", "message": "subagent name required"}}
         try:
             task = json.loads(task_json or "{}")
+            if not isinstance(task, dict):
+                raise ValueError("task_json must be an object")
         except Exception as exc:
             return {"ok": False, "tool": "munin_wake", "error": {"code": "bad_input", "message": str(exc)}}
-        wake_id = state.enqueue_wake(target_agent=subagent.strip(), task=task, priority=priority)
-        return {"ok": True, "tool": "munin_wake", "summary": f"wake queued for {subagent}", "data": {"wake_id": wake_id, "target_agent": subagent, "task": task}}
+
+        # Verify target exists — either as a native subagent or as a forged graph.
+        forged = None
+        try:
+            forged = state.graph_get(subagent.strip())
+        except Exception:
+            forged = None
+        if subagent.strip() not in _NATIVE_SUBAGENTS and not forged:
+            return {
+                "ok": False,
+                "tool": "munin_wake",
+                "error": {
+                    "code": "unknown_subagent",
+                    "message": (
+                        f"'{subagent}' is neither a native runner "
+                        f"({', '.join(sorted(_NATIVE_SUBAGENTS))}) nor a forged graph. "
+                        "Use graph_forge first."
+                    ),
+                },
+            }
+
+        try:
+            info = orch.wake(subagent.strip(), task, priority=int(priority) if priority is not None else 0, detached=True)
+        except Exception as exc:
+            return {"ok": False, "tool": "munin_wake", "error": {"code": "spawn_failed", "message": str(exc)}}
+        return {
+            "ok": True,
+            "tool": "munin_wake",
+            "summary": f"wake queued and runner spawned for {subagent} (pid={info.get('pid')})",
+            "data": {**info, "task": task},
+        }
 
     def munin_wake_list(subagent: str = "", include_claimed: bool = False, run_id: str = "") -> dict[str, Any]:
         """List pending (and optionally claimed) wake items."""
@@ -430,13 +504,40 @@ ALL_SUBAGENT_TOOL_NAMES: set[str] = {
 }
 
 
-def list_subagent_tools(category: str = "") -> dict[str, Any]:
+def list_subagent_tools(category: str = "", state: SharedStateStore | None = None) -> dict[str, Any]:
     """Return the full catalog of tools available to subagents, organized by category.
 
-    Use this before calling graph_forge to choose an appropriate tool_whitelist_csv.
-    Pass category= to filter (e.g. 'ldap', 'intel', 'memory', 'messaging').
+    Includes native tools AND every currently-registered generated tool
+    (``gen__*``). Munin should consult this before calling ``graph_forge`` so
+    the ``tool_whitelist`` it picks is grounded in what actually exists.
+
+    Pass ``category='forged'`` to see only the generated tools.
     """
-    entries = SUBAGENT_TOOL_REGISTRY
+    entries = list(SUBAGENT_TOOL_REGISTRY)
+
+    # Attach a synthetic "forged" category built from the procedural table.
+    # A forged subagent is only useful if it can invoke forged tools; the
+    # designer must see them alongside natives when deciding the whitelist.
+    if state is not None:
+        try:
+            from ..mcp import registry  # noqa: TID252,PLC0415
+            gen_rows = registry.list_generated(state)
+            if gen_rows:
+                entries.append({
+                    "category": "forged",
+                    "label": "Runtime-forged tools (via tool_forge)",
+                    "tools": [
+                        {
+                            "name": row["name"],
+                            "desc": row.get("description", "") or f"generated tool {row['name']}",
+                            "tags": row.get("tags", []),
+                        }
+                        for row in gen_rows
+                    ],
+                })
+        except Exception:
+            logger.exception("list_subagent_tools: failed to enumerate forged tools")
+
     if category.strip():
         entries = [e for e in entries if e["category"] == category.strip()]
     total = sum(len(e["tools"]) for e in entries)
@@ -477,13 +578,45 @@ _STATIC_TOOLS: dict[str, Callable[..., Any]] = {
 
 
 def build_tool_catalog(state: SharedStateStore, allowed_tools: set[str]) -> dict[str, Callable[..., Any]]:
-    """Build a tool catalog filtered to `allowed_tools`, bound to `state` for SQLite tools."""
+    """Build a tool catalog filtered to ``allowed_tools``, bound to ``state``.
+
+    Includes native tools (LDAP, intel, memory, messaging, tasks, wake) AND
+    generated tools registered in the ``procedural`` table. Previously the
+    catalog only had native tools — a forged subagent that listed ``gen__foo``
+    in its whitelist would silently get an empty catalog for that entry and
+    the ReAct loop couldn't invoke it, defeating the entire "Munin forges
+    tools, then uses them in a specialist subagent" flow.
+    """
     all_tools: dict[str, Callable[..., Any]] = dict(_STATIC_TOOLS)
     all_tools.update(_make_memory_tools(state))
     all_tools.update(_make_messaging_tools(state))
     all_tools.update(_make_intel_tools(state))
     all_tools.update(_make_task_tools(state))
     all_tools.update(_make_wake_tools(state))
+
+    # Attach generated tools that the subagent's whitelist wants. Only load the
+    # ones actually requested — no need to import every gen tool for every wake.
+    requested_gen = {name for name in allowed_tools if name.startswith("gen__")}
+    if requested_gen:
+        try:
+            from ..mcp import registry  # noqa: TID252,PLC0415
+            from pathlib import Path as _Path  # noqa: PLC0415
+            all_gen = {row["name"]: row for row in registry.list_generated(state)}
+            for name in requested_gen:
+                row = all_gen.get(name)
+                if not row:
+                    logger.warning("subagent requested %s but it is not in procedural table", name)
+                    continue
+                sig = row.get("signature") or {}
+                fn_name = sig.get("function_name") or name.removeprefix("gen__")
+                try:
+                    fn = registry._load_callable(_Path(row["script_path"]), fn_name)
+                    all_tools[name] = fn
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("could not load generated tool %s: %s", name, exc)
+        except Exception:
+            logger.exception("build_tool_catalog: failed to attach gen__ tools")
+
     return {k: v for k, v in all_tools.items() if k in allowed_tools}
 
 
@@ -559,13 +692,66 @@ class ReActSubagentBase:
 
         final_content = ""
         tool_calls_log: list[dict[str, Any]] = []
+        # Track the outcome so we can honestly report ok=False to the parent
+        # when the LLM crashed or the loop exhausted. Historical bug: this
+        # function returned ok=True unconditionally, so the runner posted
+        # RESULT (success) to `munin` even for failed subtasks — corrupting
+        # every downstream decision that relied on the outcome signal.
+        stop_reason = "final_answer"
+        subagent_ok = True
 
         for step in range(self.max_iterations):
+            # Human-in-the-loop and inter-agent guidance is consumed between
+            # ReAct steps. A message posted while a tool is running therefore
+            # becomes context for the very next model decision.
+            inbox = self.state.fetch_messages(
+                recipient_agent=self.name,
+                status="NEW",
+                limit=100,
+                mark_read=True,
+            )
+            cancelled = False
+            for item in inbox:
+                sender = item.get("sender_agent", "operator")
+                message_type = str(item.get("message_type", "INFO")).upper()
+                body = str(item.get("body", "")).strip()
+                if message_type == "CONTROL" and body.lower() in {
+                    "cancel",
+                    "stop",
+                    "abort",
+                    "cancel task",
+                }:
+                    cancelled = True
+                    final_content = f"Task cancelled by {sender}."
+                    stop_reason = "human_cancelled"
+                    subagent_ok = False
+                    break
+                if body:
+                    messages.append({
+                        "role": "user",
+                        "content": f"[Live guidance from {sender} | {message_type}]\n{body}",
+                    })
+                self.state.episodic_record(
+                    agent=self.name,
+                    action="human_guidance" if sender in {"human", "operator"} else "agent_guidance",
+                    input_data={
+                        "message_id": item.get("id"),
+                        "sender": sender,
+                        "message_type": message_type,
+                        "body": body,
+                    },
+                    tags=["human-in-the-loop", "message"],
+                )
+            if cancelled:
+                break
+
             try:
                 completion = self.llm.chat(messages=messages, tools=specs, temperature=0.2)
             except Exception as exc:
                 logger.error("%s: LLM call failed at step %d: %s", self.name, step, exc)
                 final_content = f"(LLM error: {exc})"
+                stop_reason = "llm_error"
+                subagent_ok = False
                 break
 
             message = completion["choices"][0]["message"]
@@ -585,6 +771,15 @@ class ReActSubagentBase:
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
                 final_content = message.get("content", "") or ""
+                if not final_content.strip():
+                    # LLM emitted neither tool_calls nor content — that's a
+                    # failure to make progress, not a successful terminal answer.
+                    # Without this branch, `handle_task` returned ok=True with
+                    # empty data and the runner posted RESULT (masking the fault).
+                    stop_reason = "empty_response"
+                    subagent_ok = False
+                else:
+                    stop_reason = "final_answer"
                 break
 
             for call in tool_calls:
@@ -593,6 +788,24 @@ class ReActSubagentBase:
                     args = json.loads(call["function"].get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+
+                # PROGRESS message: post an INFO message to munin BEFORE the
+                # tool call executes so the frontend / operator sees "about to
+                # do X" in real time. The final RESULT still fires when the
+                # whole handle_task returns.
+                try:
+                    self.state.post_message(
+                        sender_agent=self.name,
+                        recipient_agent="munin",
+                        subject=f"step {step}: {tool_name}",
+                        message_type="PROGRESS",
+                        body=json.dumps({"tool": tool_name, "args": args, "step": step}, ensure_ascii=True, default=str)[:1500],
+                        related_task_id=None,
+                        related_target_ip="",
+                        metadata_json=json.dumps({"subagent": self.name, "step": step, "tool": tool_name}, ensure_ascii=True),
+                    )
+                except Exception as exc:  # pragma: no cover — best effort
+                    logger.debug("progress post failed: %s", exc)
 
                 fn = catalog.get(tool_name)
                 t0 = time.monotonic()
@@ -639,24 +852,40 @@ class ReActSubagentBase:
                 })
         else:
             final_content = "(max iterations reached)"
+            stop_reason = "max_iterations"
+            subagent_ok = False  # hitting the cap without an answer is a FAILURE
 
         self.state.episodic_record(
             agent=self.name,
             action="task_done",
-            output_data={"content": final_content[:2000], "steps": step + 1},
+            output_data={
+                "content": final_content[:2000],
+                "steps": step + 1,
+                "stop_reason": stop_reason,
+                "ok": subagent_ok,
+            },
             tags=["react"],
         )
         self._set_presence("IDLE")
 
-        return {
-            "ok": True,
+        result: dict[str, Any] = {
+            "ok": subagent_ok,
             "summary": final_content[:120] if final_content else "(no response)",
             "data": {
                 "content": final_content,
                 "tool_calls": tool_calls_log,
                 "iterations": step + 1,
+                "stop_reason": stop_reason,
             },
         }
+        if not subagent_ok:
+            # Surface a structured error so the runner posts ERROR (not RESULT)
+            # and parent Munin can filter by message_type.
+            result["error"] = {
+                "code": stop_reason,
+                "message": final_content,
+            }
+        return result
 
 
 # Legacy alias — keeps existing code that subclasses ReActSubagent working
