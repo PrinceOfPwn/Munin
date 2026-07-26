@@ -22,3 +22,11 @@ def isolated_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (tmp_path / "soul").mkdir(parents=True, exist_ok=True)
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
     return tmp_path
+
+
+@pytest.fixture
+def store(isolated_workspace: Path):
+    from munin.mcp.config import get_settings
+    from munin.mcp.shared_state import SharedStateStore
+
+    return SharedStateStore(get_settings())

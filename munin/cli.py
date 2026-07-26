@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import click
+from dotenv import load_dotenv
 
 from .mcp.config import get_settings, redact_settings
 from .mcp.shared_state import SharedStateStore
@@ -21,6 +22,7 @@ logger = logging.getLogger("munin.cli")
 @click.group()
 def cli() -> None:
     """Munin — ReAct offensive-security agent with soul + memory + MCP."""
+    load_dotenv(override=False)
 
 
 # ---------------------------------------------------------------------------

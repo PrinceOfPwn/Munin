@@ -24,6 +24,7 @@ from ..mcp.config import Settings, get_settings
 from ..mcp.shared_state import SharedStateStore
 from ..mcp import registry
 from ..mcp.tools import (
+    diagnostics_tool,
     forge_tool,
     graph_forge_tool,
     hugin_tool,
@@ -43,18 +44,22 @@ from .soul import SoulManager
 
 logger = logging.getLogger("munin.agent")
 
-# Tools added to the main agent catalog via state-bound wrappers (no global STATE needed)
+# Tools added to the main agent catalog via state-bound wrappers (no global STATE needed).
+# Added `shared_state_overview` — previously registered on MCP but invisible to the agent
+# (bug documented in .ai/diagnostic_prompt.md).
 _DYNAMIC_TOOL_NAMES: set[str] = {
     "post_agent_message",
     "fetch_agent_messages",
     "ack_agent_message",
     "list_agent_presence",
+    "upsert_agent_presence",
     "publish_shared_intel",
     "query_shared_intel",
     "claim_shared_task",
     "complete_shared_task",
     "heartbeat_shared_task",
     "list_shared_tasks",
+    "shared_state_overview",
 }
 
 
@@ -78,11 +83,13 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "hugin_refresh": hugin_tool.hugin_refresh,
     # Munin self-inspection & diagnostics
     "munin_self_diagnose": munin_tools.munin_self_diagnose,
-    "munin_read_source": munin_tools.munin_read_source,
+    "munin_diagnostics":   diagnostics_tool.munin_diagnostics,
+    "munin_read_source":   munin_tools.munin_read_source,
     # Munin tools
     "list_generated_tools": munin_tools.list_generated_tools,
     "describe_generated_tool": munin_tools.describe_generated_tool,
     "run_generated_tool": munin_tools.run_generated_tool,
+    "deactivate_generated_tool": munin_tools.deactivate_generated_tool,
     "soul_read": munin_tools.soul_read,
     "soul_list": munin_tools.soul_list,
     "soul_propose_edit": munin_tools.soul_propose_edit,
@@ -92,6 +99,7 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "episodic_query": munin_tools.episodic_query,
     "munin_wake": munin_tools.munin_wake,
     "munin_wake_list": munin_tools.munin_wake_list,
+    "subagent_trace": munin_tools.subagent_trace,
     # Forging + graph design
     "tool_forge": forge_tool.tool_forge,
     "graph_forge": graph_forge_tool.graph_forge,
@@ -149,8 +157,34 @@ class MuninAgent:
     # ------------------------------------------------------------------
     # Loop
     # ------------------------------------------------------------------
-    def respond(self, user_input: str, *, max_iterations: int = 8) -> dict[str, Any]:
+    #
+    # ReAct iteration budget.
+    #
+    # By default there is NO fixed cap — the loop runs until the LLM stops calling
+    # tools (natural termination) or MUNIN_MAX_ITERATIONS is set explicitly in the
+    # environment. Callers can pass ``max_iterations=N`` per request to bound a
+    # specific chat. The runaway-protection is a very high hard ceiling (10_000)
+    # so a genuinely broken model can't spin the box forever, but for practical
+    # offensive workflows this ceiling is unreachable.
+    #
+    # Tool results are NOT truncated when fed back to the LLM. If the model's
+    # context is exceeded, the LLM API will report it — better than silently
+    # hiding evidence the model needs (dump_domain_structure, cve_enrich, etc.).
+    _HARD_CEILING = 10_000
+
+    def respond(self, user_input: str, *, max_iterations: int | None = None) -> dict[str, Any]:
         import time
+        import os
+
+        if max_iterations is None:
+            env_val = os.environ.get("MUNIN_MAX_ITERATIONS", "").strip()
+            if env_val:
+                try:
+                    max_iterations = int(env_val)
+                except ValueError:
+                    max_iterations = self._HARD_CEILING
+            else:
+                max_iterations = self._HARD_CEILING  # effectively "no limit"
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt()},
@@ -159,30 +193,72 @@ class MuninAgent:
         self.memory.log_step(agent="munin", action="user_input", input_data={"text": user_input}, tags=["dialog"])
         final_content = ""
         tool_calls_log: list[dict[str, Any]] = []
+        stop_reason = "unknown"
+        step = -1
+
+        # Repetition guard — catches stuck ReAct loops.
+        #
+        # Two failure modes we defend against:
+        #   (a) Same tool + same args, N times in a row. Classic "model can't
+        #       decide what to do next".
+        #   (b) Alternating loop A → B → A → B → A → B forever. The naive
+        #       "same fingerprint N times consecutively" test misses this; we
+        #       widen the window to WINDOW_SIZE and require the window to have
+        #       fewer than MIN_UNIQUE distinct fingerprints to trip.
+        #
+        # Sizing: WINDOW_SIZE=6, MIN_UNIQUE=3 means "over the last 6 tool calls,
+        # the model touched at most 2 distinct (tool,args) — that's a loop."
+        # Legitimate exploration of a small space (e.g. querying LDAP for 3
+        # different users) has ≥3 distinct fingerprints in any 6-call window.
+        WINDOW_SIZE = 6
+        MIN_UNIQUE = 3
+        recent_calls: list[str] = []
+        nudged_once = False
 
         for step in range(max_iterations):
             catalog = self._current_catalog()
             specs = _tool_specs(catalog)
-            completion = self.llm.chat(messages=messages, tools=specs, temperature=0.2)
+            try:
+                completion = self.llm.chat(messages=messages, tools=specs, temperature=0.2)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("LLM call failed at step %d", step)
+                final_content = f"LLM error at step {step}: {exc}"
+                stop_reason = "llm_error"
+                break
             message = completion["choices"][0]["message"]
             messages.append(message)
+            content_now = (message.get("content") or "").strip()
             self.memory.log_step(
                 agent="munin",
                 action="react_step",
                 input_data={"step": step},
-                output_data={"tool_calls": len(message.get("tool_calls") or []), "content_snippet": (message.get("content") or "")[:400]},
+                output_data={
+                    "tool_calls": len(message.get("tool_calls") or []),
+                    "content_snippet": content_now[:400],
+                },
                 tags=["react"],
             )
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
-                final_content = message.get("content", "") or ""
+                # Natural stop — LLM has decided to speak instead of tool-call.
+                final_content = content_now
+                stop_reason = "final_answer"
                 break
+
+            # Keep the running content in case we hit the iteration cap mid-tool-loop —
+            # then we can still return the last thing the LLM said, not just "(max reached)".
+            if content_now:
+                final_content = content_now
+
+            # Track fingerprints for repetition detection.
+            step_fingerprints: list[str] = []
             for call in tool_calls:
                 tool_name = call["function"]["name"]
                 try:
                     args = json.loads(call["function"].get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                step_fingerprints.append(f"{tool_name}::{json.dumps(args, sort_keys=True, default=str)}")
                 fn = catalog.get(tool_name)
                 t0 = time.monotonic()
                 if not fn:
@@ -193,6 +269,7 @@ class MuninAgent:
                     except TypeError as exc:
                         tool_result = {"ok": False, "error": {"code": "bad_args", "message": str(exc)}}
                     except Exception as exc:  # noqa: BLE001
+                        logger.exception("tool %s crashed", tool_name)
                         tool_result = {"ok": False, "error": {"code": "tool_crashed", "message": str(exc)}}
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 self.memory.log_step(
@@ -202,7 +279,7 @@ class MuninAgent:
                     output_data={"ok": tool_result.get("ok"), "summary": tool_result.get("summary")},
                     tags=["tool"],
                 )
-                # Record for the caller (frontend tool-call cards)
+                # Record for the caller (frontend tool-call cards) — untruncated.
                 entry: dict[str, Any] = {
                     "name": tool_name,
                     "arguments": args,
@@ -215,16 +292,84 @@ class MuninAgent:
                 else:
                     entry["error"] = tool_result.get("error", {"code": "error", "message": str(tool_result)})
                 tool_calls_log.append(entry)
+                # Feed FULL result back to LLM. If context becomes an issue, the LLM
+                # itself will report it — better than silently hiding evidence.
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call["id"],
                         "name": tool_name,
-                        "content": json.dumps(tool_result, ensure_ascii=True, default=str)[:8000],
+                        "content": json.dumps(tool_result, ensure_ascii=True, default=str),
                     }
                 )
-        else:
-            final_content = "(max iterations reached)"
 
-        self.memory.log_step(agent="munin", action="final_response", output_data={"content": final_content[:2000]}, tags=["dialog"])
-        return {"content": final_content, "iterations": step + 1, "tool_calls": tool_calls_log}
+            # Repetition guard — check AFTER executing this iteration's tool_calls.
+            recent_calls.extend(step_fingerprints)
+            if len(recent_calls) > WINDOW_SIZE:
+                recent_calls = recent_calls[-WINDOW_SIZE:]
+
+            # Trip when window is full AND has too few distinct fingerprints.
+            # This catches both:
+            #   - full identical repeats (unique_count = 1)
+            #   - alternating A/B loops (unique_count = 2)
+            unique_count = len(set(recent_calls))
+            if len(recent_calls) >= WINDOW_SIZE and unique_count < MIN_UNIQUE:
+                tools_seen = sorted({c.split("::")[0] for c in recent_calls})
+                if not nudged_once:
+                    logger.warning(
+                        "repetition detected: last %d calls used only %d distinct fingerprint(s) across tools %s — nudging model",
+                        len(recent_calls), unique_count, tools_seen,
+                    )
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                f"NOTICE: over your last {len(recent_calls)} tool calls you only "
+                                f"used {unique_count} distinct (tool, arguments) combination(s) "
+                                f"({tools_seen}). You appear to be looping. Change your approach: "
+                                "call a different tool, change the arguments substantively, or "
+                                "produce your final answer if the evidence is sufficient."
+                            ),
+                        }
+                    )
+                    nudged_once = True
+                    # Do NOT clear recent_calls — keep the window so if the
+                    # model ignores the nudge and produces the same repetitive
+                    # pattern on the very next iteration, the ELSE branch
+                    # aborts immediately instead of waiting for 6 more calls.
+                else:
+                    logger.error("repetition persists after nudge — aborting loop")
+                    stop_reason = "repetition_detected"
+                    if not final_content:
+                        final_content = (
+                            f"(aborted after {step + 1} iterations — model looped on "
+                            f"{tools_seen} despite a corrective nudge; unique fingerprints={unique_count})"
+                        )
+                    break
+        else:
+            # for-else: loop exhausted without a natural break.
+            stop_reason = "max_iterations"
+            if not final_content:
+                final_content = (
+                    f"(max iterations reached after {max_iterations} steps — "
+                    f"executed {len(tool_calls_log)} tool calls; no final answer yet)"
+                )
+
+        # Persist a short marker but keep the full content in the response payload.
+        self.memory.log_step(
+            agent="munin",
+            action="final_response",
+            output_data={
+                "content_length": len(final_content),
+                "content_snippet": final_content[:2000],
+                "stop_reason": stop_reason,
+                "iterations": step + 1,
+            },
+            tags=["dialog"],
+        )
+        return {
+            "content": final_content,
+            "iterations": step + 1,
+            "tool_calls": tool_calls_log,
+            "stop_reason": stop_reason,
+        }

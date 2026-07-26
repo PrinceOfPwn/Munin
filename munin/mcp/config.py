@@ -28,7 +28,7 @@ class Settings:
 
     # --- Passive intel providers ---
     tavily_api_key: str = ""
-    hugin_url: str = "https://princeofpwn.github.io/Hugin/data/entities.json"
+    hugin_url: str = "https://raw.githubusercontent.com/PrinceOfPwn/Hugin/main/hugin/graph.json"
     hugin_ttl_seconds: int = 900
 
     # --- LDAP ---
@@ -51,6 +51,13 @@ class Settings:
     # --- Munin paths ---
     munin_soul_path: Path = field(default_factory=lambda: Path("./soul"))
     munin_data_path: Path = field(default_factory=lambda: Path("./data"))
+
+    # --- Persistence backend ---
+    # Empty → local sqlite file at munin_data_path/shared_state.sqlite (default).
+    # ``libsql://<host>`` + ``MUNIN_DB_AUTH_TOKEN`` → Turso embedded replica.
+    # ``file:/abs/path`` → explicit local file path.
+    db_url: str = ""
+    db_auth_token: str = ""
 
     @property
     def runs_root(self) -> Path:
@@ -76,6 +83,10 @@ class Settings:
     def generated_tools_dir(self) -> Path:
         return self.workspace_root / "munin" / "generated"
 
+    @property
+    def generated_graphs_dir(self) -> Path:
+        return self.generated_tools_dir / "graphs"
+
     def ensure_workspace(self) -> None:
         for path in (
             self.workspace_root,
@@ -90,6 +101,7 @@ class Settings:
             self.munin_data_path,
             self.munin_soul_path,
             self.generated_tools_dir,
+            self.generated_graphs_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -129,7 +141,7 @@ def get_settings() -> Settings:
         tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip(),
         hugin_url=os.environ.get(
             "HUGIN_URL",
-            "https://princeofpwn.github.io/Hugin/data/entities.json",
+            "https://raw.githubusercontent.com/PrinceOfPwn/Hugin/main/hugin/graph.json",
         ).strip(),
         hugin_ttl_seconds=int(os.environ.get("HUGIN_TTL_SECONDS", "900")),
         # LDAP
@@ -142,10 +154,16 @@ def get_settings() -> Settings:
         # MCP
         mcp_host=os.environ.get("MUNIN_MCP_HOST", "127.0.0.1").strip(),
         mcp_port=int(os.environ.get("MUNIN_MCP_PORT", "8890")),
-        mcp_auth_token=os.environ.get("MUNIN_MCP_AUTH_TOKEN", ""),
+        # .strip() protects against a common footgun: `.env` files often leave a
+        # trailing newline on the last line. Without strip, `hmac.compare_digest`
+        # rejects every valid Bearer request because "abc\n" != "abc".
+        mcp_auth_token=os.environ.get("MUNIN_MCP_AUTH_TOKEN", "").strip(),
         # Munin paths
         munin_soul_path=_resolve_path("MUNIN_SOUL_PATH", workspace / "soul"),
         munin_data_path=_resolve_path("MUNIN_DATA_PATH", workspace / "data"),
+        # Persistence — empty falls back to local file
+        db_url=os.environ.get("MUNIN_DB_URL", "").strip(),
+        db_auth_token=os.environ.get("MUNIN_DB_AUTH_TOKEN", "").strip(),
     )
     settings.ensure_workspace()
     return settings
@@ -169,4 +187,5 @@ def redact_settings(settings: Settings) -> Settings:
         nvd_api_key="***REDACTED***" if settings.nvd_api_key else "",
         ldap_password="***REDACTED***" if settings.ldap_password else "",
         mcp_auth_token="***REDACTED***" if settings.mcp_auth_token else "",
+        db_auth_token="***REDACTED***" if settings.db_auth_token else "",
     )

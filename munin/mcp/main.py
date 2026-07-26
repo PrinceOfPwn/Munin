@@ -4,9 +4,12 @@ import argparse
 import functools
 import logging
 import os
+import re
 import shlex
 import signal
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,8 +35,79 @@ else:
     from .syncer import WikiGitSyncer
     from .utils import parse_targets, shell_join, split_extra_args, utc_now_iso
 
-logging.basicConfig(level=logging.INFO, format="[munin-mcp] %(levelname)s %(message)s")
+# Structured logging — every line is prefixed with [munin-mcp] LEVEL + tool trace id.
+# Set MUNIN_LOG_LEVEL=DEBUG in .env for verbose call tracing.
+_LOG_LEVEL = os.environ.get("MUNIN_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    format="[munin-mcp] %(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger("munin-mcp")
+
+
+# ---- Secret redaction for tool argument logging ----
+# Any kwarg NAME matching one of these keywords gets its VALUE redacted before
+# the audit log records it. Additional per-value pattern scrubbing runs on
+# free-form strings (Bearer tokens, api keys) to catch cases where a secret
+# ends up embedded inside a compound argument (e.g. an entire curl command).
+_SECRET_KEY_PATTERNS = re.compile(r"(pass|passwd|password|token|api[_-]?key|secret|bearer|authorization)", re.IGNORECASE)
+_SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]+"),
+    re.compile(r"sk-[A-Za-z0-9]{16,}"),
+    re.compile(r"gsk_[A-Za-z0-9]{16,}"),
+    re.compile(r"nvapi-[A-Za-z0-9]{16,}"),
+    re.compile(r"tvly-[A-Za-z0-9]{16,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{16,}"),
+    re.compile(r"\"api_key\"\s*:\s*\"[^\"]+\""),
+)
+
+
+def _redact_scalar(value: Any) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for pat in _SECRET_VALUE_PATTERNS:
+            redacted = pat.sub("[REDACTED]", redacted)
+        return redacted
+    return value
+
+
+def _redact_args(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of kwargs with secrets redacted. Never mutates input."""
+    redacted: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        if _SECRET_KEY_PATTERNS.search(key):
+            redacted[key] = "[REDACTED]" if value else ""
+        else:
+            redacted[key] = _redact_scalar(value)
+    return redacted
+
+
+def _redact_payload(value: Any) -> Any:
+    """Recursively redact secrets before durable tool traces reach SQLite/Turso."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if _SECRET_KEY_PATTERNS.search(str(key)) and item else _redact_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_payload(item) for item in value]
+    return _redact_scalar(value)
+
+
+def _bounded_trace_payload(value: Any) -> Any:
+    redacted = _redact_payload(value)
+    import json
+
+    rendered = json.dumps(redacted, ensure_ascii=True, default=str)
+    if len(rendered) <= SETTINGS.max_output_chars:
+        return redacted
+    return {
+        "truncated": True,
+        "original_chars": len(rendered),
+        "preview": rendered[: SETTINGS.max_output_chars],
+    }
+
 
 SETTINGS = get_settings()
 ENGINE = ExecutionEngine(SETTINGS)
@@ -107,9 +181,10 @@ def _etime_to_seconds(etime: str) -> int:
     return days * 86400 + h * 3600 + m * 60 + s
 
 
-ORPHANS_KILLED = _kill_orphaned_stdio_processes()
-if ORPHANS_KILLED:
-    logger.info("killed %d orphaned stdio processes at startup", ORPHANS_KILLED)
+# Orphan cleanup moved into main() — running it at import time SIGTERM'd any
+# long-lived stdio Munin process on the host every time this module was imported,
+# including tests, `poetry run munin --help`, IDE static analysis, etc.
+ORPHANS_KILLED = 0
 
 
 def _artifact_path(run_id: str, *parts: str) -> Path:
@@ -154,6 +229,20 @@ def audited_tool(
     level: str,
     mode_resolver: Callable[..., str] | None = None,
 ) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
+    """Wrap a tool function with audit logging, structured console logging, and a
+    per-call trace id (visible in server logs so a slow/broken tool call can be
+    matched against the corresponding audit event).
+
+    Structured console log — one line at INFO on entry, one line at INFO on exit:
+
+        munin-mcp INFO [<trace_id>] → ldap_search args={...}
+        munin-mcp INFO [<trace_id>] ← ldap_search ok=True 42ms summary="ldap_search: 14 entries"
+
+    On error we also DEBUG the traceback with the trace_id. Exceptions thrown by
+    the wrapped function no longer bubble up — they're captured, converted to a
+    structured error result (see ``_result_from_exception``), and the exception
+    is logged at ERROR level with the trace_id so the operator can grep for it.
+    """
     def decorator(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -165,10 +254,36 @@ def audited_tool(
                 kwargs.get("target") or kwargs.get("url") or kwargs.get("targets") or kwargs.get("cve_id") or ""
             )
             source_context = "munin-mcp"
+            trace_id = uuid.uuid4().hex[:8]
+            t0 = time.monotonic()
+            log_args = _redact_args({k: v for k, v in kwargs.items() if k != "run_id"})
+            logger.info("[%s] → %s args=%s", trace_id, tool_name, log_args)
+
             try:
                 result = func(*args, **kwargs)
             except Exception as exc:  # pragma: no cover - guardrail
+                logger.exception("[%s] ✗ %s raised: %s", trace_id, tool_name, exc)
                 result = _result_from_exception(tool_name, exc, mode=mode)
+
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            ok = bool(result.get("ok", False))
+            summary = result.get("summary", "")
+            if ok:
+                logger.info(
+                    "[%s] ← %s ok=True %dms summary=%r", trace_id, tool_name, elapsed_ms, summary[:200]
+                )
+            else:
+                err = result.get("error") or {}
+                logger.warning(
+                    "[%s] ← %s ok=False %dms code=%s summary=%r",
+                    trace_id, tool_name, elapsed_ms, err.get("code", "?"), summary[:200],
+                )
+
+            # Stash the trace_id in the result so callers (frontend, CLI) can quote it
+            # when reporting bugs. Never overwrite an existing key.
+            result.setdefault("trace_id", trace_id)
+            result.setdefault("elapsed_ms", elapsed_ms)
+
             artifacts = result.get("artifacts", []) or []
             data = result.get("data", {}) or {}
             try:
@@ -177,19 +292,39 @@ def audited_tool(
                     tool=tool_name,
                     level=level,
                     mode=mode,
-                    status="ok" if result.get("ok", False) else "error",
+                    status="ok" if ok else "error",
                     target=target,
                     source_context=source_context,
-                    command_or_params={k: v for k, v in kwargs.items() if k != "run_id"},
+                    command_or_params=log_args,  # redacted
                     job_id=result.get("job_id", ""),
                     artifacts=artifacts,
                     opsec_preflight=data.get("opsec_preflight", {}),
                     started_at=started_at,
                     finished_at=utc_now_iso(),
-                    summary=result.get("summary", ""),
+                    summary=summary,
                 )
             except Exception as audit_exc:
-                logger.warning("AUDIT.record failed for %s: %s", tool_name, audit_exc)
+                logger.warning("[%s] AUDIT.record failed for %s: %s", trace_id, tool_name, audit_exc)
+            try:
+                STATE.episodic_record(
+                    agent=str(
+                        kwargs.get("source_agent")
+                        or kwargs.get("created_by_agent")
+                        or kwargs.get("sender_agent")
+                        or "munin-mcp"
+                    ),
+                    action=f"tool:{tool_name}",
+                    input_data=log_args,
+                    output_data=_bounded_trace_payload(result),
+                    tags=["tool", level, mode],
+                )
+            except Exception as persistence_exc:
+                logger.warning(
+                    "[%s] persistent trace failed for %s: %s",
+                    trace_id,
+                    tool_name,
+                    persistence_exc,
+                )
             return result
 
         return wrapper
@@ -1193,6 +1328,7 @@ def ack_agent_message(message_id: int, recipient_agent: str, status: str = "ACKE
 # Registered on the MCP instance defined above.
 # ─────────────────────────────────────────────
 
+from .tools import diagnostics_tool  # noqa: E402,F401
 from .tools import forge_tool  # noqa: E402,F401
 from .tools import graph_forge_tool  # noqa: E402,F401
 from .tools import hugin_tool  # noqa: E402,F401
@@ -1200,6 +1336,14 @@ from .tools import ldap_tools  # noqa: E402,F401
 from .tools import munin_tools  # noqa: E402,F401
 from .tools import tavily_tool  # noqa: E402,F401
 from . import registry  # noqa: E402
+
+# Rebuild the DB catalog from versioned graph manifests before runners resolve names.
+try:
+    from .graph_persist import rehydrate_graph_manifests  # noqa: E402
+
+    rehydrate_graph_manifests(STATE, SETTINGS)
+except Exception as exc:  # pragma: no cover - guardrail; log and keep going
+    logger.warning("graph manifest rehydrate failed: %s", exc)
 
 # Hot-load any tools previously forged by tool_forge, so they're available immediately.
 try:
@@ -1213,31 +1357,166 @@ except Exception as exc:  # pragma: no cover - guardrail; log and keep going
 # ─────────────────────────────────────────────
 
 
+def _make_auth_middleware(expected_token: str) -> Callable[..., Any]:
+    """ASGI middleware that enforces Bearer token auth on every HTTP request.
+
+    Returns a middleware factory. Rejects requests whose ``Authorization`` header
+    doesn't match ``Bearer <expected_token>``. Uses a constant-time comparison
+    (``hmac.compare_digest``) so brute forcing over the wire is not viable.
+
+    Requests without a token get 401. Requests with a wrong token get 403. Both
+    responses are minimal JSON to avoid leaking anything. WebSocket / SSE frames
+    piggyback on the initial handshake — once accepted the middleware doesn't
+    re-check every message (FastMCP handles session correlation).
+
+    This closes a real gap: FastMCP has NO built-in auth. Before this middleware,
+    setting MUNIN_MCP_AUTH_TOKEN only affected a startup warning; the port was
+    open to anyone on the network.
+    """
+    import hmac
+
+    async def _reject(send: Any, status: int, msg: str) -> None:
+        body = f'{{"error":"{msg}","status":{status}}}'.encode()
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    def middleware_factory(app: Callable[..., Any]) -> Callable[..., Any]:
+        async def middleware(scope: dict[str, Any], receive: Any, send: Any) -> None:
+            # Only guard HTTP (and WebSocket handshakes); pass everything else through.
+            if scope.get("type") not in ("http", "websocket"):
+                await app(scope, receive, send)
+                return
+
+            headers = dict(scope.get("headers") or [])
+            auth = headers.get(b"authorization", b"").decode("latin-1", "replace")
+            if not auth:
+                logger.warning("auth: request %s without Authorization header", scope.get("path", "?"))
+                await _reject(send, 401, "authorization required")
+                return
+            if not auth.startswith("Bearer "):
+                await _reject(send, 401, "bearer scheme required")
+                return
+            provided = auth[len("Bearer "):].strip()
+            if not hmac.compare_digest(provided, expected_token):
+                logger.warning("auth: bearer token mismatch on %s", scope.get("path", "?"))
+                await _reject(send, 403, "invalid bearer token")
+                return
+            await app(scope, receive, send)
+
+        return middleware
+
+    return middleware_factory
+
+
+def _install_signal_handlers() -> None:
+    """Log SIGTERM/SIGINT clearly so operators can distinguish a clean shutdown from a crash.
+
+    FastMCP handles the actual shutdown; we just log so the operator sees the reason
+    in the server logs, which matters when the process is being managed by systemd,
+    Docker, or a GitHub Actions timeout that will SIGTERM us.
+    """
+    def _handler(signum: int, _frame: Any) -> None:
+        name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        logger.info("received %s — shutting down cleanly", name)
+        # Give the git-persist worker a chance to ship queued commits BEFORE the
+        # process dies. Local dev with MUNIN_AUTO_COMMIT off returns immediately.
+        try:
+            from .git_persist import flush as _flush_git  # noqa: PLC0415
+            _flush_git(timeout=20.0)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("git_persist.flush failed during shutdown: %s", exc)
+        # Let the default handler proceed. FastMCP + uvicorn handle the graceful stop.
+        # For stdio transport, raise KeyboardInterrupt so MCP.run() returns.
+        raise SystemExit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError):
+            # Non-main thread or unsupported signal — skip silently.
+            pass
+
+
 def main() -> None:
+    global ORPHANS_KILLED  # noqa: PLW0603 — module-level state exposed to callers
+
     parser = argparse.ArgumentParser(description="Munin MCP — OFFX + Munin extensions")
     parser.add_argument("--transport", default="stdio", choices=("stdio", "sse", "streamable-http"))
     parser.add_argument("--host", default=SETTINGS.mcp_host)
     parser.add_argument("--port", type=int, default=SETTINGS.mcp_port)
     args = parser.parse_args()
+
+    _install_signal_handlers()
+
+    # Orphan cleanup runs ONLY when we're actually starting the server, not on
+    # every import. Skip for stdio transport in the common IDE-attach case
+    # (Claude Code / Cursor spawn stdio Munin processes; we'd kill ourselves).
+    ORPHANS_KILLED = _kill_orphaned_stdio_processes()
+    if ORPHANS_KILLED:
+        logger.info("killed %d orphaned stdio processes at startup", ORPHANS_KILLED)
+
+    from .persistence import describe_backend  # noqa: PLC0415 — lazy to avoid load-time cost
     logger.info(
-        "starting munin-mcp transport=%s workspace=%s preflight_policy=%s",
+        "starting munin-mcp transport=%s workspace=%s preflight_policy=%s log_level=%s db=%s",
         args.transport,
         SETTINGS.workspace_root,
         SETTINGS.preflight_policy,
+        _LOG_LEVEL,
+        describe_backend(SETTINGS.db_url) if SETTINGS.db_url else f"sqlite({SETTINGS.shared_state_db})",
     )
     if args.transport == "stdio":
-        MCP.run()
+        try:
+            MCP.run()
+        except SystemExit:
+            pass
         return
+
     MCP.settings.host = args.host
     MCP.settings.port = args.port
-    if args.transport != "stdio" and not SETTINGS.mcp_auth_token:
-        logger.warning(
-            "MUNIN_MCP_AUTH_TOKEN is empty; MCP is exposed on %s:%s with NO authentication. "
-            "Set MUNIN_MCP_AUTH_TOKEN and put nginx/caddy in front with TLS + Bearer enforcement.",
-            args.host,
-            args.port,
-        )
-    MCP.run(args.transport)
+
+    # Enforce Bearer token auth on every HTTP request when a token is set. If
+    # the token is empty we refuse to start unless MUNIN_MCP_ALLOW_ANON=1 is
+    # exported — an anonymous MCP server on a public tunnel is a real
+    # exposure and we don't want it happening by accident.
+    if args.transport != "stdio":
+        if not SETTINGS.mcp_auth_token:
+            if os.environ.get("MUNIN_MCP_ALLOW_ANON", "0") != "1":
+                logger.error(
+                    "MUNIN_MCP_AUTH_TOKEN is empty. Refusing to start HTTP transport on %s:%s "
+                    "without a token. Set MUNIN_MCP_AUTH_TOKEN in .env, or override with "
+                    "MUNIN_MCP_ALLOW_ANON=1 if you really want anonymous access (dev only).",
+                    args.host, args.port,
+                )
+                raise SystemExit(2)
+            logger.warning(
+                "MUNIN_MCP_ALLOW_ANON=1 — starting with NO authentication on %s:%s.",
+                args.host, args.port,
+            )
+        else:
+            # Wrap FastMCP's ASGI app with our bearer-check middleware.
+            # Capture the wrapped app ONCE — a naive `lambda: middleware(original())`
+            # would re-instantiate the app (and its lifespan / session manager)
+            # every time FastMCP internally accesses the property.
+            middleware = _make_auth_middleware(SETTINGS.mcp_auth_token)
+            if args.transport == "streamable-http":
+                wrapped_app = middleware(MCP.streamable_http_app())
+                MCP.streamable_http_app = lambda: wrapped_app  # type: ignore[method-assign]
+            elif args.transport == "sse":
+                wrapped_app = middleware(MCP.sse_app())
+                MCP.sse_app = lambda: wrapped_app  # type: ignore[method-assign]
+            logger.info("bearer-token auth middleware installed on %s transport", args.transport)
+
+    try:
+        MCP.run(args.transport)
+    except SystemExit:
+        pass
+    except Exception:
+        logger.exception("munin-mcp crashed")
+        raise
 
 
 if __name__ == "__main__":
