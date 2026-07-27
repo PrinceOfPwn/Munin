@@ -27,14 +27,12 @@ import json
 import logging
 import os
 import time
-from typing import Any, Callable, TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any
 
 from ..mcp.audit import redact_secrets
-from ..mcp.shared_state import SharedStateStore
+from ..mcp.shared_state import SharedStateStore, presence_metadata
 from ..mcp.tools import hugin_tool, ldap_tools, tavily_tool
-
-if TYPE_CHECKING:
-    from ..core.llm_client import LLMClient
 
 logger = logging.getLogger("munin.subagent")
 
@@ -575,6 +573,7 @@ _STATIC_TOOLS: dict[str, Callable[..., Any]] = {
     "tavily_search": tavily_tool.tavily_search,
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
+    "hugin_neighbors": hugin_tool.hugin_neighbors,
 }
 
 
@@ -601,7 +600,6 @@ def build_tool_catalog(state: SharedStateStore, allowed_tools: set[str]) -> dict
     if requested_gen:
         try:
             from ..mcp import registry  # noqa: TID252,PLC0415
-            from pathlib import Path as _Path  # noqa: PLC0415
             all_gen = {row["name"]: row for row in registry.list_generated(state)}
             for name in requested_gen:
                 row = all_gen.get(name)
@@ -611,7 +609,10 @@ def build_tool_catalog(state: SharedStateStore, allowed_tools: set[str]) -> dict
                 sig = row.get("signature") or {}
                 fn_name = sig.get("function_name") or name.removeprefix("gen__")
                 try:
-                    fn = registry._load_callable(_Path(row["script_path"]), fn_name)
+                    fn = registry._load_callable(
+                        registry.resolve_script_path(state.settings, row["script_path"]),
+                        fn_name,
+                    )
                     all_tools[name] = registry.wrap_generated_callable(
                         fn,
                         tool_name=name,
@@ -664,7 +665,7 @@ class ReActSubagentBase:
             role=self.role,
             status=status,
             current_task_id=task_id,
-            metadata_json=json.dumps({"pid": self.pid}, ensure_ascii=True),
+            metadata_json=json.dumps(presence_metadata(self.pid), ensure_ascii=True),
         )
 
     # ------------------------------------------------------------------

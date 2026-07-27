@@ -51,6 +51,7 @@ on:
 
 # Required so Munin can commit forged tools + open soul-proposal PRs.
 permissions:
+  actions: read
   contents: write
   pull-requests: write
 
@@ -105,6 +106,9 @@ jobs:
       MUNIN_GIT_USER:     "munin-bot"
       MUNIN_GIT_EMAIL:    "munin-bot@users.noreply.github.com"
       MUNIN_GIT_BRANCH:   "munin/session-${{ github.run_id }}"
+      MUNIN_PR_BASE_BRANCH: ${{ github.ref_name }}
+      MUNIN_INSTANCE_ID:  "github-run-${{ github.run_id }}-${{ github.run_attempt }}"
+      GH_TOKEN:           ${{ github.token }}
       # Storage backend. Leave MUNIN_DB_URL empty to use local SQLite (default,
       # ephemeral across sessions unless persist_state=true rounds it via
       # artifact). Set it as a repo secret if you want to point at a Turso /
@@ -123,13 +127,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Restore the most recent shared_state.sqlite from a previous run so
-      # Munin's episodic/semantic memory and generated tool catalog survive
-      # across sessions. This is the "poor man's Turso" — free-tier
-      # persistence via GH artifacts. When MUNIN_DB_URL points at a real
-      # libsql/Turso database, this step is a no-op (Turso already persists).
-      - name: Restore Munin state from last session (artifact)
-        if: ${{ inputs.persist_state && env.MUNIN_DB_URL == '' }}
+      # Turso persists registry rows, but generated Python/JSON sources still
+      # need to cross ephemeral runner boundaries. Restore the full durable
+      # file set in both SQLite and Turso modes.
+      - name: Restore Munin durable files from last session
+        if: ${{ inputs.persist_state }}
         id: state_restore
         continue-on-error: true
         uses: dawidd6/action-download-artifact@v6
@@ -137,24 +139,24 @@ jobs:
           workflow: live-session.yml
           workflow_conclusion: ""      # accept success or failure — we want the freshest state
           name: munin-state
-          path: data/
+          path: .
           if_no_artifact_found: warn
 
       - name: Show restored state summary
-        if: ${{ inputs.persist_state && env.MUNIN_DB_URL == '' }}
+        if: ${{ inputs.persist_state }}
         run: |
           if [ -f data/shared_state.sqlite ]; then
               echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
-          else
-              echo "· No previous state artifact — Munin starts fresh."
           fi
+          restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
+          echo "✓ Restored ${restored_sources} generated source file(s)"
 
       - name: Install Munin runtime + offensive toolchain
         run: |
           apt-get update -qq
           apt-get install -y --no-install-recommends \
               python3 python3-pip python3-venv python3-poetry \
-              ca-certificates curl git pipx ldap-utils \
+              ca-certificates curl gh git pipx ldap-utils \
               build-essential libldap2-dev libsasl2-dev libssl-dev golang-go \
               nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec \
               httpx-toolkit exploitdb eyewitness
@@ -369,10 +371,19 @@ jobs:
 
           Quick test:
           \`\`\`bash
-          curl -X POST ${URL}/mcp/ \\
+          HEADERS=\$(mktemp)
+          curl -sS -D "\${HEADERS}" -o /tmp/munin-init.json -X POST ${URL}/mcp/ \\
               -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
               -H "Content-Type: application/json" \\
-              -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'
+              -H "Accept: application/json, text/event-stream" \\
+              -d '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"munin-smoke","version":"1.0"}}}'
+          SESSION_ID=\$(awk 'tolower(\$1)=="mcp-session-id:" {gsub("\\r","",\$2); print \$2}' "\${HEADERS}")
+          curl -sS -X POST ${URL}/mcp/ \\
+              -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
+              -H "Content-Type: application/json" \\
+              -H "Accept: application/json, text/event-stream" \\
+              -H "mcp-session-id: \${SESSION_ID}" \\
+              -d '{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
           \`\`\`
           SUMMARY
 
@@ -425,16 +436,15 @@ jobs:
               git add munin/generated/ soul/ data/soul_pending/ 2>/dev/null || true
               if ! git diff --staged --quiet; then
                   git commit -m "[munin][session-end] flush pending forge artifacts (${GITHUB_RUN_ID})" || true
-                  git checkout -B "${MUNIN_GIT_BRANCH}" 2>/dev/null || true
-                  git push -u origin "${MUNIN_GIT_BRANCH}" || echo "final push failed (non-fatal)"
               fi
           fi
+          git checkout -B "${MUNIN_GIT_BRANCH}" 2>/dev/null || true
+          git push -u origin "${MUNIN_GIT_BRANCH}" || echo "final push failed (non-fatal)"
 
-      # Persist SQLite state so the NEXT session resumes where this one left
-      # off. Only fires when persist_state=true AND we're on file SQLite
-      # (Turso already persists remotely, so this becomes a no-op).
-      - name: Upload Munin state (soul + memory + forge registry)
-        if: always() && inputs.persist_state && env.MUNIN_DB_URL == ''
+      # Turso stores rows; this artifact stores the generated Python/JSON
+      # sources those rows reference. In SQLite mode it also carries the DB.
+      - name: Upload Munin durable state and generated sources
+        if: always() && inputs.persist_state
         uses: actions/upload-artifact@v4
         with:
           name: munin-state
@@ -444,6 +454,7 @@ jobs:
             data/shared_state.sqlite-shm
             data/soul_pending/
             data/wake_artifacts/
+            munin/generated/
           retention-days: 90
           if-no-files-found: warn
 

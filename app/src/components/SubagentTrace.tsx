@@ -116,11 +116,17 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
       }
     };
 
-    tick();
-    const id = window.setInterval(tick, 1500);
+    let timeoutId: number | undefined;
+    const poll = async () => {
+      await tick();
+      if (!cancelled) {
+        timeoutId = window.setTimeout(poll, 1500);
+      }
+    };
+    void poll();
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     };
     // NOTE: intentionally NOT listing cursor/pollCount refs here — they're refs.
     // Only re-arm the interval on ACTUAL config change or pause toggle.
