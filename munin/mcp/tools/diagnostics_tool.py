@@ -169,13 +169,16 @@ def _probe_recon_binaries() -> dict[str, Any]:
 
 def _probe_hugin(deep: bool) -> dict[str, Any]:
     """Cache freshness check; optionally refresh."""
-    from .hugin_tool import _cache_age_seconds, _load_cached, _refresh  # noqa: PLC0415
-    cached_count = len(_load_cached())
-    age = _cache_age_seconds()
+    from .hugin_tool import _load_cached, _refresh  # noqa: PLC0415
+
+    bundle, age, is_stale = _load_cached(allow_stale=True)
+    entities = bundle.get("entities", []) if isinstance(bundle, dict) else []
+    cached_count = len(entities) if isinstance(entities, list) else 0
     result: dict[str, Any] = {
         "ok": cached_count > 0,
         "cached_entities": cached_count,
         "cache_age_seconds": age,
+        "cache_stale": is_stale,
         "primary_url": SETTINGS.hugin_url,
     }
     if deep:

@@ -90,7 +90,7 @@ def deactivate_generated_tool(name: str, run_id: str = "") -> dict[str, Any]:
     the response was ``ok=False`` with a generic summary, which the frontend
     couldn't distinguish from a real deactivation failure.
     """
-    ok = registry.deactivate(STATE, name)
+    ok = registry.deactivate(MCP, STATE, name)
     if not ok:
         return {
             "ok": False,
@@ -182,36 +182,49 @@ def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: 
             elif _shutil.which("gh") is None:
                 pr_info = {"attempted": True, "ok": False, "error": "gh_cli_not_installed"}
             else:
-                _ensure_git_identity(repo)
                 branch = f"soul-proposal/{Path(path).stem}-{digest}"
-                # Write the proposal DIRECTLY to soul/<path> on the branch, then commit.
-                _run_git(["checkout", "-B", branch], cwd=repo, check=False)
-                target = (repo / "soul" / path).resolve()
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(new_content, encoding="utf-8")
-                _run_git(["add", str(target)], cwd=repo)
-                commit_msg = f"[munin][soul-proposal] {path}\n\n{rationale or '(no rationale supplied)'}\n\nsha256: {digest}"
-                _run_git(["commit", "-m", commit_msg], cwd=repo, check=False)
-                _run_git(["push", "-u", "origin", branch], cwd=repo, check=False)
-                # Create PR (labels are optional; if the label doesn't exist gh warns but PR is created).
-                pr_body = (
-                    f"### Soul edit proposal by Munin\n\n"
-                    f"**File:** `soul/{path}`\n"
-                    f"**sha256:** `{digest}`\n"
-                    f"**Rationale:** {rationale or '(no rationale supplied)'}\n\n"
-                    "Merge to update Munin's identity. This branch is auto-generated — do not commit further work here."
-                )
-                pr = _subprocess.run(
-                    ["gh", "pr", "create",
-                     "--title", f"soul: {path} update",
-                     "--body", pr_body,
-                     "--label", "soul-proposal"],
-                    cwd=repo, capture_output=True, text=True, timeout=60, check=False,
-                )
-                if pr.returncode == 0:
-                    pr_info = {"attempted": True, "ok": True, "branch": branch, "output": pr.stdout.strip()}
-                else:
-                    pr_info = {"attempted": True, "ok": False, "error": (pr.stderr or pr.stdout).strip()[-400:]}
+                import tempfile as _tempfile  # noqa: PLC0415
+
+                # Build the proposal in a disposable worktree. The live process
+                # rereads soul/ on every turn, so its checkout must stay untouched.
+                with _tempfile.TemporaryDirectory(prefix="munin-soul-proposal-") as temporary_dir:
+                    worktree = Path(temporary_dir) / "worktree"
+                    _run_git(["worktree", "add", "--detach", str(worktree), "HEAD"], cwd=repo)
+                    try:
+                        _ensure_git_identity(worktree)
+                        _run_git(["checkout", "-B", branch], cwd=worktree)
+                        target = (worktree / "soul" / path).resolve()
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(new_content, encoding="utf-8")
+                        _run_git(["add", "--", str(target)], cwd=worktree)
+                        commit_msg = f"[munin][soul-proposal] {path}\n\n{rationale or '(no rationale supplied)'}\n\nsha256: {digest}"
+                        commit = _run_git(["commit", "-m", commit_msg], cwd=worktree, check=False)
+                        if commit.returncode != 0:
+                            raise RuntimeError((commit.stderr or commit.stdout).strip()[-400:])
+                        pushed = _run_git(["push", "-u", "origin", branch], cwd=worktree, check=False)
+                        if pushed.returncode != 0:
+                            raise RuntimeError((pushed.stderr or pushed.stdout).strip()[-400:])
+                        pr_body = (
+                            f"### Soul edit proposal by Munin\n\n"
+                            f"**File:** `soul/{path}`\n"
+                            f"**sha256:** `{digest}`\n"
+                            f"**Rationale:** {rationale or '(no rationale supplied)'}\n\n"
+                            "Merge to update Munin's identity. This branch is auto-generated — do not commit further work here."
+                        )
+                        pr = _subprocess.run(
+                            ["gh", "pr", "create",
+                             "--head", branch,
+                             "--title", f"soul: {path} update",
+                             "--body", pr_body,
+                             "--label", "soul-proposal"],
+                            cwd=worktree, capture_output=True, text=True, timeout=60, check=False,
+                        )
+                        if pr.returncode == 0:
+                            pr_info = {"attempted": True, "ok": True, "branch": branch, "output": pr.stdout.strip()}
+                        else:
+                            pr_info = {"attempted": True, "ok": False, "error": (pr.stderr or pr.stdout).strip()[-400:]}
+                    finally:
+                        _run_git(["worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
         except Exception as exc:  # pragma: no cover — best effort
             pr_info = {"attempted": True, "ok": False, "error": f"exception: {exc}"}
 
@@ -593,6 +606,8 @@ def munin_wake_list(subagent: str = "", include_claimed: bool = False, run_id: s
 def subagent_trace(
     subagent: str,
     since_id: int = 0,
+    since_event_id: int | None = None,
+    since_message_id: int | None = None,
     include_messages: bool = True,
     limit: int = 200,
     run_id: str = "",
@@ -607,7 +622,9 @@ def subagent_trace(
     Parameters
     ----------
     subagent : agent_name to filter by (e.g. 'ldap_agent' or a forged graph name).
-    since_id : return only events with id > since_id. Pass 0 for a full history dump.
+    since_id : legacy cursor applied to both streams when stream-specific cursors are omitted.
+    since_event_id : return only episodic events with id above this cursor.
+    since_message_id : return only agent messages with id above this cursor.
     include_messages : also include agent_messages this subagent posted to munin.
     limit    : maximum number of events + messages returned.
 
@@ -617,7 +634,8 @@ def subagent_trace(
         {
           "events":  [{id, ts, action, input, output, tags}, ...],   # ordered by id ASC
           "messages":[{id, created_at, type, subject, body, status}, ...],
-          "next_since_id": <last event id seen>,
+          "next_event_id": <last event id seen>,
+          "next_message_id": <last message id seen>,
           "presence": {status, last_seen_at, current_task_id},
         }
     """
@@ -625,12 +643,14 @@ def subagent_trace(
         return {"ok": False, "tool": "subagent_trace", "mode": "sync",
                 "summary": "empty subagent", "error": {"code": "bad_input", "message": "subagent required"}}
     since_id_int = _coerce_int(since_id, 0)
+    event_since = _coerce_int(since_event_id, since_id_int) if since_event_id is not None else since_id_int
+    message_since = _coerce_int(since_message_id, since_id_int) if since_message_id is not None else since_id_int
     limit_int = _coerce_int(limit, 200)
 
     # Use the incremental helpers — truly append-only, no lost middle for long runs.
     events = STATE.episodic_since(
         agent=subagent.strip(),
-        since_id=since_id_int,
+        since_id=event_since,
         limit=max(1, min(limit_int, 1000)),
     )
 
@@ -640,7 +660,7 @@ def subagent_trace(
         messages_out = STATE.messages_from_sender_since(
             sender_agent=subagent.strip(),
             recipient_agent="munin",
-            since_id=since_id_int,
+            since_id=message_since,
             limit=max(1, min(limit_int, 500)),
         )
 
@@ -648,17 +668,23 @@ def subagent_trace(
     presence_rows = STATE.list_presence(stale_after_seconds=3600)
     presence = next((p for p in presence_rows if p["agent_name"] == subagent.strip()), None)
 
-    next_since = events[-1]["id"] if events else since_id_int
+    next_event = events[-1]["id"] if events else event_since
+    next_message = messages_out[-1]["id"] if messages_out else message_since
     return {
         "ok": True,
         "tool": "subagent_trace",
         "mode": "sync",
-        "summary": f"{len(events)} events, {len(messages_out)} msgs since id={since_id_int} for {subagent}",
+        "summary": (
+            f"{len(events)} events since {event_since}, "
+            f"{len(messages_out)} msgs since {message_since} for {subagent}"
+        ),
         "data": {
             "subagent": subagent.strip(),
             "events": events,
             "messages": messages_out,
-            "next_since_id": next_since,
+            "next_event_id": next_event,
+            "next_message_id": next_message,
+            "next_since_id": next_event,
             "presence": presence,
         },
     }

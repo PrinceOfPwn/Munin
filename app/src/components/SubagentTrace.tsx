@@ -37,8 +37,8 @@ interface TraceMessage {
 /**
  * Live view of a subagent's ReAct loop.
  *
- * Polls `subagent_trace(subagent, since_id)` every 1.5s and appends new events
- * / messages to a scrollable stream. The human doesn't control the subagent —
+ * Polls `subagent_trace` with independent event/message cursors every 1.5s
+ * and appends both streams to a scrollable view. The human doesn't control the subagent —
  * they observe it in real time so they can decide whether to intervene at the
  * task level (e.g. cancel the wake, ask Munin something else).
  *
@@ -65,7 +65,8 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
   // listed as a dep, so every tick tore down and re-armed the interval,
   // firing another tick immediately. Net result: request storm ~every RTT
   // instead of the intended 1.5s.
-  const sinceIdRef = useRef(0);
+  const eventSinceIdRef = useRef(0);
+  const messageSinceIdRef = useRef(0);
   const pollCountRef = useRef(0);
 
   useEffect(() => {
@@ -77,7 +78,8 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
         const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
         const r = await client.callTool("subagent_trace", {
           subagent,
-          since_id: sinceIdRef.current,
+          since_event_id: eventSinceIdRef.current,
+          since_message_id: messageSinceIdRef.current,
           include_messages: true,
           limit: 200,
         });
@@ -92,8 +94,11 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
           setMessages((prev) => [...prev, ...newMsgs]);
           lastEventAt.current = Date.now();
         }
-        if (typeof data.next_since_id === "number" && data.next_since_id > sinceIdRef.current) {
-          sinceIdRef.current = data.next_since_id;
+        if (typeof data.next_event_id === "number" && data.next_event_id > eventSinceIdRef.current) {
+          eventSinceIdRef.current = data.next_event_id;
+        }
+        if (typeof data.next_message_id === "number" && data.next_message_id > messageSinceIdRef.current) {
+          messageSinceIdRef.current = data.next_message_id;
         }
         setPresence(data.presence ?? null);
         pollCountRef.current += 1;
@@ -117,7 +122,7 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
       cancelled = true;
       window.clearInterval(id);
     };
-    // NOTE: intentionally NOT listing sinceId/pollCount here — they're refs.
+    // NOTE: intentionally NOT listing cursor/pollCount refs here — they're refs.
     // Only re-arm the interval on ACTUAL config change or pause toggle.
   }, [polling, subagent, mcpUrl, mcpToken]);
 
@@ -130,7 +135,10 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
 
   const stream = [...events.map((e) => ({ kind: "event" as const, id: e.id, when: e.ts, data: e })),
                   ...messages.map((m) => ({ kind: "message" as const, id: m.id, when: m.created_at, data: m }))]
-    .sort((a, b) => a.id - b.id);
+    .sort((a, b) => {
+      const byTime = Date.parse(a.when) - Date.parse(b.when);
+      return Number.isNaN(byTime) || byTime === 0 ? a.id - b.id : byTime;
+    });
 
   const status = String(presence?.status || "UNKNOWN").toUpperCase();
   const statusColor = status === "RUNNING" ? "#10b981"
@@ -191,7 +199,8 @@ export default function SubagentTrace({ subagent, autoStart = true, onClose }: P
             onClick={() => {
               setEvents([]);
               setMessages([]);
-              sinceIdRef.current = 0;
+              eventSinceIdRef.current = 0;
+              messageSinceIdRef.current = 0;
               lastEventAt.current = Date.now();
             }}
             className="p-1.5 rounded hover:bg-surface text-muted hover:text-accent"
