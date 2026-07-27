@@ -28,12 +28,12 @@ export interface McpConfig {
 const DEFAULTS = {
   /** Per-request network timeout (ms). Tool calls that take longer get aborted. */
   requestTimeout: 30_000,
-  /** Max retries for idempotent calls (listTools, ping). callTool never retries. */
-  maxRetries: 3,
+  /** Max retries for idempotent calls (listTools, ping, job status). */
+  maxRetries: 4,
   /** Base backoff (ms). Actual delay = base * 2^attempt + jitter. */
-  backoffBase: 800,
+  backoffBase: 5_000,
   /** Max backoff cap (ms). */
-  backoffMax: 10_000,
+  backoffMax: 60_000,
   /** Circuit opens after this many consecutive failures. */
   cbFailureThreshold: 5,
   /** Circuit stays open for this long before allowing a probe (ms). */
@@ -454,8 +454,9 @@ export class McpClient {
   }
 
   /**
-   * Execute a tool. NOT retried — tools may have side effects (nmap, ldap writes, etc.).
-   * Uses a longer timeout since some tools (nmap_scan, nuclei_scan) are slow.
+   * Execute a tool. Mutating tools are never retried: a transient connection
+   * loss must not duplicate a scan, LDAP write, or forge. Read-only status
+   * probes are safe to retry with the standard 5s→60s backoff.
    */
   async callTool(name: string, args: Record<string, any>): Promise<McpToolResult> {
     L.info(`callTool(${name})`, { args });
@@ -473,16 +474,31 @@ export class McpClient {
       throw classified("Circuit breaker OPEN — tool call rejected", "network");
     }
 
+    const idempotentTools = new Set([
+      "job_status",
+      "list_agent_presence",
+      "list_generated_tools",
+      "list_generated_graphs",
+      "munin_wake_list",
+      "episodic_query",
+      "memory_list",
+    ]);
+    const params = { name, arguments: args || {} };
+    const mayRetry = idempotentTools.has(name);
     let result: McpToolResult;
     try {
-      result = await this.fetchOnce<McpToolResult>("tools/call", {
-        name,
-        arguments: args || {},
-      }, timeoutMs);
-      this.cb.onSuccess();
+      result = mayRetry
+        ? await this.sendWithRetry<McpToolResult>("tools/call", params, {
+            retries: DEFAULTS.maxRetries,
+            timeoutMs,
+          })
+        : await this.fetchOnce<McpToolResult>("tools/call", params, timeoutMs);
+      // sendWithRetry already updates the breaker for each attempted status
+      // probe. Direct (possibly mutating) calls reach it only once here.
+      if (!mayRetry) this.cb.onSuccess();
     } catch (e: any) {
       done(`error:${(e as ClassifiedError).kind ?? "unknown"}`);
-      this.cb.onFailure((e as ClassifiedError).kind ?? "unknown");
+      if (!mayRetry) this.cb.onFailure((e as ClassifiedError).kind ?? "unknown");
       L.error(`callTool(${name}) threw`, e, { hint: (e as ClassifiedError).hint });
       throw e;
     }
