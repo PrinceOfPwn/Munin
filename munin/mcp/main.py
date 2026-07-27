@@ -1392,20 +1392,67 @@ def _make_auth_middleware(expected_token: str) -> Callable[..., Any]:
                 return
 
             headers = dict(scope.get("headers") or [])
+            origin_raw = headers.get(b"origin", b"")
+            origin = origin_raw.decode("latin-1", "replace")
+            valid_origin = (
+                origin.startswith(("http://", "https://"))
+                and "\r" not in origin
+                and "\n" not in origin
+            )
+            cors_headers: list[tuple[bytes, bytes]] = []
+            if valid_origin:
+                cors_headers = [
+                    (b"access-control-allow-origin", origin.encode("latin-1")),
+                    (b"access-control-allow-methods", b"GET, POST, DELETE, OPTIONS"),
+                    (
+                        b"access-control-allow-headers",
+                        b"authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id",
+                    ),
+                    (b"access-control-expose-headers", b"mcp-session-id, mcp-protocol-version"),
+                    (b"access-control-max-age", b"600"),
+                    (b"vary", b"Origin"),
+                ]
+
+            async def send_with_cors(message: dict[str, Any]) -> None:
+                if cors_headers and message.get("type") == "http.response.start":
+                    message = {
+                        **message,
+                        "headers": [*(message.get("headers") or []), *cors_headers],
+                    }
+                await send(message)
+
+            # Browsers send an unauthenticated OPTIONS request before the
+            # bearer-authenticated POST. Answer valid CORS preflights here and
+            # keep bearer validation for the actual MCP operation.
+            if (
+                scope.get("type") == "http"
+                and str(scope.get("method", "")).upper() == "OPTIONS"
+                and valid_origin
+                and headers.get(b"access-control-request-method", b"").upper()
+                in {b"GET", b"POST", b"DELETE"}
+            ):
+                await send_with_cors({
+                    "type": "http.response.start",
+                    "status": 204,
+                    "headers": [(b"content-length", b"0")],
+                })
+                await send_with_cors({"type": "http.response.body", "body": b""})
+                return
+
             auth = headers.get(b"authorization", b"").decode("latin-1", "replace")
             if not auth:
                 logger.warning("auth: request %s without Authorization header", scope.get("path", "?"))
-                await _reject(send, 401, "authorization required")
+                await _reject(send_with_cors, 401, "authorization required")
                 return
             if not auth.startswith("Bearer "):
-                await _reject(send, 401, "bearer scheme required")
+                await _reject(send_with_cors, 401, "bearer scheme required")
                 return
             provided = auth[len("Bearer "):].strip()
             if not hmac.compare_digest(provided, expected_token):
                 logger.warning("auth: bearer token mismatch on %s", scope.get("path", "?"))
-                await _reject(send, 403, "invalid bearer token")
+                await _reject(send_with_cors, 403, "invalid bearer token")
                 return
-            await app(scope, receive, send)
+            await app(scope, receive, send_with_cors)
 
         return middleware
 

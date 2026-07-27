@@ -180,19 +180,25 @@ def queue_commit(paths: list[str] | str, message: str, *, kind: str = "forge") -
 
 
 def flush(timeout: float = 30.0) -> None:
-    """Block until the queue is empty. Use in workflow's post step so pending commits ship before the runner dies."""
+    """Block until queued and in-flight commits finish, up to ``timeout`` seconds."""
     if not _enabled():
         return
     _ensure_worker()
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _QUEUE.empty():
-            # give the worker a beat to process the last batch
-            time.sleep(_COALESCE_WINDOW_SECONDS + 0.5)
-            if _QUEUE.empty():
+    # Queue.empty() becomes true as soon as the worker dequeues a batch, long
+    # before commit/push finishes. Queue tracks unfinished tasks precisely; wait
+    # on its condition with our own deadline because Queue.join() has no timeout.
+    with _QUEUE.all_tasks_done:
+        while _QUEUE.unfinished_tasks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "git_persist.flush: timeout after %.1fs, %d tasks unfinished",
+                    timeout,
+                    _QUEUE.unfinished_tasks,
+                )
                 return
-        time.sleep(0.5)
-    logger.warning("git_persist.flush: timeout after %.1fs, %d items still queued", timeout, _QUEUE.qsize())
+            _QUEUE.all_tasks_done.wait(timeout=remaining)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,6 +239,12 @@ def _worker_loop() -> None:
             _process_batch(batch)
         except Exception:  # noqa: BLE001 — worker must survive any commit failure
             logger.exception("git_persist: batch failed; %d items dropped", len(batch))
+        finally:
+            # Account for every get(), including coalesced items. Requeued
+            # retries create fresh unfinished tasks and therefore keep flush()
+            # blocked until that retry batch also completes.
+            for _ in batch:
+                _QUEUE.task_done()
 
 
 def _process_batch(batch: list[dict]) -> None:

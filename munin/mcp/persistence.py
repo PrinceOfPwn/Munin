@@ -214,8 +214,9 @@ class _LibsqlConnectionProxy:
         if exc_type is None:
             try:
                 self.commit()
-            except Exception as commit_exc:  # pragma: no cover - driver shutdown guard
+            except Exception as commit_exc:
                 logger.warning("libsql context commit failed: %s", commit_exc)
+                raise
         else:
             try:
                 self._conn.rollback()

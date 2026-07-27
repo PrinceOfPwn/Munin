@@ -27,6 +27,37 @@ def test_graph_manifest_roundtrip(store):
     assert store.graph_get(graph["name"])["purpose"] == graph["purpose"]
 
 
+def test_reset_purge_removes_only_on_reset_manifests(store):
+    from munin.mcp.graph_persist import (
+        persist_graph_manifest,
+        purge_resettable_graph_manifests,
+        rehydrate_graph_manifests,
+    )
+
+    transient = {
+        "name": "transient",
+        "purpose": "Dropped by reset",
+        "reset_policy": "on_reset",
+    }
+    persistent = {
+        "name": "persistent",
+        "purpose": "Survives reset",
+        "reset_policy": "persistent",
+    }
+    transient_path = persist_graph_manifest(store.settings, transient, queue_git=False)
+    persistent_path = persist_graph_manifest(store.settings, persistent, queue_git=False)
+
+    result = purge_resettable_graph_manifests(store.settings)
+    assert result == {"removed": 1, "errors": []}
+    assert not transient_path.exists()
+    assert persistent_path.exists()
+
+    store.graph_purge_on_reset()
+    rehydrate_graph_manifests(store, store.settings)
+    assert store.graph_get("transient") is None
+    assert store.graph_get("persistent") is not None
+
+
 def test_runtime_cache_can_serve_stale_entries(store):
     store.cache_put("hugin", "graph", {"nodes": 3}, ttl_seconds=1)
     fresh = store.cache_get("hugin", "graph")

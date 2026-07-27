@@ -172,6 +172,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function parseRpcEnvelope(text: string, contentType: string, requestId: string): any {
+  if (contentType.includes("text/event-stream")) {
+    const events = text.split(/\r?\n\r?\n/);
+    for (const event of events) {
+      const payload = event
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!payload) continue;
+      const parsed = JSON.parse(payload);
+      if (parsed?.id === requestId || parsed?.error) return parsed;
+    }
+    throw new Error("SSE response contained no JSON-RPC result");
+  }
+  return JSON.parse(text);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // McpClient
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +197,8 @@ function sleep(ms: number): Promise<void> {
 export class McpClient {
   private baseUrl: string;
   private token: string;
+  private sessionId = "";
+  private initializePromise: Promise<void> | null = null;
   private cb = new CircuitBreaker(DEFAULTS.cbFailureThreshold, DEFAULTS.cbResetTimeout);
 
   /**
@@ -196,13 +216,16 @@ export class McpClient {
 
   setConfig(config: McpConfig) {
     const prev = this.baseUrl;
+    const prevToken = this.token;
     this.baseUrl = (config.baseUrl || "").replace(/\/+$/, "");
     this.token = config.token || "";
-    if (prev !== this.baseUrl) {
+    if (prev !== this.baseUrl || prevToken !== this.token) {
       L.info("McpClient reconfigured", { baseUrl: this.baseUrl, hasToken: !!this.token });
-      // Reset circuit on URL change — new server, fresh slate.
+      // URL/token changes imply a different authenticated MCP session.
       this.cb = new CircuitBreaker(DEFAULTS.cbFailureThreshold, DEFAULTS.cbResetTimeout);
       this.inflight.clear();
+      this.sessionId = "";
+      this.initializePromise = null;
     }
   }
 
@@ -213,6 +236,27 @@ export class McpClient {
     return `${this.baseUrl}/mcp/`;
   }
 
+  private async ensureSession(timeoutMs: number): Promise<void> {
+    if (this.sessionId) return;
+    if (!this.initializePromise) {
+      this.initializePromise = this.fetchOnce(
+        "initialize",
+        {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "munin-ui", version: "0.1.0" },
+        },
+        Math.min(timeoutMs, DEFAULTS.requestTimeout)
+      ).then(() => undefined).catch((error) => {
+        this.sessionId = "";
+        throw error;
+      }).finally(() => {
+        this.initializePromise = null;
+      });
+    }
+    await this.initializePromise;
+  }
+
   // ───── Layer 1: raw fetch with timeout ────────────────────────────────────
 
   private async fetchOnce<T>(
@@ -220,6 +264,9 @@ export class McpClient {
     params: any,
     timeoutMs: number
   ): Promise<T> {
+    if (method !== "initialize") {
+      await this.ensureSession(timeoutMs);
+    }
     const id = uuid();
     const url = this.endpoint();
     const controller = new AbortController();
@@ -234,7 +281,12 @@ export class McpClient {
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          ...(this.sessionId ? {
+            "mcp-session-id": this.sessionId,
+            "MCP-Protocol-Version": "2024-11-05",
+          } : {}),
         },
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       });
@@ -267,12 +319,21 @@ export class McpClient {
       );
     }
 
+    if (method === "initialize") {
+      const initializedSession = res.headers.get("mcp-session-id") || "";
+      if (!initializedSession) {
+        throw classified("MCP initialize response omitted mcp-session-id", "rpc");
+      }
+      this.sessionId = initializedSession;
+    }
+
     let data: any;
     try {
-      data = await res.json();
+      const text = await res.text();
+      data = parseRpcEnvelope(text, res.headers.get("content-type") || "", id);
     } catch (e: any) {
       throw classified(
-        `JSON parse failed: ${e?.message}`,
+        `MCP response parse failed: ${e?.message}`,
         "parse"
       );
     }

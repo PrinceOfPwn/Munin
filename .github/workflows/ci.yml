@@ -17,6 +17,9 @@ jobs:
     name: Backend + Turso online
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
+      MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,10 +38,7 @@ jobs:
           MUNIN_DB_AUTH_TOKEN: ""
         run: python -m pytest -q
       - name: Turso online roundtrip
-        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-        env:
-          MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
-          MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+        if: ${{ env.MUNIN_DB_URL != '' && env.MUNIN_DB_AUTH_TOKEN != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         run: python scripts/turso_smoke.py
 
   frontend:
