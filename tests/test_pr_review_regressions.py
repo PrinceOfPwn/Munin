@@ -78,6 +78,26 @@ def test_expired_foreign_runner_lease_releases_slot(store):
     assert store.list_presence()[0]["metadata"]["instance_id"] == "github-run-current"
 
 
+def test_cross_host_claims_request_authoritative_connections(store, monkeypatch):
+    original_connect = store._connect
+    authoritative_flags: list[bool] = []
+
+    def tracking_connect(*, authoritative=False):
+        authoritative_flags.append(authoritative)
+        return original_connect(authoritative=authoritative)
+
+    monkeypatch.setattr(store, "_connect", tracking_connect)
+    store.try_claim_spawn_slot(
+        agent_name="authoritative_agent",
+        spawner_pid=os.getpid(),
+        instance_id="instance-a",
+    )
+    store.enqueue_wake(target_agent="authoritative_queue", task={"work": True})
+    store.claim_wake_item(target_agent="authoritative_queue", claimer_pid=os.getpid())
+
+    assert authoritative_flags.count(True) == 2
+
+
 def test_generated_callable_normalizes_scalar_result(store):
     from munin.mcp.registry import wrap_generated_callable
 
@@ -158,6 +178,80 @@ def test_progress_redaction_covers_nested_secret_keys():
     assert redacted["args"]["username"] == "alice"
     assert redacted["args"]["password"] == marker
     assert redacted["args"]["nested"][0]["api_token"] == marker
+
+
+def test_structured_string_arguments_are_redacted_before_tracing():
+    from munin.mcp.main import _redact_args
+
+    redacted = _redact_args(
+        {
+            "task_json": json.dumps(
+                {
+                    "username": "alice",
+                    "password": "do-not-persist",
+                    "nested": {"api_token": "also-secret"},
+                }
+            )
+        }
+    )
+    rendered = json.dumps(redacted)
+
+    assert "do-not-persist" not in rendered
+    assert "also-secret" not in rendered
+    assert redacted["task_json"]["username"] == "alice"
+
+
+def test_redacted_settings_hide_db_url_credentials(store):
+    from dataclasses import replace
+
+    from munin.mcp.config import redact_settings
+
+    settings = replace(
+        store.settings,
+        db_url="libsql://user:password@db.turso.io/path?authToken=query-secret&mode=ro",
+    )
+    redacted = redact_settings(settings)
+
+    assert "password" not in redacted.db_url
+    assert "query-secret" not in redacted.db_url
+    assert "user@" not in redacted.db_url
+    assert "db.turso.io/path" in redacted.db_url
+    assert "mode=ro" in redacted.db_url
+
+
+def test_ldap_tolerant_retry_keeps_schema_supported_memberships(monkeypatch):
+    from ldap3.core.exceptions import LDAPAttributeError
+
+    from munin.mcp.tools import ldap_tools
+
+    conn = SimpleNamespace(
+        server=SimpleNamespace(
+            schema=SimpleNamespace(
+                attribute_types={
+                    "member": object(),
+                    "cn": object(),
+                    "objectClass": object(),
+                }
+            )
+        )
+    )
+    calls: list[list[str]] = []
+
+    def fake_search(_conn, **kwargs):
+        calls.append(kwargs["attributes"])
+        if len(calls) == 1:
+            raise LDAPAttributeError("unsupported uniqueMember")
+        return []
+
+    monkeypatch.setattr(ldap_tools, "_search", fake_search)
+    ldap_tools._search_tolerant(
+        conn,
+        base_dn="dc=example,dc=com",
+        filter_str="(objectClass=*)",
+        attributes=["member", "uniqueMember", "memberUid", "cn"],
+    )
+
+    assert calls[1] == ["member", "cn"]
 
 
 def test_libsql_context_propagates_sync_failure():
@@ -250,6 +344,100 @@ def test_hugin_neighbors_is_available_to_main_and_subagents():
 
     assert "hugin_neighbors" in _NATIVE_TOOLS
     assert "hugin_neighbors" in _STATIC_TOOLS
+
+
+class _NoopMemory:
+    def log_step(self, **kwargs):
+        return None
+
+
+def _bare_munin_agent(llm, catalog):
+    from munin.core.munin_agent import MuninAgent
+
+    agent = object.__new__(MuninAgent)
+    agent.llm = llm
+    agent.memory = _NoopMemory()
+    agent._system_prompt = lambda: "test system"
+    agent._current_catalog = lambda: catalog
+    return agent
+
+
+def test_munin_agent_propagates_llm_failure_to_mcp(store, monkeypatch):
+    from dataclasses import replace
+
+    from munin.core import munin_agent
+    from munin.mcp.tools import munin_tools
+
+    class FailingLlm:
+        def chat(self, **kwargs):
+            raise TimeoutError("provider timeout")
+
+    agent = _bare_munin_agent(FailingLlm(), {})
+    with pytest.raises(RuntimeError, match="LLM call failed"):
+        agent.respond("hello", max_iterations=1)
+
+    class FailingAgent:
+        def __init__(self, settings):
+            pass
+
+        def respond(self, *args, **kwargs):
+            raise RuntimeError("LLM call failed at step 0")
+
+    settings = replace(
+        store.settings,
+        llm_base_url="https://llm.invalid/v1",
+        llm_api_key="configured",
+        llm_model="test",
+    )
+    monkeypatch.setattr(munin_agent, "MuninAgent", FailingAgent)
+    monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
+
+    result = munin_tools.munin_chat("hello")
+    assert result["ok"] is False
+    assert result["error"]["code"] == "agent_error"
+
+
+def test_repetition_nudge_accepts_one_changed_next_call():
+    class SequenceLlm:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, **kwargs):
+            self.calls += 1
+            if self.calls <= 6:
+                value = "same"
+            elif self.calls == 7:
+                value = "changed"
+            else:
+                return {"choices": [{"message": {"role": "assistant", "content": "recovered"}}]}
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": f"call-{self.calls}",
+                                    "function": {
+                                        "name": "probe",
+                                        "arguments": json.dumps({"value": value}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+
+    agent = _bare_munin_agent(
+        SequenceLlm(),
+        {"probe": lambda value: {"ok": True, "summary": value, "data": {"value": value}}},
+    )
+    result = agent.respond("investigate", max_iterations=8)
+
+    assert result["stop_reason"] == "final_answer"
+    assert result["content"] == "recovered"
 
 
 def test_cors_preflight_bypasses_bearer_and_exposes_session_header():

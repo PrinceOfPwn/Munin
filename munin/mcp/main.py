@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import logging
 import os
 import re
@@ -10,8 +11,9 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -65,6 +67,14 @@ _SECRET_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 def _redact_scalar(value: Any) -> Any:
     if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                return _redact_payload(parsed)
         redacted = value
         for pat in _SECRET_VALUE_PATTERNS:
             redacted = pat.sub("[REDACTED]", redacted)
@@ -79,7 +89,7 @@ def _redact_args(kwargs: dict[str, Any]) -> dict[str, Any]:
         if _SECRET_KEY_PATTERNS.search(key):
             redacted[key] = "[REDACTED]" if value else ""
         else:
-            redacted[key] = _redact_scalar(value)
+            redacted[key] = _redact_payload(value)
     return redacted
 
 
@@ -97,7 +107,6 @@ def _redact_payload(value: Any) -> Any:
 
 def _bounded_trace_payload(value: Any) -> Any:
     redacted = _redact_payload(value)
-    import json
 
     rendered = json.dumps(redacted, ensure_ascii=True, default=str)
     if len(rendered) <= SETTINGS.max_output_chars:
@@ -1328,14 +1337,16 @@ def ack_agent_message(message_id: int, recipient_agent: str, status: str = "ACKE
 # Registered on the MCP instance defined above.
 # ─────────────────────────────────────────────
 
-from .tools import diagnostics_tool  # noqa: E402,F401
-from .tools import forge_tool  # noqa: E402,F401
-from .tools import graph_forge_tool  # noqa: E402,F401
-from .tools import hugin_tool  # noqa: E402,F401
-from .tools import ldap_tools  # noqa: E402,F401
-from .tools import munin_tools  # noqa: E402,F401
-from .tools import tavily_tool  # noqa: E402,F401
 from . import registry  # noqa: E402
+from .tools import (  # noqa: E402
+    diagnostics_tool,  # noqa: E402,F401
+    forge_tool,  # noqa: E402,F401
+    graph_forge_tool,  # noqa: E402,F401
+    hugin_tool,  # noqa: E402,F401
+    ldap_tools,  # noqa: E402,F401
+    munin_tools,  # noqa: E402,F401
+    tavily_tool,  # noqa: E402,F401
+)
 
 # Rebuild the DB catalog from versioned graph manifests before runners resolve names.
 try:

@@ -79,6 +79,35 @@ def test_graph_names_with_same_slug_get_distinct_manifests(store):
     assert {row["name"] for row in store.graph_list()} >= {"audit graph", "audit-graph"}
 
 
+def test_manifest_aware_drop_prevents_probe_rehydration(store, monkeypatch):
+    from munin.mcp.tools import graph_forge_tool
+
+    store.graph_register(
+        name="e2e_probe_test",
+        purpose="diagnostic",
+        system_prompt="test",
+        tool_whitelist=[],
+        reset_policy="on_reset",
+        created_by_agent="diagnostics",
+    )
+    graph = store.graph_get("e2e_probe_test")
+    assert graph is not None
+    from munin.mcp.graph_persist import persist_graph_manifest, rehydrate_graph_manifests
+
+    path = persist_graph_manifest(store.settings, graph, queue_git=False)
+    monkeypatch.setattr(graph_forge_tool, "STATE", store)
+    monkeypatch.setenv("MUNIN_AUTO_COMMIT", "0")
+
+    result = graph_forge_tool.drop_generated_graph("e2e_probe_test")
+
+    assert result["ok"] is True
+    assert json.loads(path.read_text(encoding="utf-8"))["active"] is False
+    store.graph_purge_on_reset()
+    rehydrated = rehydrate_graph_manifests(store, store.settings)
+    assert rehydrated["loaded"] == 0
+    assert store.graph_get("e2e_probe_test") is None
+
+
 def test_runtime_cache_can_serve_stale_entries(store):
     store.cache_put("hugin", "graph", {"nodes": 3}, ttl_seconds=1)
     fresh = store.cache_get("hugin", "graph")

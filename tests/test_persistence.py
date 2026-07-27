@@ -54,6 +54,30 @@ def test_turso_uses_embedded_replica_and_separate_token(tmp_path, monkeypatch):
     assert fake.native.closed is True
 
 
+def test_turso_authoritative_connection_skips_local_replica(tmp_path, monkeypatch):
+    from munin.mcp import persistence
+
+    fake = _FakeLibsql()
+    monkeypatch.setattr(persistence, "_libsql", fake)
+    conn = persistence.open_connection(
+        "libsql://munin-example.turso.io",
+        default_path=tmp_path / "shared_state.sqlite",
+        auth_token="secret-token",  # noqa: S106 - inert fake-driver fixture
+        authoritative=True,
+    )
+
+    args, kwargs = fake.calls[0]
+    assert args == ()
+    assert kwargs == {
+        "database": "libsql://munin-example.turso.io",
+        "auth_token": "secret-token",
+    }
+    assert fake.native.sync_count == 0
+    conn.commit()
+    assert fake.native.committed is True
+    assert fake.native.sync_count == 0
+
+
 def test_backend_description_never_contains_query_token():
     from munin.mcp.persistence import describe_backend
 

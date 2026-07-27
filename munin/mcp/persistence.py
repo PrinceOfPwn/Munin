@@ -177,8 +177,9 @@ class _LibsqlCursorProxy:
 class _LibsqlConnectionProxy:
     """Wraps a libsql connection to look like a sqlite3 connection."""
 
-    def __init__(self, native_conn: Any) -> None:
+    def __init__(self, native_conn: Any, *, sync_on_commit: bool = True) -> None:
         self._conn = native_conn
+        self._sync_on_commit = sync_on_commit
 
     def execute(self, sql: str, params: Any = ()) -> _LibsqlCursorProxy:
         return _LibsqlCursorProxy(self._conn.execute(sql, params))
@@ -196,7 +197,8 @@ class _LibsqlConnectionProxy:
         # Embedded replicas do not publish local writes until ``sync`` runs.
         # Keeping it behind the sqlite-compatible ``commit`` boundary makes
         # every successful Munin transaction durable in Turso before returning.
-        self._conn.sync()
+        if self._sync_on_commit:
+            self._conn.sync()
 
     def rollback(self) -> None:
         self._conn.rollback()
@@ -308,6 +310,7 @@ def open_connection(
     *,
     default_path: Path | None = None,
     auth_token: str = "",
+    authoritative: bool = False,
 ) -> Any:
     """Return a connection object compatible with the subset of sqlite3 Munin uses.
 
@@ -343,6 +346,16 @@ def open_connection(
             "Install the project dependencies or run `pip install libsql`. "
             "Or unset MUNIN_DB_URL to fall back to local SQLite."
         )
+
+    if "url" in params and authoritative:
+        # Critical cross-host claims must execute directly on Turso's primary
+        # connection. BEGIN IMMEDIATE on an embedded replica only locks that
+        # host's local file and cannot serialize another runner's transaction.
+        native = _libsql.connect(
+            database=params["url"],
+            auth_token=auth_token or params.get("auth_token") or "",
+        )
+        return _LibsqlConnectionProxy(native, sync_on_commit=False)
 
     if "url" in params:
         if default_path is None:

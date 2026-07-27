@@ -315,7 +315,7 @@ def _probe_e2e_forge_wake() -> dict[str, Any]:
     import time as _time  # noqa: PLC0415
 
     from .forge_tool import tool_forge  # noqa: PLC0415
-    from .graph_forge_tool import graph_forge  # noqa: PLC0415
+    from .graph_forge_tool import drop_generated_graph, graph_forge  # noqa: PLC0415
     from .munin_tools import munin_wake  # noqa: PLC0415
 
     # 1. Forge a trivial tool (spec chosen so any capable LLM writes it in 1 iter).
@@ -371,7 +371,9 @@ def _probe_e2e_forge_wake() -> dict[str, Any]:
     # 5. Cleanup: drop the probe graph AND deactivate the throwaway tool so
     #    successive paranoid runs don't accumulate `gen__echo_text_*` clutter.
     try:
-        STATE.graph_drop(graph_name)
+        # The public drop path also rewrites the versioned manifest as inactive,
+        # preventing startup rehydration from resurrecting this probe.
+        drop_generated_graph(graph_name)
     except Exception as exc:
         logger.debug("diagnostics probe graph cleanup failed: %s", exc)
     try:
