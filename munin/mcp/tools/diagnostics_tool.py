@@ -229,8 +229,11 @@ def _probe_forge() -> dict[str, Any]:
 def _probe_graphs() -> dict[str, Any]:
     """Count forged graphs; verify their tool_whitelist entries exist somewhere."""
     graphs = STATE.graph_list(include_inactive=False)
+    # This module lives in ``munin.mcp.tools``.  Two dots resolves to
+    # ``munin.mcp`` (where there is no ``subagents`` package); use three dots
+    # to reach the real top-level ``munin.subagents`` package.
+    from ...subagents.base import _STATIC_TOOLS, ALL_SUBAGENT_TOOL_NAMES  # noqa: PLC0415,TID252
     from .. import registry  # noqa: TID252,PLC0415
-    from ..subagents.base import _STATIC_TOOLS, ALL_SUBAGENT_TOOL_NAMES  # noqa: PLC0415,TID252
     known_tools = set(_STATIC_TOOLS.keys()) | set(ALL_SUBAGENT_TOOL_NAMES)
     known_gen = {row["name"] for row in registry.list_generated(STATE)}
     known_tools |= known_gen
