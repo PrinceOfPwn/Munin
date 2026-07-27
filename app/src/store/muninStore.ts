@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { uuid } from "@/lib/utils";
-import { getMcpClient, extractToolResultContent } from "@/lib/mcp";
+import { getMcpClient, extractToolResultContent, unwrapToolData } from "@/lib/mcp";
 import { log } from "@/lib/logger";
 import type {
   ViewKey,
@@ -255,9 +255,11 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("list_agent_presence", {})
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          if (Array.isArray(json)) next.presence = json;
-          else if (json && Array.isArray(json.presence)) next.presence = json.presence;
-          else if (json && Array.isArray(json.agents)) next.presence = json.agents;
+          const data = unwrapToolData(json);
+          if (Array.isArray(data)) next.presence = data;
+          else if (data && Array.isArray(data.presence)) next.presence = data.presence;
+          else if (data && Array.isArray(data.agents)) next.presence = data.agents;
+          else if (data && Array.isArray(data.matches)) next.presence = data.matches;
           else next.presence = [];
           log.poll.debug(`list_agent_presence → ${next.presence?.length ?? 0} agents`);
         })
@@ -271,8 +273,9 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("list_generated_tools", {})
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          if (Array.isArray(json)) next.forgedToolCount = json.length;
-          else if (json && Array.isArray(json.tools)) next.forgedToolCount = json.tools.length;
+          const data = unwrapToolData(json);
+          if (Array.isArray(data)) next.forgedToolCount = data.length;
+          else if (data && Array.isArray(data.tools)) next.forgedToolCount = data.tools.length;
           else next.forgedToolCount = 0;
           log.poll.debug(`list_generated_tools → ${next.forgedToolCount}`);
         })
@@ -286,12 +289,13 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("munin_wake_list", {})
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          const arr = Array.isArray(json)
-            ? json
-            : json && Array.isArray(json.items)
-            ? json.items
-            : json && Array.isArray(json.queue)
-            ? json.queue
+          const data = unwrapToolData(json);
+          const arr = Array.isArray(data)
+            ? data
+            : data && Array.isArray(data.items)
+            ? data.items
+            : data && Array.isArray(data.queue)
+            ? data.queue
             : [];
           next.wakePendingCount = arr.filter(
             (x: WakeItem) => !x.status || /pending|queued|waiting/i.test(String(x.status))
@@ -308,10 +312,11 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("episodic_query", { limit: 1 })
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          if (Array.isArray(json) && json.length > 0) next.lastEpisodic = json[0];
-          else if (json && Array.isArray(json.events) && json.events.length > 0)
-            next.lastEpisodic = json.events[0];
-          else if (json && !Array.isArray(json)) next.lastEpisodic = json;
+          const data = unwrapToolData(json);
+          if (Array.isArray(data) && data.length > 0) next.lastEpisodic = data[0];
+          else if (data && Array.isArray(data.events) && data.events.length > 0)
+            next.lastEpisodic = data.events[0];
+          else if (data && !Array.isArray(data)) next.lastEpisodic = data;
           else next.lastEpisodic = null;
           log.poll.debug("episodic_query →", next.lastEpisodic ? "1 event" : "empty");
         })

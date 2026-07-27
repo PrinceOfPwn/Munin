@@ -15,7 +15,7 @@ import {
 import EmptyState from "./EmptyState";
 import JsonViewer from "./JsonViewer";
 import { useMuninStore } from "@/store/muninStore";
-import { getMcpClient, extractToolResultContent } from "@/lib/mcp";
+import { getMcpClient, extractToolResultContent, unwrapToolData } from "@/lib/mcp";
 import { relativeTime, localTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
@@ -81,14 +81,15 @@ function SemanticView() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("memory_list", {});
       const { json } = extractToolResultContent(r);
-      const arr = Array.isArray(json)
-        ? json
-        : json && Array.isArray(json.facts)
-        ? json.facts
-        : json && Array.isArray(json.items)
-        ? json.items
-        : json && Array.isArray(json.memories)
-        ? json.memories
+      const data = unwrapToolData(json);
+      const arr = Array.isArray(data)
+        ? data
+        : data && Array.isArray(data.facts)
+        ? data.facts
+        : data && Array.isArray(data.items)
+        ? data.items
+        : data && Array.isArray(data.memories)
+        ? data.memories
         : [];
       setFacts(arr);
     } catch (e: any) {
@@ -108,7 +109,10 @@ function SemanticView() {
     setSaving(true);
     try {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
-      await client.callTool("memory_remember", { key: key.trim(), value });
+      await client.callTool("memory_remember", {
+        key: key.trim(),
+        value_json: JSON.stringify(value),
+      });
       setKey("");
       setValue("");
       await load();
@@ -123,8 +127,9 @@ function SemanticView() {
     try {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("memory_recall", { key: k });
-      const { text } = extractToolResultContent(r);
-      alert(`Recall "${k}":\n\n${text || "(no value)"}`);
+      const { json, text } = extractToolResultContent(r);
+      const data = unwrapToolData(json);
+      alert(`Recall "${k}":\n\n${JSON.stringify(data?.value ?? data ?? text, null, 2) || "(no value)"}`);
     } catch (e: any) {
       alert(`Error: ${e?.message || String(e)}`);
     }
@@ -138,7 +143,7 @@ function SemanticView() {
       try {
         await client.callTool("memory_forget", { key: k });
       } catch {
-        await client.callTool("memory_remember", { key: k, value: "" });
+        await client.callTool("memory_remember", { key: k, value_json: JSON.stringify("") });
       }
       await load();
     } catch (e: any) {
@@ -265,12 +270,13 @@ function EpisodicView() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("episodic_query", { limit: 50 });
       const { json } = extractToolResultContent(r);
-      const arr = Array.isArray(json)
-        ? json
-        : json && Array.isArray(json.events)
-        ? json.events
-        : json && Array.isArray(json.items)
-        ? json.items
+      const data = unwrapToolData(json);
+      const arr = Array.isArray(data)
+        ? data
+        : data && Array.isArray(data.events)
+        ? data.events
+        : data && Array.isArray(data.items)
+        ? data.items
         : [];
       setEvents(arr);
     } catch (e: any) {
@@ -363,12 +369,13 @@ function ForgedView() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("list_generated_graphs", {});
       const { json } = extractToolResultContent(r);
-      const arr = Array.isArray(json)
-        ? json
-        : json && Array.isArray(json.graphs)
-        ? json.graphs
-        : json && Array.isArray(json.items)
-        ? json.items
+      const data = unwrapToolData(json);
+      const arr = Array.isArray(data)
+        ? data
+        : data && Array.isArray(data.graphs)
+        ? data.graphs
+        : data && Array.isArray(data.items)
+        ? data.items
         : [];
       setGraphs(arr);
     } catch (e: any) {
@@ -388,7 +395,8 @@ function ForgedView() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("describe_generated_graph", { name });
       const { json, text } = extractToolResultContent(r);
-      setDescriptions((d) => ({ ...d, [name]: json !== undefined ? json : text }));
+      const data = unwrapToolData(json);
+      setDescriptions((d) => ({ ...d, [name]: data !== undefined ? data : text }));
       setExpanded(name === expanded ? null : name);
     } catch (e: any) {
       setDescriptions((d) => ({

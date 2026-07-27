@@ -197,6 +197,42 @@ def test_generated_tool_paths_are_persisted_portably(store):
     assert registry.resolve_script_path(store.settings, row["script_path"]) == source.resolve()
 
 
+def test_generated_source_rehydrates_without_action_artifacts(store):
+    """A Turso registry row must carry source, not only an ephemeral path."""
+    from munin.mcp import registry
+
+    source = store.settings.generated_tools_dir / "durable_probe.py"
+    source.write_text(
+        "def durable_probe(value: str = 'ok') -> dict:\n"
+        "    return {'value': value}\n",
+        encoding="utf-8",
+    )
+    registry.register_state_only(
+        store,
+        slug="durable_probe",
+        description="durable",
+        script_path=source,
+        function_name="durable_probe",
+        signature={"function_name": "durable_probe"},
+    )
+    source.unlink()
+
+    class FakeMcp:
+        def __init__(self):
+            self.attached: list[str] = []
+
+        def tool(self):
+            def decorator(fn):
+                self.attached.append(fn.__name__)
+                return fn
+            return decorator
+
+    mcp = FakeMcp()
+    assert registry.rehydrate(mcp, store, store.settings) == 1
+    assert source.exists()
+    assert "gen__durable_probe" in mcp.attached
+
+
 def test_deactivated_tool_is_detached_and_cannot_resolve(store):
     from munin.mcp import registry
 
