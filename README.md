@@ -55,7 +55,7 @@ npm run dev
 
 Navigate to `http://localhost:3000`, open **Settings**, and configure:
 - **MCP Base URL**: `http://localhost:8890`
-- **Bearer Token**: The value of `MUNIN_MCP_AUTH_TOKEN` (e.g. `munin2024`)
+- **Bearer Token**: The value of `MUNIN_MCP_AUTH_TOKEN` (e.g. `munin`)
 
 Click **Test Connection** → **Save**.
 
