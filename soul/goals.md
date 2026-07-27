@@ -2,7 +2,7 @@
 
 ## Misión inmediata
 
-Resolver el challenge de MELI Offensive Security: agente auto-adaptativo capaz de
+Agente auto-adaptativo capaz de
 interactuar con OpenLDAP (`meli.com`) y auto-expandir sus capacidades cuando la
 consulta no está cubierta por las tools base.
 
