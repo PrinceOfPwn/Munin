@@ -161,10 +161,18 @@ jobs:
           apt-get update -qq
           apt-get install -y --no-install-recommends \
               python3 python3-pip python3-venv python3-poetry \
-              ca-certificates curl gh git pipx ldap-utils nodejs npm \
+              ca-certificates curl git pipx ldap-utils nodejs npm \
               build-essential libldap2-dev libsasl2-dev libssl-dev golang-go \
               nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec \
               httpx-toolkit exploitdb eyewitness
+          GH_VERSION="2.96.0"
+          GH_ARCHIVE="gh_${GH_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${GH_ARCHIVE}"
+          curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"
+          grep " ${GH_ARCHIVE}$" "gh_${GH_VERSION}_checksums.txt" | sha256sum -c -
+          tar -xzf "${GH_ARCHIVE}" -C /tmp
+          install "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
+          rm -f "${GH_ARCHIVE}" "gh_${GH_VERSION}_checksums.txt"
           ln -s /usr/bin/httpx-toolkit /usr/local/bin/pd-httpx
           if command -v eyewitness >/dev/null 2>&1 && ! command -v EyeWitness >/dev/null 2>&1; then
               ln -s "$(command -v eyewitness)" /usr/local/bin/EyeWitness
