@@ -23,6 +23,7 @@ from typing import Any
 from ..mcp import registry
 from ..mcp.config import Settings, get_settings
 from ..mcp.shared_state import SharedStateStore
+from ..mcp.main import execute_command
 from ..mcp.tools import (
     diagnostics_tool,
     forge_tool,
@@ -64,6 +65,7 @@ _DYNAMIC_TOOL_NAMES: set[str] = {
 # ---------------------------------------------------------------------------
 
 _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
+    "execute_command": execute_command,
     # LDAP
     "ldap_who_am_i": ldap_tools.ldap_who_am_i,
     "get_current_user_info": ldap_tools.get_current_user_info,
@@ -149,6 +151,9 @@ class MuninAgent:
                 "- Escape LDAP filter parameters — call `ldap_search` with filter_template + params, never build raw filters.",
                 "- Publish notable findings via `publish_shared_intel` so subagents share knowledge.",
                 "- If uncertain, ask a clarifying question by responding without a tool call.",
+                "- You can execute shell commands using `execute_command` in case you need something.",
+                "- You can generate SVG or Mermaid code to provide graphical representations when requested (e.g. for Active Directory graphs or similar).",
+
             ]
         )
 

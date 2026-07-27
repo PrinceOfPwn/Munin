@@ -24,6 +24,8 @@
 - `post_agent_message`, `fetch_agent_messages`, `ack_agent_message`
 
 ### Munin Core & System Inspection
+- `execute_command` — Execute arbitrary shell commands when needed.
+- SVG and Mermaid generation for graphical representations (e.g. for AD graphs).
 - `munin_self_diagnose` — Complete system status, issues log, and AI refactor prompt generator
 - `munin_read_source` — Workspace codebase inspection and source code reader
 - `soul_read`, `soul_list`, `soul_propose_edit`
