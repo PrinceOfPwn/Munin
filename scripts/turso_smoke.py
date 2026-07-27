@@ -2,7 +2,8 @@
 
 The second replica starts from a different empty directory. If it can read the
 marker written by the first one, persistence crossed the network and did not
-silently fall back to a local SQLite file.
+silently fall back to a local SQLite file. Cross-host spawn, task, and wake
+claims then compete through direct authoritative Turso connections.
 """
 
 from __future__ import annotations
@@ -70,6 +71,28 @@ def main() -> None:
                 )
             )
 
+        task_barrier = threading.Barrier(2)
+        task_action = f"ci-authoritative-task:{marker_key}"
+
+        def claim_task(store: SharedStateStore, agent: str):
+            task_barrier.wait()
+            return store.claim_task(
+                target_ip="127.0.0.1",
+                action=task_action,
+                assigned_agent=agent,
+                lease_seconds=60,
+                metadata_json="{}",
+                allow_steal_stale=False,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            task_claims = list(
+                pool.map(
+                    lambda pair: claim_task(*pair),
+                    ((writer, "smoke-writer"), (reader, "smoke-reader")),
+                )
+            )
+
         queue_name = f"ci_authoritative_queue:{marker_key}"
         wake_id = writer.enqueue_wake(target_agent=queue_name, task={"marker": marker})
         wake_barrier = threading.Barrier(2)
@@ -87,6 +110,8 @@ def main() -> None:
         raise RuntimeError(f"Turso cache roundtrip mismatch: {cached!r}")
     if sum(bool(claim.get("claimed")) for claim in spawn_claims) != 1:
         raise RuntimeError(f"Turso authoritative spawn claim mismatch: {spawn_claims!r}")
+    if sum(bool(claim.success) for claim in task_claims) != 1:
+        raise RuntimeError(f"Turso authoritative task claim mismatch: {task_claims!r}")
     claimed_wakes = [claim for claim in wake_claims if claim is not None]
     if len(claimed_wakes) != 1 or claimed_wakes[0]["id"] != wake_id:
         raise RuntimeError(f"Turso authoritative wake claim mismatch: {wake_claims!r}")
