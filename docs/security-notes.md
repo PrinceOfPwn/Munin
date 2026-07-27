@@ -1,68 +1,70 @@
-# Security notes
+# Notas de seguridad y límites operativos
 
-## Threat model (what Munin defends against, what it doesn't)
+Munin se diseñó para evaluación, investigación y automatización sobre activos
+autorizados. Su funcionalidad de recon, LDAP, herramientas generadas y runners
+Kali aumenta el impacto de una configuración equivocada: el operador debe fijar
+alcance, credenciales y política antes de iniciar una sesión.
 
-**Defends against:**
+## Controles presentes
 
-- **Command injection in OFFX tools** — every `additional_args` is tokenized with
-  `shlex.split` and joined with a portable `shell_join` that quotes each token.
-  Fixes PR#1 bug.
-- **Token leakage across HTTP providers** — `VulnIntelService` uses one
-  `requests.Session` per external provider, and the `Authorization: Bearer <PAT>`
-  header is only ever added to the GitHub search request. Fixes PR#1 bug.
-- **Tavily key in wrong place** — `Authorization: Bearer` header, own session.
-  Fixes PR#1 bug.
-- **LDAP injection (CWE-90)** — every user-controlled value that ends in a filter
-  goes through `ldap3.utils.conv.escape_filter_chars`. `ldap_search` only accepts a
-  fixed filter template + escaped params, never a raw filter string.
-- **SSRF on `LLM_BASE_URL`** — `LLMClient._validate_base_url` requires `https://`
-  except loopback. Rejects `169.254.169.254`, metadata endpoints, `0.0.0.0`.
-- **Path traversal on soul edits** — `_safe_soul_path` refuses paths that escape
-  `soul/`.
-- **Secrets in audit trail** — `_redact` in `audit.py` matches Bearer tokens,
-  `api_key=…`, `password=…`, and known provider prefixes (`sk-`, `ghp_`, `gho_`,
-  `nvapi-`, `tvly-`).
+| Superficie | Control actual |
+| --- | --- |
+| HTTP MCP | El servidor exige `MUNIN_MCP_AUTH_TOKEN` para HTTP. Si el token está vacío, rechaza iniciar salvo `MUNIN_MCP_ALLOW_ANON=1`, solo para desarrollo. |
+| GUI online | La GUI usa el proxy same-origin del runner y almacena solo el token MCP en `localStorage`. Turso y LLM permanecen en servidor. |
+| LDAP | Las entradas de filtros pasan por `escape_filter_chars`; `ldap_search` usa plantillas y parámetros, no filtros crudos controlados por usuario. |
+| URLs LLM | Se exigen HTTPS o loopback y se rechazan endpoints de metadata/rangos no seguros conocidos. |
+| Soul | Las rutas se resuelven dentro de `soul/`; una edición es propuesta revisable, no aplicación automática. |
+| Forge | AST guard, allowlist de imports, builtins reducidos, timeout y cwd temporal antes de registrar una tool. |
+| Subagentes | `graph_forge` usa whitelist explícita; `munin_wake` rechaza agentes que no sean nativos ni grafos existentes. |
+| Auditoría | Los registros intentan redactar tokens Bearer, claves y patrones de secretos conocidos. |
 
-## Deliberate weakness — the sandbox is IN-PROCESS
+Las tools activas heredadas respetan `PREFLIGHT_POLICY` (`always`, `active_only`
+u `off`). El valor `off` se reserva al LDAP mock del workflow o a un laboratorio
+controlado: no equivale a una autorización implícita.
 
-`munin/subagents/sandbox.py` runs LLM-produced Python via `exec()` in the current
-process. That was the operator's explicit choice (see plan file). We layer several
-mitigations:
+## Qué no garantiza Munin
 
-- AST guard rejects `subprocess`, `ctypes`, `os.system`, `__class__`, `__mro__`,
-  `__subclasses__`, `__globals__`, `__code__`, `exec`, `eval`, `compile`, `__import__`
-  used as names.
-- Import allowlist enforced at AST time AND via a guarded runtime `__import__`.
-- `__builtins__` restricted to a hardcoded safe set (no `open`, `input`, `eval`,
-  `exec`, `compile`, `__import__` unless whitelisted).
-- Thread-based timeout (best-effort — Python can't force-kill a running thread).
-- Jailed `cwd` in a `tempfile.TemporaryDirectory` per execution.
+### El sandbox de forge no es una frontera fuerte
 
-**This is not a real sandbox.** A determined adversarial LLM can bypass it (bytecode
-tricks, weird references to blocked attributes, sleeping past the timeout). Use only
-with LLMs you control (your own NIM/OpenAI account) and specs from trusted operators.
+El Python generado se valida y se ejecuta en proceso. Las defensas reducen el
+riesgo accidental, pero un modelo/adversario suficientemente capaz puede hallar
+formas de eludir una sandbox basada en AST/builtins. No aceptes specs no
+confiables ni des permisos host sensibles a un runner que forja código. Para un
+aislamiento fuerte, ejecuta el candidato en un contenedor/VM sin red, de solo
+lectura, sin capabilities y con límites de CPU/memoria.
 
-If you need a real sandbox: replace `sandbox.run_code(...)` with a `docker run --rm
---network=<isolated> --cap-drop=ALL --read-only --user=nobody --memory=256m python:3.12
-python /work/script.py` wrapper.
+### La whitelist limita, no reemplaza la revisión
 
-## Reversibility
+Un grafo solo recibe las tools enlistadas, pero la utilidad y el riesgo de cada
+tool dependen del alcance/argumentos. Revisa la whitelist y el propósito antes
+de despertar un subagente, y observa `subagent_trace` durante ejecuciones largas.
+El HITL de la GUI es observabilidad y decisión operativa posterior; no es una
+puerta de aprobación bloqueante por tool call.
 
-- **Soul edits** never applied at runtime. `soul_propose_edit` writes to
-  `data/soul_pending/`; only a human merges. `munin reset` also clears pending.
-- **Autogenerated tools** are soft-deleted on `deactivate_generated_tool` and hard-
-  deleted only by `munin reset` — which is user-confirmed.
-- **Forged graphs** with `reset_policy='on_reset'` (default) go away on reset.
-  `reset_policy='persistent'` keeps them.
+### La persistencia no recupera lo que nunca se guardó
 
-## What we did NOT do (yet)
+Turso confirma estado y el código fuente de tools nuevas. Una tool heredada que
+solo dejó un `script_path` en un runner que ya murió necesita regenerarse. Los
+artifacts de Actions son útiles como respaldo, pero están sujetos a cuota y no
+son la fuente de verdad de Turso.
 
-- No **MCP transport auth**. The plan says `MUNIN_MCP_AUTH_TOKEN` should be enforced
-  by a reverse proxy (nginx/caddy) in front of `--transport streamable-http`. FastMCP
-  doesn't expose easy middleware for Bearer enforcement in this version. If you expose
-  the MCP directly (no reverse proxy), it accepts unauthenticated calls — treat that
-  as debug-only.
-- **No mTLS** between subagent runner and MCP — all subprocess communication is
-  through the SQLite shared_state file.
-- **No preflight enforcement for the `execute_command` tool when `PREFLIGHT_POLICY=off`.**
-  This is documented and logged; do not run with `off` in the field.
+## Recomendaciones de operación
+
+1. Mantén MCP en `127.0.0.1` localmente. Si abres un túnel, usa token robusto,
+   duración mínima y no lo publiques.
+2. Guarda LLM, Turso y token MCP como GitHub Secrets o variables de entorno;
+   no los copies a issues, logs, PRs, screenshots o prompts de agentes.
+3. Da a Turso un token limitado a la base de Munin y rota secretos cuando una
+   sesión/túnel haya sido expuesto por error.
+4. Ejecuta `munin_diagnostics(mode="deep")` antes de una demo. Investiga
+   `hard_failures`; un advisory opcional no justifica deshabilitar controles.
+5. Revisa PRs de Soul y commits de artefactos forjados como código de terceros.
+6. Usa el LDAP mock incluido para validar flujos. Cualquier target externo exige
+   autorización escrita y una política de preflight apropiada.
+
+## Reportar o depurar un incidente
+
+No adjuntes `.env`, tokens, dumps completos de Turso ni datos sensibles. Incluye
+el ID de run, la tool/acción, un `trace_id` si existe, el modo de diagnostics y
+logs redactados. Antes de borrar estado, conserva evidencia mínima y desactiva
+la tool/grafo específico que causó el problema.
