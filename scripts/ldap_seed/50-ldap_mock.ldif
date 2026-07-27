@@ -1,52 +1,76 @@
 # Enterprise OpenLDAP Mock Directory — Domain: dc=akatsuki,dc=com
-# Auto-bootstrap LDIF seed for osixia/openldap container
+#
+# Advanced Enterprise Active Directory / OpenLDAP Directory Tree.
+# Designed for testing threat intelligence agents, LDAP discovery, and complex privilege escalation paths.
+#
+# Vulnerability Vectors:
+#   - Kerberoastable Accounts: Service accounts with SPNs encoded in `title` (e.g. MSSQLSvc/sql01.akatsuki.com:1433)
+#   - AS-REP Roastable Users: Accounts with pre-authentication disabled (`employeeType: DONT_REQ_PREAUTH`)
+#   - Nested Group Delegation: Indirect escalation paths (e.g. Helpdesk → Server Operators → Domain Admins)
+#
+# Load into OpenLDAP:
+#   ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=akatsuki,dc=com" -w itachi -f scripts/ldap_mock.ldif
+
+# ── Top-Level Containers & Organizational Units ──────────────────────────────
 
 dn: ou=users,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: users
-description: Domain Users Container
+description: Legacy Users Container
 
 dn: ou=groups,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: groups
-description: Domain Security Groups Container
+description: Legacy Security Groups Container
 
 dn: ou=computers,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: computers
-description: Domain Computers Container
+description: Legacy Computers Container
 
 dn: ou=service-accounts,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: service-accounts
-description: Service Accounts Container
+description: Legacy Service Accounts Container
+
+# ── Enterprise Corporate OU Hierarchy ─────────────────────────────────────────
 
 dn: ou=Corp,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: Corp
 description: Corporate Enterprise Structure
 
+dn: ou=Executive,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Executive
+description: Executive Leadership & Board
+
 dn: ou=Engineering,ou=Corp,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: Engineering
-description: Software & Systems Engineering
+description: Software, Cloud & DevOps Engineering
 
 dn: ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: IT-Operations
-description: Infrastructure and System Operations
+description: Infrastructure, Systems & Network Operations
 
 dn: ou=Finance,ou=Corp,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: Finance
-description: Financial Operations
+description: Financial Operations & Accounting
 
 dn: ou=HR,ou=Corp,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: HR
-description: Human Resources
+description: Human Resources & Talent
 
-# ── Enterprise Domain Users ───────────────────────────────────────────────────
+dn: ou=Security,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Security
+description: Information Security & SecOps
+
+# ── Domain Users ──────────────────────────────────────────────────────────────
 
 dn: uid=administrator,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
@@ -56,8 +80,8 @@ sn: Administrator
 givenName: Domain
 displayName: Domain Administrator
 mail: administrator@akatsuki.com
-title: Lead Infrastructure Administrator
-ou: IT-Operations
+title: Chief Information Security Officer
+ou: Security
 userPassword: {SSHA}Pass389Secure!
 
 dn: uid=jdoe,ou=users,dc=akatsuki,dc=com
@@ -94,7 +118,7 @@ sn: Garcia
 givenName: Roberto
 displayName: Roberto Garcia
 mail: rgarcia@akatsuki.com
-title: Principal Software Engineer
+title: Principal Software Architect
 ou: Engineering
 telephoneNumber: +1-555-0188
 userPassword: {SSHA}RgarciaSecret99!
@@ -113,6 +137,20 @@ employeeType: DONT_REQ_PREAUTH
 telephoneNumber: +1-555-0177
 userPassword: {SSHA}HtargetPass2026!
 
+dn: uid=ebanks,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: ebanks
+cn: Elizabeth Banks
+sn: Banks
+givenName: Elizabeth
+displayName: Elizabeth Banks (Finance Lead)
+mail: ebanks@akatsuki.com
+title: Senior Financial Controller
+ou: Finance
+employeeType: DONT_REQ_PREAUTH
+telephoneNumber: +1-555-0133
+userPassword: {SSHA}EbanksFinance2026!
+
 dn: uid=mlopez,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 uid: mlopez
@@ -126,14 +164,27 @@ ou: HR
 telephoneNumber: +1-555-0122
 userPassword: {SSHA}MlopezPass2026!
 
-# ── Service Accounts ──────────────────────────────────────────────────────────
+dn: uid=dchen,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: dchen
+cn: David Chen
+sn: Chen
+givenName: David
+displayName: David Chen (Helpdesk)
+mail: dchen@akatsuki.com
+title: IT Helpdesk Analyst Tier 1
+ou: IT-Operations
+telephoneNumber: +1-555-0155
+userPassword: {SSHA}DchenHelpdesk1!
+
+# ── Service Accounts (Kerberoastable & Automation) ───────────────────────────
 
 dn: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 uid: svc_backup
 cn: Backup Service Account
 sn: Service
-displayName: Service - Backup System
+displayName: Service - Enterprise Backup
 mail: svc_backup@akatsuki.com
 title: MSSQLSvc/DBSERVER01.akatsuki.com:1433
 ou: IT-Operations
@@ -143,17 +194,27 @@ objectClass: inetOrgPerson
 uid: svc_mssql
 cn: MSSQL Database Service Account
 sn: Service
-displayName: Service - MSSQL Database
+displayName: Service - Production MSSQL
 mail: svc_mssql@akatsuki.com
 title: MSSQLSvc/SQL01.akatsuki.com:1433
 ou: IT-Operations
+
+dn: uid=svc_oracle,ou=service-accounts,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_oracle
+cn: Oracle ERP Service Account
+sn: Service
+displayName: Service - Oracle ERP DB
+mail: svc_oracle@akatsuki.com
+title: OracleSvc/ORA01.akatsuki.com:1521
+ou: Finance
 
 dn: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 uid: svc_http
 cn: Intranet HTTP Service Account
 sn: Service
-displayName: Service - Intranet Web App
+displayName: Service - Intranet Portal
 mail: svc_http@akatsuki.com
 title: HTTP/intranet.akatsuki.com
 ou: Engineering
@@ -168,74 +229,121 @@ mail: svc_jenkins@akatsuki.com
 title: HTTP/jenkins.akatsuki.com:8080
 ou: Engineering
 
-# ── Domain Security Groups ────────────────────────────────────────────────────
+dn: uid=svc_ansible,ou=service-accounts,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_ansible
+cn: Ansible Automation Worker
+sn: Service
+displayName: Service - Ansible Automation
+mail: svc_ansible@akatsuki.com
+title: HOST/ansible.akatsuki.com
+ou: IT-Operations
+
+# ── Privileged & Security Groups ──────────────────────────────────────────────
 
 dn: cn=Domain Admins,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Domain Admins
-description: Highest privilege domain administration group
+description: Domain Full Control Administrative Group
 member: uid=administrator,ou=users,dc=akatsuki,dc=com
 member: uid=jdoe,ou=users,dc=akatsuki,dc=com
 
 dn: cn=Enterprise Admins,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Enterprise Admins
-description: Enterprise forest administrators
+description: Forest Wide Administrative Group
 member: uid=administrator,ou=users,dc=akatsuki,dc=com
+
+dn: cn=Server Operators,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Server Operators
+description: Administrative control over domain member servers
+member: uid=jdoe,ou=users,dc=akatsuki,dc=com
+member: uid=svc_ansible,ou=service-accounts,dc=akatsuki,dc=com
+
+dn: cn=Backup Operators,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Backup Operators
+description: System Backup & Restore Privileges
+member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
 
 dn: cn=IT-Operations,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: IT-Operations
-description: Systems administration personnel
+description: IT Systems Administration Staff
 member: uid=administrator,ou=users,dc=akatsuki,dc=com
 member: uid=jdoe,ou=users,dc=akatsuki,dc=com
 member: uid=htarget,ou=users,dc=akatsuki,dc=com
+member: uid=dchen,ou=users,dc=akatsuki,dc=com
 
 dn: cn=DevOps,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: DevOps
-description: Infrastructure automation & SRE personnel
+description: Infrastructure as Code & Deployment Automation
 member: uid=asmith,ou=users,dc=akatsuki,dc=com
 member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
 
 dn: cn=Developers,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Developers
-description: Software engineering staff
+description: Software Development Engineering Group
 member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
 member: uid=asmith,ou=users,dc=akatsuki,dc=com
 
 dn: cn=Service Accounts,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Service Accounts
-description: Automated service accounts container group
+description: Managed Service Accounts Security Group
 member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
 member: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_oracle,ou=service-accounts,dc=akatsuki,dc=com
 member: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
 member: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_ansible,ou=service-accounts,dc=akatsuki,dc=com
 
 dn: cn=HR,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: HR
-description: Human Resources personnel group
+description: Human Resources Personnel Group
 member: uid=mlopez,ou=users,dc=akatsuki,dc=com
 
-# ── Domain Computers & Infrastructure ─────────────────────────────────────────
+dn: cn=Finance,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Finance
+description: Financial Controllers & Accounting Group
+member: uid=ebanks,ou=users,dc=akatsuki,dc=com
+
+# ── Computers & Server Infrastructure ─────────────────────────────────────────
 
 dn: cn=DC01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: DC01
 description: Primary Active Directory Domain Controller (Windows Server 2022)
 
+dn: cn=DC02,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: DC02
+description: Secondary Domain Controller & DNS Server
+
 dn: cn=SQL01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: SQL01
-description: Primary MSSQL Production Database Host
+description: Production Database Server (MSSQL 2022)
+
+dn: cn=ORA01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: ORA01
+description: Enterprise Resource Planning Database (Oracle 19c)
 
 dn: cn=JENKINS01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: JENKINS01
 description: Central CI/CD Automation Build Server
+
+dn: cn=FS01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: FS01
+description: Corporate File Server & Network Storage
 
 dn: cn=WS01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
