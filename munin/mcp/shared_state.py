@@ -410,8 +410,43 @@ class SharedStateStore:
         now = _utc_now_db()
         task_key = self._task_key(target_ip, action)
         metadata = _normalize_jsonish(metadata_json)
+        target = target_ip.strip()
+        normalized_action = action.strip()
+        normalized_agent = assigned_agent.strip()
+        lease_until = _lease_until(max(30, lease_seconds))
+
+        def insert_running(conn: Any) -> int | None:
+            inserted = conn.execute(
+                """
+                INSERT INTO active_tasks (
+                    target_ip, action, task_key, assigned_agent, status,
+                    lease_expires_at, metadata, result, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'RUNNING', ?, ?, '{}', ?, ?)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                (
+                    target,
+                    normalized_action,
+                    task_key,
+                    normalized_agent,
+                    lease_until,
+                    json.dumps(metadata, ensure_ascii=True),
+                    now,
+                    now,
+                ),
+            ).fetchone()
+            return int(inserted["id"]) if inserted else None
+
         with self._connect(authoritative=True) as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            task_id = insert_running(conn)
+            if task_id is not None:
+                return SharedTaskDecision(
+                    success=True,
+                    message=f"task claimed by {normalized_agent}",
+                    task_id=task_id,
+                )
+
             row = conn.execute(
                 """
                 SELECT id, assigned_agent, lease_expires_at
@@ -425,47 +460,48 @@ class SharedStateStore:
                 lease_expires_at = row["lease_expires_at"] or ""
                 stale = bool(lease_expires_at and lease_expires_at < now)
                 if not stale or not allow_steal_stale:
-                    conn.rollback()
                     return SharedTaskDecision(
                         success=False,
                         message=f"task already running for {task_key} by {row['assigned_agent']}",
                     )
-                stolen_task_id = int(row["id"])
-                conn.execute(
+                stale_row = conn.execute(
                     """
                     UPDATE active_tasks
                     SET status = 'STALE', updated_at = ?, result = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status = 'RUNNING' AND lease_expires_at = ?
+                    RETURNING id
                     """,
                     (
                         now,
                         json.dumps({"reason": "stolen_after_stale_lease"}, ensure_ascii=True),
-                        stolen_task_id,
+                        int(row["id"]),
+                        lease_expires_at,
                     ),
+                ).fetchone()
+                if stale_row:
+                    stolen_task_id = int(stale_row["id"])
+
+            # Either this caller retired the stale lease or the conflicting row
+            # changed between SELECT and CAS. The partial unique index decides
+            # which contender becomes the sole RUNNING owner.
+            task_id = insert_running(conn)
+            if task_id is None:
+                winner = conn.execute(
+                    """
+                    SELECT assigned_agent
+                    FROM active_tasks
+                    WHERE task_key = ? AND status = 'RUNNING'
+                    """,
+                    (task_key,),
+                ).fetchone()
+                winner_name = winner["assigned_agent"] if winner else "another agent"
+                return SharedTaskDecision(
+                    success=False,
+                    message=f"task already running for {task_key} by {winner_name}",
                 )
-            cursor = conn.execute(
-                """
-                INSERT INTO active_tasks (
-                    target_ip, action, task_key, assigned_agent, status,
-                    lease_expires_at, metadata, result, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'RUNNING', ?, ?, '{}', ?, ?)
-                """,
-                (
-                    target_ip.strip(),
-                    action.strip(),
-                    task_key,
-                    assigned_agent.strip(),
-                    _lease_until(max(30, lease_seconds)),
-                    json.dumps(metadata, ensure_ascii=True),
-                    now,
-                    now,
-                ),
-            )
-            task_id = int(cursor.lastrowid)
-            conn.commit()
         return SharedTaskDecision(
             success=True,
-            message=f"task claimed by {assigned_agent.strip()}",
+            message=f"task claimed by {normalized_agent}",
             task_id=task_id,
             stolen_stale_task_id=stolen_task_id,
         )
@@ -585,12 +621,12 @@ class SharedStateStore:
         MCP requests) previously both saw "no live runner" and both spawned — now
         one wins and the other returns ``spawned=False`` with the winner's pid.
 
-        Implementation: SQLite transaction reads presence row and, if it's
-        missing/IDLE/pid-dead, writes ``status='SPAWNING'`` + ``pid=spawner_pid``
-        under BEGIN IMMEDIATE. Because the row is keyed by ``agent_name`` (PK),
-        only one writer can commit; the loser reads the winner's row on retry
-        and returns ``claimed=False``. Callers are expected to upgrade the
-        status to ``RUNNING`` once the process is actually up.
+        Implementation: read the current lease and then use a single conditional
+        INSERT or UPDATE as an optimistic compare-and-swap. The primary key and
+        the exact previous row values form the CAS guard, so only one host can
+        publish ``status='SPAWNING'``. This avoids holding a remote Hrana
+        transaction open while another Turso client waits for the write lock.
+        Callers upgrade the status to ``RUNNING`` once the process is actually up.
 
         Returns::
             {"claimed": bool, "existing_pid": int | None, "reason": str}
@@ -599,14 +635,19 @@ class SharedStateStore:
         - ``claimed=False`` → another caller already spawned (see ``existing_pid``).
         """
         import os as _os
+
         now = _utc_now_db()
         now_epoch = time.time()
+        normalized_name = agent_name.strip()
         owner_instance = (instance_id or get_instance_id()).strip()
         with self._connect(authoritative=True) as conn:
-            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT agent_name, status, metadata FROM agent_presence WHERE agent_name = ?",
-                (agent_name.strip(),),
+                """
+                SELECT agent_name, status, last_seen_at, metadata
+                FROM agent_presence
+                WHERE agent_name = ?
+                """,
+                (normalized_name,),
             ).fetchone()
 
             existing_pid: int | None = None
@@ -647,35 +688,68 @@ class SharedStateStore:
                         existing_pid = None
 
             if occupied_reason:
-                conn.rollback()
                 return {"claimed": False, "existing_pid": existing_pid, "reason": occupied_reason}
 
-            # Slot is free (empty, idle, or has a dead pid) → claim SPAWNING.
-            conn.execute(
-                """
-                INSERT INTO agent_presence (agent_name, role, status, current_task_id, last_seen_at, metadata)
-                VALUES (?, ?, 'SPAWNING', NULL, ?, ?)
-                ON CONFLICT(agent_name) DO UPDATE SET
-                    status='SPAWNING',
-                    last_seen_at=excluded.last_seen_at,
-                    metadata=excluded.metadata
-                """,
-                (
-                    agent_name.strip(),
-                    "",
-                    now,
-                    json.dumps(
-                        {
-                            "pid": spawner_pid,
-                            "instance_id": owner_instance,
-                            "lease_expires_at_epoch": now_epoch + PRESENCE_LEASE_SECONDS,
-                            "state": "spawning",
-                        },
-                        ensure_ascii=True,
-                    ),
-                ),
+            claim_metadata = json.dumps(
+                {
+                    "pid": spawner_pid,
+                    "instance_id": owner_instance,
+                    "lease_expires_at_epoch": now_epoch + PRESENCE_LEASE_SECONDS,
+                    "state": "spawning",
+                },
+                ensure_ascii=True,
             )
-            conn.commit()
+            if row is None:
+                claimed_row = conn.execute(
+                    """
+                    INSERT INTO agent_presence (
+                        agent_name, role, status, current_task_id, last_seen_at, metadata
+                    )
+                    VALUES (?, '', 'SPAWNING', NULL, ?, ?)
+                    ON CONFLICT(agent_name) DO NOTHING
+                    RETURNING agent_name
+                    """,
+                    (normalized_name, now, claim_metadata),
+                ).fetchone()
+            else:
+                claimed_row = conn.execute(
+                    """
+                    UPDATE agent_presence
+                    SET status = 'SPAWNING', last_seen_at = ?, metadata = ?
+                    WHERE agent_name = ?
+                      AND status = ?
+                      AND last_seen_at = ?
+                      AND metadata = ?
+                    RETURNING agent_name
+                    """,
+                    (
+                        now,
+                        claim_metadata,
+                        normalized_name,
+                        row["status"],
+                        row["last_seen_at"],
+                        row["metadata"],
+                    ),
+                ).fetchone()
+
+            if claimed_row is None:
+                winner = conn.execute(
+                    "SELECT metadata FROM agent_presence WHERE agent_name = ?",
+                    (normalized_name,),
+                ).fetchone()
+                winner_pid: int | None = None
+                if winner:
+                    try:
+                        winner_meta = json.loads(winner["metadata"] or "{}")
+                    except json.JSONDecodeError:
+                        winner_meta = {}
+                    recorded_pid = winner_meta.get("pid") if isinstance(winner_meta, dict) else None
+                    winner_pid = recorded_pid if isinstance(recorded_pid, int) else None
+                return {
+                    "claimed": False,
+                    "existing_pid": winner_pid,
+                    "reason": "slot_claimed_elsewhere",
+                }
         return {"claimed": True, "existing_pid": None, "reason": "slot_claimed"}
 
     def list_presence(self, *, stale_after_seconds: int = 3600) -> list[dict[str, Any]]:
@@ -1250,24 +1324,24 @@ class SharedStateStore:
         """Atomically claim the highest-priority unclaimed wake item for a given agent."""
         now = _utc_now_db()
         with self._connect(authoritative=True) as conn:
-            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT id, task_json FROM agent_wake_queue
-                WHERE target_agent = ? AND claimed_at = ''
-                ORDER BY priority DESC, id ASC
-                LIMIT 1
+                UPDATE agent_wake_queue
+                SET claimed_at = ?, claimer_pid = ?
+                WHERE id = (
+                    SELECT id
+                    FROM agent_wake_queue
+                    WHERE target_agent = ? AND claimed_at = ''
+                    ORDER BY priority DESC, id ASC
+                    LIMIT 1
+                )
+                  AND claimed_at = ''
+                RETURNING id, task_json
                 """,
-                (target_agent.strip(),),
+                (now, claimer_pid, target_agent.strip()),
             ).fetchone()
             if not row:
-                conn.rollback()
                 return None
-            conn.execute(
-                "UPDATE agent_wake_queue SET claimed_at = ?, claimer_pid = ? WHERE id = ?",
-                (now, claimer_pid, row["id"]),
-            )
-            conn.commit()
         return {"id": int(row["id"]), "task": _normalize_jsonish(row["task_json"] or "{}"), "claimed_at": now}
 
     def list_wake_queue(self, *, target_agent: str = "", include_claimed: bool = False) -> list[dict[str, Any]]:
