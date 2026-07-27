@@ -22,11 +22,17 @@ On first launch, click the gear icon (top-right) and configure:
 Credentials are stored only in `localStorage`; they are never sent anywhere
 except directly to the Munin MCP server.
 
+The `Munin Live Session` GitHub Actions workflow can also build and publish this
+GUI as a temporary website. In that mode, the frontend defaults to its own
+origin and Next.js proxies `/mcp/` to the authenticated Munin server inside the
+same runner. Only the bearer token must be entered in Settings; Turso credentials
+remain server-side.
+
 ## Requirements
 
 - Node.js 18+ (Node 20 recommended)
 - Munin's FastMCP server running at the configured base URL with
-  `streamable-http` transport exposing `/mcp/`.
+  `streamable-http` transport exposing `/mcp`.
 
 ## Architecture
 

@@ -10,8 +10,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..main import MCP, STATE, audited_tool  # noqa: TID252
 from .. import registry  # noqa: TID252
+from ..main import JOBS, MCP, STATE, audited_tool  # noqa: TID252
+from ..shared_state import _coerce_int  # noqa: TID252,PLC2701
 
 logger = logging.getLogger("munin-mcp.munin_tools")
 
@@ -53,7 +54,8 @@ def describe_generated_tool(name: str, include_script: bool = False, run_id: str
         return {"ok": False, "tool": "describe_generated_tool", "mode": "sync", "summary": "not found", "error": {"code": "not_found", "message": name}}
     if include_script:
         try:
-            row = {**row, "script": Path(row["script_path"]).read_text(encoding="utf-8")}
+            script_path = registry.resolve_script_path(STATE.settings, row["script_path"])
+            row = {**row, "script": script_path.read_text(encoding="utf-8")}
         except Exception as exc:
             row = {**row, "script_error": str(exc)}
     return {"ok": True, "tool": "describe_generated_tool", "mode": "sync", "summary": row["name"], "data": row}
@@ -73,7 +75,10 @@ def run_generated_tool(name: str, args_json: str = "{}", run_id: str = "") -> di
     except Exception as exc:
         return {"ok": False, "tool": "run_generated_tool", "mode": "sync", "summary": "bad args_json", "error": {"code": "bad_input", "message": str(exc)}}
     try:
-        callable_fn = registry._load_callable(Path(row["script_path"]), row["signature"].get("function_name") or row["name"].replace("gen__", ""))
+        callable_fn = registry._load_callable(
+            registry.resolve_script_path(STATE.settings, row["script_path"]),
+            row["signature"].get("function_name") or row["name"].replace("gen__", ""),
+        )
         result = callable_fn(**args)
     except Exception as exc:
         return {"ok": False, "tool": "run_generated_tool", "mode": "sync", "summary": "exec failed", "error": {"code": "generated_tool_failed", "message": str(exc)}}
@@ -83,9 +88,79 @@ def run_generated_tool(name: str, args_json: str = "{}", run_id: str = "") -> di
 @MCP.tool()
 @audited_tool("deactivate_generated_tool", "admin", lambda *a, **k: "sync")
 def deactivate_generated_tool(name: str, run_id: str = "") -> dict[str, Any]:
-    """Soft-delete a generated tool (marks active=0). Use `munin reset` for hard purge."""
-    ok = registry.deactivate(STATE, name)
-    return {"ok": ok, "tool": "deactivate_generated_tool", "mode": "sync", "summary": f"deactivate {name}: {ok}", "data": {"name": name, "deactivated": ok}}
+    """Soft-delete a generated tool (marks active=0). Use `munin reset` for hard purge.
+
+    Returns ``not_found`` explicitly when the name doesn't exist — before this
+    the response was ``ok=False`` with a generic summary, which the frontend
+    couldn't distinguish from a real deactivation failure.
+    """
+    ok = registry.deactivate(MCP, STATE, name)
+    if not ok:
+        return {
+            "ok": False,
+            "tool": "deactivate_generated_tool",
+            "mode": "sync",
+            "summary": f"no active tool named {name}",
+            "error": {"code": "not_found", "message": name},
+            "data": {"name": name, "deactivated": False},
+        }
+    return {
+        "ok": True,
+        "tool": "deactivate_generated_tool",
+        "mode": "sync",
+        "summary": f"deactivated {name}",
+        "data": {"name": name, "deactivated": True},
+    }
+
+
+@MCP.tool()
+@audited_tool("read_wake_artifact", "passive", lambda *a, **k: "sync")
+def read_wake_artifact(
+    wake_id: int,
+    offset: int = 0,
+    max_chars: int = 12000,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Read a bounded chunk of a large subagent result by wake id."""
+    normalized_wake_id = _coerce_int(wake_id, -1)
+    normalized_offset = max(0, _coerce_int(offset, 0))
+    normalized_limit = max(1, min(_coerce_int(max_chars, 12000), 50000))
+    if normalized_wake_id < 1:
+        return {
+            "ok": False,
+            "tool": "read_wake_artifact",
+            "mode": "sync",
+            "summary": "invalid wake id",
+            "error": {"code": "bad_input", "message": "wake_id must be a positive integer"},
+        }
+
+    path = _get_settings().munin_data_path / "wake_artifacts" / f"wake_{normalized_wake_id}.json"
+    if not path.is_file():
+        return {
+            "ok": False,
+            "tool": "read_wake_artifact",
+            "mode": "sync",
+            "summary": "artifact not found",
+            "error": {"code": "not_found", "message": f"wake {normalized_wake_id}"},
+        }
+
+    content = path.read_text(encoding="utf-8")
+    chunk = content[normalized_offset:normalized_offset + normalized_limit]
+    next_offset = normalized_offset + len(chunk)
+    return {
+        "ok": True,
+        "tool": "read_wake_artifact",
+        "mode": "sync",
+        "summary": f"read wake {normalized_wake_id} artifact",
+        "data": {
+            "wake_id": normalized_wake_id,
+            "content": chunk,
+            "offset": normalized_offset,
+            "next_offset": next_offset,
+            "eof": next_offset >= len(content),
+            "total_chars": len(content),
+        },
+    }
 
 
 # ─────────────────────────────────────────────
@@ -120,9 +195,16 @@ def soul_read(path: str, run_id: str = "") -> dict[str, Any]:
 @MCP.tool()
 @audited_tool("soul_propose_edit", "documentation", lambda *a, **k: "sync")
 def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: str = "") -> dict[str, Any]:
-    """Propose a soul edit — QUEUED, NOT APPLIED. Human operator reviews at soul_pending/ before merge.
+    """Propose a soul edit — human-in-the-loop.
 
-    Munin CAN'T rewrite its own identity in runtime. This deliberately requires a human in the loop.
+    Always writes to ``data/soul_pending/`` (local file review). When Munin runs
+    in a repo with ``MUNIN_AUTO_PR=1`` and the ``gh`` CLI is authenticated,
+    ALSO opens a pull request tagged ``soul-proposal`` so the human operator
+    can review, approve, and merge. That's the mechanism by which Munin's
+    identity evolves session by session: it can propose, but never apply.
+
+    Munin CAN'T rewrite its own identity in runtime. Both the local file drop
+    and the PR are proposals; a human still has to merge.
     """
     settings = _get_settings()
     pending_root = settings.munin_data_path / "soul_pending"
@@ -131,12 +213,96 @@ def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: 
         _ = _safe_soul_path(path)  # only validates traversal
     except ValueError as exc:
         return {"ok": False, "tool": "soul_propose_edit", "mode": "sync", "summary": "bad path", "error": {"code": "path_escape", "message": str(exc)}}
+
     digest = hashlib.sha256(new_content.encode("utf-8")).hexdigest()[:12]
     proposal = pending_root / f"{Path(path).stem}.{digest}.pending.md"
     proposal.write_text(new_content, encoding="utf-8")
     meta = pending_root / f"{Path(path).stem}.{digest}.meta.json"
-    meta.write_text(json.dumps({"target_path": path, "rationale": rationale, "sha256": digest}, ensure_ascii=True), encoding="utf-8")
-    return {"ok": True, "tool": "soul_propose_edit", "mode": "sync", "summary": f"proposal queued at {proposal.name}", "data": {"proposal_path": str(proposal), "meta_path": str(meta)}}
+    meta.write_text(
+        json.dumps({"target_path": path, "rationale": rationale, "sha256": digest}, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+    pr_info: dict[str, Any] = {"attempted": False}
+    import os as _os  # noqa: PLC0415
+    if _os.environ.get("MUNIN_AUTO_PR", "").strip() in ("1", "true", "yes", "on"):
+        try:
+            import shutil as _shutil  # noqa: PLC0415
+            import subprocess as _subprocess  # noqa: PLC0415
+
+            from ..git_persist import _ensure_git_identity, _repo_root, _run_git  # noqa: TID252,PLC0415
+            repo = _repo_root()
+            if repo is None:
+                pr_info = {"attempted": True, "ok": False, "error": "not_a_git_repo"}
+            elif _shutil.which("gh") is None:
+                pr_info = {"attempted": True, "ok": False, "error": "gh_cli_not_installed"}
+            else:
+                branch = f"soul-proposal/{Path(path).stem}-{digest}"
+                base_branch = _os.environ.get("MUNIN_PR_BASE_BRANCH", "main").strip() or "main"
+                import tempfile as _tempfile  # noqa: PLC0415
+
+                # Build the proposal in a disposable worktree. The live process
+                # rereads soul/ on every turn, so its checkout must stay untouched.
+                with _tempfile.TemporaryDirectory(prefix="munin-soul-proposal-") as temporary_dir:
+                    worktree = Path(temporary_dir) / "worktree"
+                    _run_git(["check-ref-format", "--branch", base_branch], cwd=repo)
+                    _run_git(["fetch", "origin", base_branch], cwd=repo)
+                    _run_git(
+                        ["worktree", "add", "--detach", str(worktree), f"origin/{base_branch}"],
+                        cwd=repo,
+                    )
+                    try:
+                        _ensure_git_identity(worktree)
+                        _run_git(["checkout", "-B", branch], cwd=worktree)
+                        target = (worktree / "soul" / path).resolve()
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(new_content, encoding="utf-8")
+                        _run_git(["add", "--", str(target)], cwd=worktree)
+                        commit_msg = f"[munin][soul-proposal] {path}\n\n{rationale or '(no rationale supplied)'}\n\nsha256: {digest}"
+                        commit = _run_git(["commit", "-m", commit_msg], cwd=worktree, check=False)
+                        if commit.returncode != 0:
+                            raise RuntimeError((commit.stderr or commit.stdout).strip()[-400:])
+                        pushed = _run_git(["push", "-u", "origin", branch], cwd=worktree, check=False)
+                        if pushed.returncode != 0:
+                            raise RuntimeError((pushed.stderr or pushed.stdout).strip()[-400:])
+                        pr_body = (
+                            f"### Soul edit proposal by Munin\n\n"
+                            f"**File:** `soul/{path}`\n"
+                            f"**sha256:** `{digest}`\n"
+                            f"**Rationale:** {rationale or '(no rationale supplied)'}\n\n"
+                            "Merge to update Munin's identity. This branch is auto-generated — do not commit further work here."
+                        )
+                        pr = _subprocess.run(
+                            ["gh", "pr", "create",
+                             "--head", branch,
+                             "--base", base_branch,
+                             "--title", f"soul: {path} update",
+                             "--body", pr_body,
+                             "--label", "soul-proposal"],
+                            cwd=worktree, capture_output=True, text=True, timeout=60, check=False,
+                        )
+                        if pr.returncode == 0:
+                            pr_info = {"attempted": True, "ok": True, "branch": branch, "output": pr.stdout.strip()}
+                        else:
+                            pr_info = {"attempted": True, "ok": False, "error": (pr.stderr or pr.stdout).strip()[-400:]}
+                    finally:
+                        _run_git(["worktree", "remove", "--force", str(worktree)], cwd=repo, check=False)
+        except Exception as exc:  # pragma: no cover — best effort
+            pr_info = {"attempted": True, "ok": False, "error": f"exception: {exc}"}
+
+    return {
+        "ok": True,
+        "tool": "soul_propose_edit",
+        "mode": "sync",
+        "summary": f"proposal queued at {proposal.name}"
+                   + (f"; PR opened on {pr_info.get('branch', '?')}" if pr_info.get("ok") else ""),
+        "data": {
+            "proposal_path": str(proposal),
+            "meta_path": str(meta),
+            "sha256": digest,
+            "pr": pr_info,
+        },
+    }
 
 
 # ─────────────────────────────────────────────
@@ -169,7 +335,10 @@ def memory_recall(key: str, run_id: str = "") -> dict[str, Any]:
 @audited_tool("memory_list", "passive", lambda *a, **k: "sync")
 def memory_list(prefix: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
     """List semantic facts. Filter by key prefix."""
-    rows = STATE.semantic_list(prefix=prefix, limit=limit)
+    # Coerce limit at tool boundary. Some MCP clients ship integer-typed params as
+    # strings; propagating a string into the store previously triggered a TypeError
+    # on `min(int, str)`. See _coerce_int docstring for detail.
+    rows = STATE.semantic_list(prefix=prefix, limit=_coerce_int(limit, 100))
     return {"ok": True, "tool": "memory_list", "mode": "sync", "summary": f"{len(rows)} facts", "data": {"facts": rows, "count": len(rows)}}
 
 
@@ -177,7 +346,7 @@ def memory_list(prefix: str = "", limit: int = 100, run_id: str = "") -> dict[st
 @audited_tool("episodic_query", "passive", lambda *a, **k: "sync")
 def episodic_query(agent: str = "", action: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
     """Recent episodic events (tool calls, ReAct steps, orchestrator decisions)."""
-    rows = STATE.episodic_query(agent=agent, action=action, limit=limit)
+    rows = STATE.episodic_query(agent=agent, action=action, limit=_coerce_int(limit, 100))
     return {"ok": True, "tool": "episodic_query", "mode": "sync", "summary": f"{len(rows)} events", "data": {"events": rows, "count": len(rows)}}
 
 
@@ -194,7 +363,10 @@ def list_subagent_tools(category: str = "", run_id: str = "") -> dict[str, Any]:
     Pass category= to filter (e.g. 'ldap', 'intel', 'memory', 'messaging').
     """
     from ...subagents.base import list_subagent_tools as _list  # noqa: PLC0415
-    return _list(category=category)
+    # Pass STATE so the base function can attach the "forged" category with
+    # every currently-registered gen__* tool. Without it Munin sees natives
+    # only and never puts its own creations in whitelists it forges.
+    return _list(category=category, state=STATE)
 
 
 # ─────────────────────────────────────────────
@@ -202,16 +374,20 @@ def list_subagent_tools(category: str = "", run_id: str = "") -> dict[str, Any]:
 # ─────────────────────────────────────────────
 
 @MCP.tool()
-@audited_tool("munin_chat", "passive", lambda *a, **k: "sync")
+@audited_tool("munin_chat", "passive", lambda *a, **k: str(k.get("mode", "sync")))
 def munin_chat(
     message: str,
-    max_iterations: int = 6,
+    max_iterations: int = 40,
+    mode: str = "sync",
     run_id: str = "",
 ) -> dict[str, Any]:
     """Full conversational ReAct interface. Send natural language — Munin reasons,
     calls tools autonomously, and returns a response plus the tool-call log so the
     frontend can render each step as an inline card.
-    Requires LLM_BASE_URL / LLM_API_KEY / LLM_MODEL to be configured."""
+    Requires LLM_BASE_URL / LLM_API_KEY / LLM_MODEL to be configured.
+    Default budget is 40 iterations — raised from 6 to allow multi-stage
+    recon → intel → forge pipelines to complete.
+    """
     if not message.strip():
         return {
             "ok": False, "tool": "munin_chat", "mode": "sync",
@@ -228,32 +404,62 @@ def munin_chat(
                 "message": "LLM_BASE_URL, LLM_API_KEY and LLM_MODEL must be set to use munin_chat",
             },
         }
-    try:
-        from ...core.munin_agent import MuninAgent  # noqa: PLC0415
-        agent = MuninAgent(settings)
-        result = agent.respond(
-            message.strip(),
-            max_iterations=max(1, min(int(max_iterations), 400)),
-        )
-    except Exception as exc:
-        logger.exception("munin_chat: agent error")
+    if mode not in {"sync", "async"}:
         return {
             "ok": False, "tool": "munin_chat", "mode": "sync",
-            "summary": "agent error",
-            "error": {"code": "agent_error", "message": str(exc)},
+            "summary": "bad mode",
+            "error": {"code": "bad_input", "message": "mode must be sync or async"},
         }
-    content = result.get("content", "")
-    return {
-        "ok": True,
-        "tool": "munin_chat",
-        "mode": "sync",
-        "summary": content[:120] if content else "(no response)",
-        "data": {
-            "content": content,
-            "tool_calls": result.get("tool_calls", []),
-            "iterations": result.get("iterations", 0),
-        },
-    }
+
+    iterations = max(1, min(_coerce_int(max_iterations, 40), 400))
+
+    def execute(progress=None) -> dict[str, Any]:
+        try:
+            from ...core.munin_agent import MuninAgent  # noqa: PLC0415
+            agent = MuninAgent(settings)
+            result = agent.respond(message.strip(), max_iterations=iterations, progress=progress)
+        except Exception as exc:
+            logger.exception("munin_chat: agent error")
+            return {
+                "ok": False, "tool": "munin_chat", "mode": "sync",
+                "summary": "agent error",
+                "error": {"code": "agent_error", "message": str(exc)},
+            }
+        content = result.get("content", "")
+        return {
+            "ok": True,
+            "tool": "munin_chat",
+            "mode": "sync",
+            "summary": content[:120] if content else "(no response)",
+            "data": {
+                "content": content,
+                "tool_calls": result.get("tool_calls", []),
+                "iterations": result.get("iterations", 0),
+                "stop_reason": result.get("stop_reason", "unknown"),
+            },
+        }
+
+    if mode == "async":
+        job = JOBS.submit(
+            tool="munin_chat",
+            level="passive",
+            target="conversation",
+            command_preview="ReAct conversation",
+            fn=lambda current_job: execute(
+                lambda event: JOBS.add_progress(current_job.job_id, event)
+            ),
+        )
+        JOBS.add_progress(job.job_id, {"stage": "queued", "message": "Conversation queued"})
+        return {
+            "ok": True,
+            "tool": "munin_chat",
+            "mode": "async",
+            "job_id": job.job_id,
+            "summary": "Munin conversation started",
+            "data": {"job_id": job.job_id, "status": job.status},
+        }
+
+    return execute()
 
 
 # ─────────────────────────────────────────────
@@ -266,7 +472,7 @@ def munin_read_source(rel_path: str = "", action: str = "list", run_id: str = ""
     """Allows Munin to inspect its own codebase (source files under munin/ and app/).
     Action 'list': returns directory tree. Action 'read': reads a specific source file."""
     settings = _get_settings()
-    base_dir = settings.munin_db_path.parent.resolve()  # Repository root
+    base_dir = settings.workspace_root.resolve()  # repository root (Settings.munin_db_path never existed)
 
     if action == "list":
         allowed_dirs = ["munin", "app"]
@@ -295,6 +501,23 @@ def munin_read_source(rel_path: str = "", action: str = "list", run_id: str = ""
         candidate = (base_dir / rel_path.strip()).resolve()
         if base_dir not in candidate.parents and candidate != base_dir:
             return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "path escape", "error": {"code": "path_traversal", "message": "rel_path escapes repository root"}}
+        # Restrict to the same subdirs that `list` allows. Without this, an
+        # attacker-controlled LLM could read `.env` (API keys), `data/*` (SQLite
+        # dumps), or `.git/config`. list_allowed_prefixes must match the `list`
+        # branch above.
+        allowed_prefixes = [(base_dir / d).resolve() for d in ("munin", "app")]
+        if not any(candidate == p or p in candidate.parents for p in allowed_prefixes):
+            return {
+                "ok": False,
+                "tool": "munin_read_source",
+                "mode": "sync",
+                "summary": "path outside allowed roots",
+                "error": {
+                    "code": "path_denied",
+                    "message": "read is only allowed under munin/ or app/; secrets and data are off-limits",
+                    "rel_path": rel_path,
+                },
+            }
         if not candidate.exists() or not candidate.is_file():
             return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "file not found", "error": {"code": "not_found", "message": rel_path}}
         try:
@@ -374,7 +597,19 @@ def munin_self_diagnose(run_id: str = "") -> dict[str, Any]:
 @MCP.tool()
 @audited_tool("munin_wake", "admin", lambda *a, **k: "sync")
 def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: str = "") -> dict[str, Any]:
-    """Enqueue a wake request for a subagent. The subagent's runner (a subprocess) claims and executes it."""
+    """Wake a subagent to handle a task: enqueues the task AND spawns the runner subprocess.
+
+    Previously this only inserted a row into ``agent_wake_queue`` — the corresponding
+    ``python -m munin.subagents.runner`` process was never started, so the wake item
+    lived forever unclaimed. Now the call goes through :class:`Orchestrator.wake`
+    which enqueues the task, spawns a detached runner subprocess, and updates the
+    presence table. The runner picks the task up via ``claim_wake_item`` and
+    executes it. Result is delivered back via ``agent_messages`` (poll with
+    ``fetch_agent_messages``).
+
+    Accepts either a native subagent (``ldap_agent``, ``tool_forge``, ``graph_forge``)
+    or the name of a forged graph in ``generated_graphs``.
+    """
     if not subagent.strip():
         return {"ok": False, "tool": "munin_wake", "mode": "sync", "summary": "empty subagent", "error": {"code": "bad_input", "message": "subagent name required"}}
     try:
@@ -383,8 +618,57 @@ def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: 
             raise ValueError("task_json must be an object")
     except Exception as exc:
         return {"ok": False, "tool": "munin_wake", "mode": "sync", "summary": "bad task_json", "error": {"code": "bad_input", "message": str(exc)}}
-    wake_id = STATE.enqueue_wake(target_agent=subagent.strip(), task=task, priority=priority)
-    return {"ok": True, "tool": "munin_wake", "mode": "sync", "summary": f"wake queued for {subagent}", "data": {"wake_id": wake_id, "target_agent": subagent, "task": task}}
+
+    priority_int = _coerce_int(priority, 0)
+
+    # Verify the subagent actually exists — either as a native runner or as a
+    # forged graph in generated_graphs. Fail early with a clear error otherwise;
+    # otherwise the runner subprocess would crash after spawn and the item would
+    # sit forever in the wake queue.
+    from ...subagents.runner import _NATIVE_SUBAGENTS  # noqa: PLC0415
+    forged = None
+    try:
+        forged = STATE.graph_get(subagent.strip())
+    except Exception:
+        forged = None
+    if subagent.strip() not in _NATIVE_SUBAGENTS and not forged:
+        return {
+            "ok": False,
+            "tool": "munin_wake",
+            "mode": "sync",
+            "summary": f"unknown subagent: {subagent}",
+            "error": {
+                "code": "unknown_subagent",
+                "message": (
+                    f"'{subagent}' is neither a native runner "
+                    f"({', '.join(sorted(_NATIVE_SUBAGENTS))}) nor a forged graph. "
+                    "Use graph_forge first to create a specialist, then wake it."
+                ),
+            },
+        }
+
+    # Delegate to Orchestrator so enqueue + subprocess spawn happen together.
+    try:
+        from ...core.orchestrator import Orchestrator  # noqa: PLC0415
+        orch = Orchestrator(STATE)
+        info = orch.wake(subagent.strip(), task, priority=priority_int, detached=True)
+    except Exception as exc:
+        logger.exception("orchestrator.wake failed for %s", subagent)
+        return {
+            "ok": False,
+            "tool": "munin_wake",
+            "mode": "sync",
+            "summary": f"failed to spawn runner for {subagent}",
+            "error": {"code": "spawn_failed", "message": str(exc)},
+        }
+
+    return {
+        "ok": True,
+        "tool": "munin_wake",
+        "mode": "sync",
+        "summary": f"wake queued and runner spawned for {subagent} (pid={info.get('pid')})",
+        "data": {**info, "task": task},
+    }
 
 
 @MCP.tool()
@@ -403,3 +687,96 @@ def munin_wake_list(subagent: str = "", include_claimed: bool = False, run_id: s
     """List pending (and optionally claimed) wake items."""
     items = STATE.list_wake_queue(target_agent=subagent, include_claimed=include_claimed)
     return {"ok": True, "tool": "munin_wake_list", "mode": "sync", "summary": f"{len(items)} wake items", "data": {"items": items, "count": len(items)}}
+
+
+# ─────────────────────────────────────────────
+# Live subagent observability
+# ─────────────────────────────────────────────
+
+@MCP.tool()
+@audited_tool("subagent_trace", "passive", lambda *a, **k: "sync")
+def subagent_trace(
+    subagent: str,
+    since_id: int = 0,
+    since_event_id: int | None = None,
+    since_message_id: int | None = None,
+    include_messages: bool = True,
+    limit: int = 200,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Return every episodic event + outbound message from a subagent, ordered oldest → newest.
+
+    This is the observability channel the frontend uses to render live iteration
+    of a running subagent: what tool it called, with what args, how long it took,
+    whether the LLM produced a final answer or is still looping. Poll it every
+    1-2 seconds with the last ``since_id`` you saw to get incremental updates.
+
+    Parameters
+    ----------
+    subagent : agent_name to filter by (e.g. 'ldap_agent' or a forged graph name).
+    since_id : legacy cursor applied to both streams when stream-specific cursors are omitted.
+    since_event_id : return only episodic events with id above this cursor.
+    since_message_id : return only agent messages with id above this cursor.
+    include_messages : also include agent_messages this subagent posted to munin.
+    limit    : maximum number of events + messages returned.
+
+    The response shape is designed so a UI can concatenate every ``since_id``
+    poll into a single append-only stream::
+
+        {
+          "events":  [{id, ts, action, input, output, tags}, ...],   # ordered by id ASC
+          "messages":[{id, created_at, type, subject, body, status}, ...],
+          "next_event_id": <last event id seen>,
+          "next_message_id": <last message id seen>,
+          "presence": {status, last_seen_at, current_task_id},
+        }
+    """
+    if not subagent.strip():
+        return {"ok": False, "tool": "subagent_trace", "mode": "sync",
+                "summary": "empty subagent", "error": {"code": "bad_input", "message": "subagent required"}}
+    since_id_int = _coerce_int(since_id, 0)
+    event_since = _coerce_int(since_event_id, since_id_int) if since_event_id is not None else since_id_int
+    message_since = _coerce_int(since_message_id, since_id_int) if since_message_id is not None else since_id_int
+    limit_int = _coerce_int(limit, 200)
+
+    # Use the incremental helpers — truly append-only, no lost middle for long runs.
+    events = STATE.episodic_since(
+        agent=subagent.strip(),
+        since_id=event_since,
+        limit=max(1, min(limit_int, 1000)),
+    )
+
+    messages_out: list[dict[str, Any]] = []
+    if include_messages:
+        # sender-filtered SQL — no window loss on a chatty system.
+        messages_out = STATE.messages_from_sender_since(
+            sender_agent=subagent.strip(),
+            recipient_agent="munin",
+            since_id=message_since,
+            limit=max(1, min(limit_int, 500)),
+        )
+
+    # Presence snapshot for the UI to show status pill / dot
+    presence_rows = STATE.list_presence(stale_after_seconds=3600)
+    presence = next((p for p in presence_rows if p["agent_name"] == subagent.strip()), None)
+
+    next_event = events[-1]["id"] if events else event_since
+    next_message = messages_out[-1]["id"] if messages_out else message_since
+    return {
+        "ok": True,
+        "tool": "subagent_trace",
+        "mode": "sync",
+        "summary": (
+            f"{len(events)} events since {event_since}, "
+            f"{len(messages_out)} msgs since {message_since} for {subagent}"
+        ),
+        "data": {
+            "subagent": subagent.strip(),
+            "events": events,
+            "messages": messages_out,
+            "next_event_id": next_event,
+            "next_message_id": next_message,
+            "next_since_id": next_event,
+            "presence": presence,
+        },
+    }
