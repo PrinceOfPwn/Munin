@@ -220,9 +220,7 @@ class MuninAgent:
                 completion = self.llm.chat(messages=messages, tools=specs, temperature=0.2)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("LLM call failed at step %d", step)
-                final_content = f"LLM error at step {step}: {exc}"
-                stop_reason = "llm_error"
-                break
+                raise RuntimeError(f"LLM call failed at step {step}: {exc}") from exc
             message = completion["choices"][0]["message"]
             messages.append(message)
             content_now = (message.get("content") or "").strip()
@@ -331,10 +329,10 @@ class MuninAgent:
                         }
                     )
                     nudged_once = True
-                    # Do NOT clear recent_calls — keep the window so if the
-                    # model ignores the nudge and produces the same repetitive
-                    # pattern on the very next iteration, the ELSE branch
-                    # aborts immediately instead of waiting for 6 more calls.
+                    # Start a fresh observation window. A single substantively
+                    # different next call now satisfies the nudge instead of
+                    # being judged against five pre-nudge fingerprints.
+                    recent_calls.clear()
                 else:
                     logger.error("repetition persists after nudge — aborting loop")
                     stop_reason = "repetition_detected"
