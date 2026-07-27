@@ -146,7 +146,7 @@ class SharedStateStore:
     # ------------------------------------------------------------------
     # Connection / schema
     # ------------------------------------------------------------------
-    def _connect(self) -> Any:
+    def _connect(self, *, authoritative: bool = False) -> Any:
         """Open a fresh connection to the configured backend.
 
         Returns either a ``sqlite3.Connection`` (default) or a libsql proxy that
@@ -158,6 +158,7 @@ class SharedStateStore:
             self.settings.db_url,
             default_path=self.db_path,
             auth_token=self.settings.db_auth_token,
+            authoritative=authoritative,
         )
 
     def _init_db(self) -> None:
@@ -409,7 +410,7 @@ class SharedStateStore:
         now = _utc_now_db()
         task_key = self._task_key(target_ip, action)
         metadata = _normalize_jsonish(metadata_json)
-        with self._connect() as conn:
+        with self._connect(authoritative=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
@@ -601,7 +602,7 @@ class SharedStateStore:
         now = _utc_now_db()
         now_epoch = time.time()
         owner_instance = (instance_id or get_instance_id()).strip()
-        with self._connect() as conn:
+        with self._connect(authoritative=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT agent_name, status, metadata FROM agent_presence WHERE agent_name = ?",
@@ -765,7 +766,7 @@ class SharedStateStore:
         if message_type.strip():
             query += " AND message_type = ?"
             params.append(message_type.strip().upper())
-        query += " ORDER BY created_at DESC LIMIT ?"
+        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(max(1, min(_coerce_int(limit, 50), 500)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
@@ -1248,7 +1249,7 @@ class SharedStateStore:
     def claim_wake_item(self, *, target_agent: str, claimer_pid: int) -> dict[str, Any] | None:
         """Atomically claim the highest-priority unclaimed wake item for a given agent."""
         now = _utc_now_db()
-        with self._connect() as conn:
+        with self._connect(authoritative=True) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """

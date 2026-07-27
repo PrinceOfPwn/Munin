@@ -717,7 +717,10 @@ class ReActSubagentBase:
                 mark_read=True,
             )
             cancelled = False
-            for item in inbox:
+            # fetch_messages returns newest-first for inbox UIs. ReAct context
+            # must preserve operator chronology when several messages arrived
+            # during the previous tool call.
+            for item in reversed(inbox):
                 sender = item.get("sender_agent", "operator")
                 message_type = str(item.get("message_type", "INFO")).upper()
                 body = str(item.get("body", "")).strip()
