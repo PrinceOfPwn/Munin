@@ -457,6 +457,64 @@ def test_munin_agent_propagates_llm_failure_to_mcp(store, monkeypatch):
     assert result["error"]["code"] == "agent_error"
 
 
+def test_graph_diagnostics_imports_the_top_level_subagent_catalog(store, monkeypatch):
+    """Regression for ``munin.mcp.subagents`` (a package that never existed)."""
+    from munin.mcp.tools import diagnostics_tool
+
+    monkeypatch.setattr(diagnostics_tool, "STATE", store)
+    result = diagnostics_tool._probe_graphs()
+
+    assert result["ok"] is True
+    assert result["total_active"] == 0
+
+
+def test_munin_chat_async_returns_job_and_operator_safe_progress(store, monkeypatch):
+    """Long chat work must outlive a single HTTP request and be pollable."""
+    from dataclasses import replace
+
+    from munin.core import munin_agent
+    from munin.mcp.tools import munin_tools
+
+    class FinalLlm:
+        def chat(self, **kwargs):
+            return {"choices": [{"message": {"role": "assistant", "content": "hello operator"}}]}
+
+    bare_agent = _bare_munin_agent(FinalLlm(), {})
+
+    class FakeAgent:
+        def __init__(self, settings):
+            self._agent = bare_agent
+
+        def respond(self, *args, **kwargs):
+            return self._agent.respond(*args, **kwargs)
+
+    settings = replace(
+        store.settings,
+        llm_base_url="https://llm.invalid/v1",
+        llm_api_key="configured",
+        llm_model="test",
+    )
+    monkeypatch.setattr(munin_agent, "MuninAgent", FakeAgent)
+    monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
+
+    submitted = munin_tools.munin_chat("hello", mode="async")
+    assert submitted["ok"] is True
+    assert submitted["mode"] == "async"
+    job_id = submitted["job_id"]
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        status = munin_tools.JOBS.status(job_id, include_result=True)
+        if status["data"]["status"] not in {"queued", "running"}:
+            break
+        time.sleep(0.01)
+
+    assert status["data"]["status"] == "succeeded"
+    assert status["data"]["result"]["data"]["content"] == "hello operator"
+    stages = {event["stage"] for event in status["data"]["progress"]}
+    assert {"queued", "reasoning", "completed"} <= stages
+
+
 def test_repetition_nudge_accepts_one_changed_next_call():
     class SequenceLlm:
         def __init__(self):

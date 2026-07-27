@@ -400,10 +400,14 @@ export const useMuninStore = create<MuninState>((set, get) => ({
     );
 
     if (chatTool) {
+      if (chatTool.name === "munin_chat") {
+        await runMuninChatJob(assistantId, text, set, get);
+        return;
+      }
       await runToolCallInline(
         assistantId,
         chatTool.name,
-        { message: text, prompt: text, input: text, text },
+        { message: text },
         set,
         get
       );
@@ -482,6 +486,105 @@ function parseSlashCommand(input: string): {
     }
   }
   return { name, args };
+}
+
+/**
+ * Start a ReAct conversation as a server-side job and render its observable
+ * lifecycle as it happens. We deliberately expose execution events (model
+ * request/tool start/tool result), not private model chain-of-thought.
+ */
+async function runMuninChatJob(
+  assistantId: string,
+  message: string,
+  set: (fn: (s: MuninState) => Partial<MuninState>) => void,
+  get: () => MuninState
+) {
+  const callId = uuid();
+  const startTime = Date.now();
+  get().appendToolCallToMessage(assistantId, {
+    id: callId,
+    name: "munin_chat",
+    arguments: { message },
+    status: "running",
+    startTime,
+    result: { status: "starting", progress: [] },
+  });
+
+  const client = getMcpClient({ baseUrl: get().mcpUrl, token: get().mcpToken });
+  try {
+    const started = await client.callTool("munin_chat", { message, mode: "async" });
+    const { json, text, isError } = extractToolResultContent(started);
+    if (isError) throw new Error(text || "Munin rejected the conversation");
+    const jobId = json?.data?.job_id || json?.job_id;
+    if (!jobId) throw new Error("Munin did not return a conversation job ID");
+
+    const deadline = Date.now() + 12 * 60_000;
+    while (Date.now() < deadline) {
+      await sleep(1_500);
+      const statusResponse = await client.callTool("job_status", { job_id: jobId, include_result: true });
+      const { json: statusJson, text: statusText, isError: statusError } = extractToolResultContent(statusResponse);
+      if (statusError) throw new Error(statusText || "Unable to read Munin conversation status");
+      const data = statusJson?.data || statusJson;
+      const progress = Array.isArray(data?.progress) ? data.progress : [];
+      get().updateToolCall(assistantId, callId, {
+        result: { job_id: jobId, status: data?.status || "running", progress },
+      });
+
+      if (data?.status === "queued" || data?.status === "running") continue;
+
+      const result = data?.result;
+      const failed = data?.status !== "succeeded" || !result?.ok;
+      if (failed) {
+        throw new Error(result?.error?.message || data?.stderr_tail || `Conversation ${data?.status || "failed"}`);
+      }
+
+      const output = result?.data || {};
+      const finishTime = Date.now();
+      get().updateToolCall(assistantId, callId, {
+        status: "success",
+        endTime: finishTime,
+        result: { job_id: jobId, ...output, progress },
+      });
+      for (const tool of output.tool_calls || []) {
+        get().appendToolCallToMessage(assistantId, {
+          id: uuid(),
+          name: tool.name || "unknown_tool",
+          arguments: tool.arguments || {},
+          status: tool.ok === false ? "error" : "success",
+          startTime: finishTime - (tool.elapsed_ms || 0),
+          endTime: finishTime,
+          result: tool.result,
+          error: tool.error,
+        });
+      }
+      set((s) => ({
+        messages: s.messages.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: output.content || "(no response)", thinking: false }
+            : m
+        ),
+      }));
+      return;
+    }
+    throw new Error("Conversation is still running after 12 minutes; it continues on the server.");
+  } catch (e: any) {
+    get().updateToolCall(assistantId, callId, {
+      status: "error",
+      endTime: Date.now(),
+      error: { code: "conversation_error", message: e?.message || String(e) },
+    });
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === assistantId
+          ? { ...m, content: `**Error** calling \`munin_chat\`: ${e?.message || String(e)}`, thinking: false }
+          : m
+      ),
+    }));
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function coerce(v: string): any {

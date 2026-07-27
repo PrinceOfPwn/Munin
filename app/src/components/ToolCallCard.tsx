@@ -22,7 +22,7 @@ interface ToolCallCardProps {
 
 export default function ToolCallCard({ call }: ToolCallCardProps) {
   const cat = categorize(call.name);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(call.status === "running");
   const isRunning = call.status === "running";
   const isError = call.status === "error";
   const isGen = call.name.startsWith("gen__");
@@ -123,7 +123,7 @@ export default function ToolCallCard({ call }: ToolCallCardProps) {
           ) : call.result !== undefined ? (
             <div>
               <div className="text-[10px] uppercase tracking-wider text-success font-mono mb-1">
-                Result
+                {isRunning ? "Live execution" : "Result"}
               </div>
               <JsonViewer data={call.result} expanded maxExpandDepth={4} />
             </div>
