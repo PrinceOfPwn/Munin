@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -104,6 +103,7 @@ def reset() -> None:
     """Reset Munin to its snapshot state (idempotent)."""
     from .core.soul import SoulManager
     from .mcp import registry
+    from .mcp.graph_persist import purge_resettable_graph_manifests
 
     settings = get_settings()
     state = SharedStateStore(settings)
@@ -111,6 +111,7 @@ def reset() -> None:
     # Purge generated tools + graphs.
     purged_tools = registry.purge_all(state)
     purged_graphs = state.graph_purge_on_reset()
+    purged_graph_manifests = purge_resettable_graph_manifests(settings)
 
     # Remove script files under generated/
     gen_dir: Path = settings.generated_tools_dir
@@ -138,6 +139,7 @@ def reset() -> None:
     click.echo(json.dumps({
         "purged_tools": purged_tools,
         "purged_graphs": purged_graphs,
+        "purged_graph_manifests": purged_graph_manifests,
         "script_files_removed": files_removed,
         "soul": soul_report,
         "pending_cleared": pending_cleared,

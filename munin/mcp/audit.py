@@ -22,19 +22,33 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "ghp-***REDACTED***"),
     (re.compile(r"gho_[A-Za-z0-9]{20,}"), "gho-***REDACTED***"),
 ]
+_SECRET_KEY_PATTERN = re.compile(
+    r"(pass|passwd|password|token|api[_-]?key|secret|bearer|authorization)",
+    re.IGNORECASE,
+)
 
 
-def _redact(value: Any) -> Any:
+def redact_secrets(value: Any) -> Any:
+    """Recursively redact credential-shaped keys and values before persistence."""
     if isinstance(value, str):
         out = value
         for pattern, replacement in _SECRET_PATTERNS:
             out = pattern.sub(replacement, out)
         return out
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
+    if isinstance(value, (list, tuple)):
+        return [redact_secrets(item) for item in value]
     if isinstance(value, dict):
-        return {key: _redact(val) for key, val in value.items()}
+        return {
+            key: "***REDACTED***"
+            if _SECRET_KEY_PATTERN.search(str(key)) and val
+            else redact_secrets(val)
+            for key, val in value.items()
+        }
     return value
+
+
+# Backward-compatible private alias for callers/tests that imported the old name.
+_redact = redact_secrets
 
 
 class AuditTrailLogger:
@@ -72,11 +86,11 @@ class AuditTrailLogger:
             "status": status,
             "source_context": source_context,
             "target": target,
-            "command_or_params": _redact(command_or_params),
+            "command_or_params": redact_secrets(command_or_params),
             "job_id": job_id,
             "artifacts": artifacts or [],
             "opsec_preflight": opsec_preflight or {},
-            "summary": _redact(summary) if isinstance(summary, str) else summary,
+            "summary": redact_secrets(summary) if isinstance(summary, str) else summary,
         }
         self._append_jsonl(run_id, event)
         self._append_markdown(run_id, event)
