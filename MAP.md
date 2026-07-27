@@ -172,7 +172,7 @@ Archivo único: `data/shared_state.sqlite` (WAL mode, busy_timeout=5s)
 soul/
 ├── identity.md    # Quién es Munin, qué es soul/memory/manos/subagentes
 ├── principles.md  # Reglas: escapar LDAP, consultar catálogo antes de forjar, etc.
-├── goals.md       # Misión actual (MELI challenge, tool forging, multi-agent)
+├── goals.md       # Misión actual (AKATSUKI challenge, tool forging, multi-agent)
 └── skills.md      # Inventario de tools nativas + catálogo autogenerado
 ```
 

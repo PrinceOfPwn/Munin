@@ -1,4 +1,4 @@
-# Munin Mock LDAP — dominio dc=meli,dc=com
+# Munin Mock LDAP — dominio dc=akatsuki,dc=com
 #
 # Contiene usuarios, service accounts, grupos privilegiados y OUs.
 # Las señales de vulnerabilidad (SPNs, DONT_REQ_PREAUTH) están codificadas
@@ -12,33 +12,33 @@
 #   businessCategory → placeholder para admin flags (opcional)
 #
 # Cargar con:
-#   ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=meli,dc=com" -w itachi -f ldap_mock.ldif
+#   ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=akatsuki,dc=com" -w itachi -f ldap_mock.ldif
 
 # ── Organizational Units ──────────────────────────────────────────────────────
 
-dn: ou=users,dc=meli,dc=com
+dn: ou=users,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: users
 description: Domain users
 
-dn: ou=groups,dc=meli,dc=com
+dn: ou=groups,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: groups
 description: Domain groups
 
-dn: ou=computers,dc=meli,dc=com
+dn: ou=computers,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: computers
 description: Domain computers
 
-dn: ou=service-accounts,dc=meli,dc=com
+dn: ou=service-accounts,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: service-accounts
 description: Service and machine accounts
 
 # ── Regular users ─────────────────────────────────────────────────────────────
 
-dn: uid=jdoe,ou=users,dc=meli,dc=com
+dn: uid=jdoe,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -46,7 +46,7 @@ uid: jdoe
 cn: John Doe
 sn: Doe
 givenName: John
-mail: jdoe@meli.com
+mail: jdoe@akatsuki.com
 uidNumber: 1001
 gidNumber: 1001
 homeDirectory: /home/jdoe
@@ -54,7 +54,7 @@ loginShell: /bin/bash
 title: Senior Engineer
 ou: IT
 
-dn: uid=asmith,ou=users,dc=meli,dc=com
+dn: uid=asmith,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -62,7 +62,7 @@ uid: asmith
 cn: Alice Smith
 sn: Smith
 givenName: Alice
-mail: asmith@meli.com
+mail: asmith@akatsuki.com
 uidNumber: 1002
 gidNumber: 1001
 homeDirectory: /home/asmith
@@ -70,7 +70,7 @@ loginShell: /bin/bash
 title: DevOps Engineer
 ou: DevOps
 
-dn: uid=rgarcia,ou=users,dc=meli,dc=com
+dn: uid=rgarcia,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -78,7 +78,7 @@ uid: rgarcia
 cn: Roberto Garcia
 sn: Garcia
 givenName: Roberto
-mail: rgarcia@meli.com
+mail: rgarcia@akatsuki.com
 uidNumber: 1003
 gidNumber: 1001
 homeDirectory: /home/rgarcia
@@ -90,7 +90,7 @@ ou: Development
 # Real AD would set the userAccountControl bit 0x400000. In the OpenLDAP mock
 # we use employeeType (a normal inetOrgPerson attribute) as the placeholder.
 # NO leaky description — the LLM must query and interpret employeeType.
-dn: uid=htarget,ou=users,dc=meli,dc=com
+dn: uid=htarget,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -98,7 +98,7 @@ uid: htarget
 cn: Hugo Target
 sn: Target
 givenName: Hugo
-mail: htarget@meli.com
+mail: htarget@akatsuki.com
 uidNumber: 1004
 gidNumber: 1001
 homeDirectory: /home/htarget
@@ -107,7 +107,7 @@ title: Field Engineer
 ou: Operations
 employeeType: DONT_REQ_PREAUTH
 
-dn: uid=mlopez,ou=users,dc=meli,dc=com
+dn: uid=mlopez,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -115,7 +115,7 @@ uid: mlopez
 cn: Maria Lopez
 sn: Lopez
 givenName: Maria
-mail: mlopez@meli.com
+mail: mlopez@akatsuki.com
 uidNumber: 1005
 gidNumber: 1001
 homeDirectory: /home/mlopez
@@ -125,7 +125,7 @@ ou: HR
 
 # ── Privileged user (Domain Admin) ────────────────────────────────────────────
 
-dn: uid=administrator,ou=users,dc=meli,dc=com
+dn: uid=administrator,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -133,7 +133,7 @@ uid: administrator
 cn: Domain Administrator
 sn: Administrator
 givenName: Domain
-mail: administrator@meli.com
+mail: administrator@akatsuki.com
 uidNumber: 500
 gidNumber: 512
 homeDirectory: /home/administrator
@@ -147,114 +147,114 @@ ou: IT
 # for this pattern to identify kerberoastable accounts, mimicking the real
 # `servicePrincipalName=*` filter.
 
-dn: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
+dn: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: svc_backup
 cn: Backup Service Account
 sn: svc_backup
-mail: svc_backup@meli.com
+mail: svc_backup@akatsuki.com
 uidNumber: 2001
 gidNumber: 2000
 homeDirectory: /var/lib/backup
 loginShell: /bin/false
-title: MSSQLSvc/DBSERVER01.meli.com:1433
+title: MSSQLSvc/DBSERVER01.akatsuki.com:1433
 
-dn: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
+dn: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: svc_mssql
 cn: MSSQL Service Account
 sn: svc_mssql
-mail: svc_mssql@meli.com
+mail: svc_mssql@akatsuki.com
 uidNumber: 2002
 gidNumber: 2000
 homeDirectory: /var/lib/mssql
 loginShell: /bin/false
-title: MSSQLSvc/SQL01.meli.com:1433
+title: MSSQLSvc/SQL01.akatsuki.com:1433
 
-dn: uid=svc_http,ou=service-accounts,dc=meli,dc=com
+dn: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: svc_http
 cn: HTTP Service Account
 sn: svc_http
-mail: svc_http@meli.com
+mail: svc_http@akatsuki.com
 uidNumber: 2003
 gidNumber: 2000
 homeDirectory: /var/www
 loginShell: /bin/false
-title: HTTP/intranet.meli.com
+title: HTTP/intranet.akatsuki.com
 
-dn: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
+dn: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: svc_jenkins
 cn: Jenkins CI Service Account
 sn: svc_jenkins
-mail: svc_jenkins@meli.com
+mail: svc_jenkins@akatsuki.com
 uidNumber: 2004
 gidNumber: 2000
 homeDirectory: /var/lib/jenkins
 loginShell: /bin/false
-title: HTTP/jenkins.meli.com:8080
+title: HTTP/jenkins.akatsuki.com:8080
 
 # ── Groups ────────────────────────────────────────────────────────────────────
 
-dn: cn=Domain Admins,ou=groups,dc=meli,dc=com
+dn: cn=Domain Admins,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Domain Admins
 description: Members have full control of the domain
-member: uid=administrator,ou=users,dc=meli,dc=com
-member: uid=jdoe,ou=users,dc=meli,dc=com
+member: uid=administrator,ou=users,dc=akatsuki,dc=com
+member: uid=jdoe,ou=users,dc=akatsuki,dc=com
 
-dn: cn=IT,ou=groups,dc=meli,dc=com
+dn: cn=IT,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: IT
 description: IT department
-member: uid=jdoe,ou=users,dc=meli,dc=com
-member: uid=asmith,ou=users,dc=meli,dc=com
+member: uid=jdoe,ou=users,dc=akatsuki,dc=com
+member: uid=asmith,ou=users,dc=akatsuki,dc=com
 
-dn: cn=Developers,ou=groups,dc=meli,dc=com
+dn: cn=Developers,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Developers
 description: Development team
-member: uid=rgarcia,ou=users,dc=meli,dc=com
-member: uid=asmith,ou=users,dc=meli,dc=com
+member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
+member: uid=asmith,ou=users,dc=akatsuki,dc=com
 
-dn: cn=Service Accounts,ou=groups,dc=meli,dc=com
+dn: cn=Service Accounts,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Service Accounts
 description: Service and automation accounts
-member: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
-member: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
-member: uid=svc_http,ou=service-accounts,dc=meli,dc=com
-member: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
 
-dn: cn=HR,ou=groups,dc=meli,dc=com
+dn: cn=HR,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: HR
 description: Human Resources
-member: uid=mlopez,ou=users,dc=meli,dc=com
+member: uid=mlopez,ou=users,dc=akatsuki,dc=com
 
 # ── Computers ─────────────────────────────────────────────────────────────────
 
-dn: cn=DC01,ou=computers,dc=meli,dc=com
+dn: cn=DC01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: DC01
 description: Primary Domain Controller
 
-dn: cn=SQL01,ou=computers,dc=meli,dc=com
+dn: cn=SQL01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: SQL01
 description: Database Server
 
-dn: cn=JENKINS01,ou=computers,dc=meli,dc=com
+dn: cn=JENKINS01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: JENKINS01
 description: CI/CD Build Server
 
-dn: cn=WS01,ou=computers,dc=meli,dc=com
+dn: cn=WS01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: WS01
 description: Developer Workstation
