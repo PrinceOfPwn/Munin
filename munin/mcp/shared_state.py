@@ -1,19 +1,49 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .config import Settings
 from .utils import ensure_parent
 
+PRESENCE_LEASE_SECONDS = 30
+_INSTANCE_ID = (
+    os.environ.get("MUNIN_INSTANCE_ID", "").strip()
+    or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+)
+
+
+def get_instance_id() -> str:
+    """Return the stable identity shared by an MCP process and its runners."""
+    return _INSTANCE_ID
+
+
+def presence_metadata(
+    pid: int,
+    *,
+    lease_seconds: int = PRESENCE_LEASE_SECONDS,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build cross-host-safe presence metadata with a renewable lease."""
+    metadata: dict[str, Any] = {
+        "pid": int(pid),
+        "instance_id": get_instance_id(),
+        "lease_expires_at_epoch": time.time() + max(0, lease_seconds),
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
+
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _utc_now_db() -> str:
@@ -541,7 +571,13 @@ class SharedStateStore:
             "metadata": metadata,
         }
 
-    def try_claim_spawn_slot(self, *, agent_name: str, spawner_pid: int) -> dict[str, Any]:
+    def try_claim_spawn_slot(
+        self,
+        *,
+        agent_name: str,
+        spawner_pid: int,
+        instance_id: str | None = None,
+    ) -> dict[str, Any]:
         """Atomically decide whether this caller should spawn a runner subprocess.
 
         Two callers of ``Orchestrator.wake`` for the same agent (near-simultaneous
@@ -563,6 +599,8 @@ class SharedStateStore:
         """
         import os as _os
         now = _utc_now_db()
+        now_epoch = time.time()
+        owner_instance = (instance_id or get_instance_id()).strip()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -571,28 +609,45 @@ class SharedStateStore:
             ).fetchone()
 
             existing_pid: int | None = None
-            # Only RUNNING and SPAWNING count as "occupied". EXITING is our
+            occupied_reason = ""
+            # RUNNING, SPAWNING, and a leased IDLE runner count as occupied.
+            # EXITING is our
             # closing-window state — the runner is about to end and has told
             # us it's safe to spawn a fresh one to catch pending wakes.
-            # IDLE / anything else = free slot.
+            # An expired foreign lease or a dead local PID frees the slot.
             if row and row["status"] in ("RUNNING", "SPAWNING", "IDLE"):
-                # Verify the recorded pid is still alive; a stale RUNNING with a
-                # dead pid means the previous runner crashed and we're free to spawn.
                 try:
                     meta = json.loads(row["metadata"] or "{}")
                 except json.JSONDecodeError:
                     meta = {}
                 recorded_pid = meta.get("pid") if isinstance(meta, dict) else None
-                if isinstance(recorded_pid, int) and recorded_pid > 0:
+                recorded_instance = meta.get("instance_id") if isinstance(meta, dict) else None
+                lease_expires = meta.get("lease_expires_at_epoch") if isinstance(meta, dict) else None
+                try:
+                    lease_is_fresh = float(lease_expires) > now_epoch
+                except (TypeError, ValueError):
+                    lease_is_fresh = False
+
+                # A PID is only meaningful on its owner host. A fresh lease
+                # from another instance is therefore authoritative.
+                if recorded_instance and recorded_instance != owner_instance and lease_is_fresh:
+                    existing_pid = recorded_pid if isinstance(recorded_pid, int) else None
+                    occupied_reason = "foreign_lease_active"
+                elif (
+                    (not recorded_instance or recorded_instance == owner_instance)
+                    and isinstance(recorded_pid, int)
+                    and recorded_pid > 0
+                ):
                     try:
                         _os.kill(recorded_pid, 0)
                         existing_pid = recorded_pid
+                        occupied_reason = "runner_alive"
                     except (ProcessLookupError, PermissionError, OSError):
-                        existing_pid = None  # pid dead / not ours — free the slot
+                        existing_pid = None
 
-            if existing_pid is not None:
+            if occupied_reason:
                 conn.rollback()
-                return {"claimed": False, "existing_pid": existing_pid, "reason": "runner_alive"}
+                return {"claimed": False, "existing_pid": existing_pid, "reason": occupied_reason}
 
             # Slot is free (empty, idle, or has a dead pid) → claim SPAWNING.
             conn.execute(
@@ -608,7 +663,15 @@ class SharedStateStore:
                     agent_name.strip(),
                     "",
                     now,
-                    json.dumps({"pid": spawner_pid, "state": "spawning"}, ensure_ascii=True),
+                    json.dumps(
+                        {
+                            "pid": spawner_pid,
+                            "instance_id": owner_instance,
+                            "lease_expires_at_epoch": now_epoch + PRESENCE_LEASE_SECONDS,
+                            "state": "spawning",
+                        },
+                        ensure_ascii=True,
+                    ),
                 ),
             )
             conn.commit()
