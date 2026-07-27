@@ -61,25 +61,36 @@ interface MuninState {
   updateToolCall: (messageId: string, callId: string, patch: Partial<ToolCall>) => void;
 }
 
-const DEFAULT_URL = "http://localhost:8890";
+const LOCAL_MCP_URL = "http://localhost:8890";
 const DEFAULT_TOKEN = "";
 const L = log.store;
 
+function defaultMcpUrl(): string {
+  if (
+    typeof window !== "undefined" &&
+    process.env.NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN === "1"
+  ) {
+    return window.location.origin;
+  }
+  return LOCAL_MCP_URL;
+}
+
 function loadStoredConfig(): { url: string; token: string } {
-  if (typeof window === "undefined") return { url: DEFAULT_URL, token: DEFAULT_TOKEN };
+  const fallbackUrl = defaultMcpUrl();
+  if (typeof window === "undefined") return { url: fallbackUrl, token: DEFAULT_TOKEN };
   try {
     const raw = window.localStorage.getItem("munin.config");
     if (raw) {
       const parsed = JSON.parse(raw);
-      const url = parsed.url || DEFAULT_URL;
+      const url = parsed.url || fallbackUrl;
       L.info("Config loaded from localStorage", { url, hasToken: !!parsed.token });
       return { url, token: parsed.token || DEFAULT_TOKEN };
     }
   } catch (e) {
     L.warn("Failed to load config from localStorage — using defaults", e);
   }
-  L.info("No stored config — using defaults", { url: DEFAULT_URL });
-  return { url: DEFAULT_URL, token: DEFAULT_TOKEN };
+  L.info("No stored config — using defaults", { url: fallbackUrl });
+  return { url: fallbackUrl, token: DEFAULT_TOKEN };
 }
 
 function saveStoredConfig(url: string, token: string) {
@@ -104,7 +115,7 @@ const initialLive: LiveState = {
 };
 
 export const useMuninStore = create<MuninState>((set, get) => ({
-  mcpUrl: DEFAULT_URL,
+  mcpUrl: LOCAL_MCP_URL,
   mcpToken: DEFAULT_TOKEN,
   settingsOpen: false,
   view: "chat",

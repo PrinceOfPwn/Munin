@@ -7,7 +7,8 @@
 set -euo pipefail
 
 PORT="${1:-8890}"
-LOG="/tmp/tunnel.log"
+ENV_NAME="${2:-MUNIN_PUBLIC_URL}"
+LOG="${3:-/tmp/tunnel.log}"
 
 log() { echo "[tunnel] $*" >&2; }
 
@@ -71,7 +72,7 @@ fi
 
 # Exportar para GitHub Actions
 if [ -n "${GITHUB_ENV:-}" ]; then
-    echo "MUNIN_PUBLIC_URL=${URL}" >> "$GITHUB_ENV"
+    echo "${ENV_NAME}=${URL}" >> "$GITHUB_ENV"
 fi
 
 echo "$URL"

@@ -48,6 +48,11 @@ on:
         required: true
         default: false
         type: boolean
+      open_web_gui:
+        description: "Launch the Next.js GUI and expose a temporary website"
+        required: true
+        default: true
+        type: boolean
 
 # Required so Munin can commit forged tools + open soul-proposal PRs.
 permissions:
@@ -156,7 +161,7 @@ jobs:
           apt-get update -qq
           apt-get install -y --no-install-recommends \
               python3 python3-pip python3-venv python3-poetry \
-              ca-certificates curl gh git pipx ldap-utils \
+              ca-certificates curl gh git pipx ldap-utils nodejs npm \
               build-essential libldap2-dev libsasl2-dev libssl-dev golang-go \
               nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec \
               httpx-toolkit exploitdb eyewitness
@@ -347,22 +352,55 @@ jobs:
           print('OK — nmap_scan executed through MCP against the authorized LDAP service')
           PY
 
-      - name: Open public tunnel
+      - name: Build and start Munin web GUI
+        if: ${{ inputs.open_web_gui }}
+        working-directory: app
+        env:
+          NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN: "1"
+        run: |
+          npm ci --no-audit
+          npm run build
+          nohup env RUNNER_TRACKING_ID="" NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN=1 \
+              npm run start -- --hostname 0.0.0.0 --port 3000 \
+              </dev/null > /tmp/munin-gui.log 2>&1 &
+          echo $! > /tmp/munin-gui.pid
+          for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/ >/dev/null; then
+                  echo "Munin GUI ready after ${i}s"
+                  break
+              fi
+              if ! kill -0 "$(cat /tmp/munin-gui.pid)" 2>/dev/null; then
+                  echo "::error::Munin GUI exited during startup"
+                  cat /tmp/munin-gui.log
+                  exit 1
+              fi
+              sleep 1
+          done
+          curl -fsS http://127.0.0.1:3000/ >/dev/null
+
+      - name: Open MCP public tunnel
         if: ${{ inputs.open_public_tunnel }}
-        run: bash scripts/open_tunnel.sh 8890
+        run: bash scripts/open_tunnel.sh 8890 MUNIN_PUBLIC_URL /tmp/mcp-tunnel.log
+
+      - name: Open GUI public tunnel
+        if: ${{ inputs.open_web_gui }}
+        run: bash scripts/open_tunnel.sh 3000 MUNIN_GUI_URL /tmp/gui-tunnel.log
 
       - name: Print connection info
-        if: ${{ inputs.open_public_tunnel }}
+        if: ${{ inputs.open_public_tunnel || inputs.open_web_gui }}
         run: |
-          URL="${MUNIN_PUBLIC_URL:-http://localhost:8890}"
-          echo "URL: ${URL}"
+          GUI_URL="${MUNIN_GUI_URL:-not requested}"
+          MCP_URL="${MUNIN_PUBLIC_URL:-${MUNIN_GUI_URL:-http://localhost:8890}}"
+          echo "GUI URL: ${GUI_URL}"
+          echo "MCP URL: ${MCP_URL}"
           echo "Token: configured as repository secret (not printed)"
           cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
           ## Munin — live session
 
           | | |
           |---|---|
-          | **URL** | \`${URL}\` |
+          | **Web GUI** | \`${GUI_URL}\` |
+          | **MCP URL** | \`${MCP_URL}\` |
           | **Authentication** | Bearer token from the \`MUNIN_MCP_AUTH_TOKEN\` repository secret |
           | **Duration** | ${{ inputs.duration_minutes }} min |
           | **Preflight** | \`${{ inputs.preflight_policy }}\` |
@@ -372,13 +410,13 @@ jobs:
           Quick test:
           \`\`\`bash
           HEADERS=\$(mktemp)
-          curl -sS -D "\${HEADERS}" -o /tmp/munin-init.json -X POST ${URL}/mcp/ \\
+          curl -sS -D "\${HEADERS}" -o /tmp/munin-init.json -X POST ${MCP_URL}/mcp/ \\
               -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
               -H "Content-Type: application/json" \\
               -H "Accept: application/json, text/event-stream" \\
               -d '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"munin-smoke","version":"1.0"}}}'
           SESSION_ID=\$(awk 'tolower(\$1)=="mcp-session-id:" {gsub("\\r","",\$2); print \$2}' "\${HEADERS}")
-          curl -sS -X POST ${URL}/mcp/ \\
+          curl -sS -X POST ${MCP_URL}/mcp/ \\
               -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
               -H "Content-Type: application/json" \\
               -H "Accept: application/json, text/event-stream" \\
@@ -399,8 +437,12 @@ jobs:
         run: |
           echo "── /tmp/munin.log (tail 100) ──"
           tail -100 /tmp/munin.log 2>/dev/null || echo "(no log)"
-          echo "── /tmp/tunnel.log ──"
-          cat /tmp/tunnel.log 2>/dev/null || echo "(no tunnel log)"
+          echo "── /tmp/munin-gui.log (tail 100) ──"
+          tail -100 /tmp/munin-gui.log 2>/dev/null || echo "(no GUI log)"
+          echo "── /tmp/mcp-tunnel.log ──"
+          cat /tmp/mcp-tunnel.log 2>/dev/null || echo "(no MCP tunnel log)"
+          echo "── /tmp/gui-tunnel.log ──"
+          cat /tmp/gui-tunnel.log 2>/dev/null || echo "(no GUI tunnel log)"
 
       # Runners are detached process-group leaders. Stop and await them before
       # MCP flushes git/Turso and before SQLite artifacts are snapshotted.
@@ -413,6 +455,10 @@ jobs:
       - name: Stop Munin cleanly
         if: always()
         run: |
+          GUI_PID=$(cat /tmp/munin-gui.pid 2>/dev/null || echo "")
+          if [ -n "$GUI_PID" ] && kill -0 "$GUI_PID" 2>/dev/null; then
+              kill -TERM "$GUI_PID" 2>/dev/null || true
+          fi
           PID=$(cat /tmp/munin.pid 2>/dev/null || echo "")
           if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
               kill -TERM "$PID"
@@ -466,6 +512,8 @@ jobs:
           name: munin-session-${{ github.run_id }}
           path: |
             /tmp/munin.log
-            /tmp/tunnel.log
+            /tmp/munin-gui.log
+            /tmp/mcp-tunnel.log
+            /tmp/gui-tunnel.log
             data/events.jsonl
           retention-days: 7
