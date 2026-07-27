@@ -7,7 +7,8 @@
 set -euo pipefail
 
 PORT="${1:-8890}"
-LOG="/tmp/tunnel.log"
+ENV_NAME="${2:-MUNIN_PUBLIC_URL}"
+LOG="${3:-/tmp/tunnel.log}"
 
 log() { echo "[tunnel] $*" >&2; }
 
@@ -18,7 +19,7 @@ try_localhost_run() {
         -o ServerAliveInterval=30 \
         -o ConnectTimeout=10 \
         -R "80:localhost:${PORT}" \
-        plan.localhost.run 2>"$LOG" &
+        plan.localhost.run >>"$LOG" 2>&1 &
     SSH_PID=$!
     sleep 12
     URL=$(grep -oP 'https://[a-zA-Z0-9.-]+\.(lhr\.life|lhrtunnel\.link|lhr\.rocks)' "$LOG" 2>/dev/null | head -1)
@@ -40,7 +41,7 @@ try_cloudflared() {
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
             -o "$BIN" && chmod +x "$BIN"
     fi
-    "$BIN" tunnel --url "http://localhost:${PORT}" --no-autoupdate 2>>"$LOG" &
+    "$BIN" tunnel --url "http://localhost:${PORT}" --no-autoupdate >>"$LOG" 2>&1 &
     CF_PID=$!
     for i in $(seq 1 30); do
         URL=$(grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG" 2>/dev/null | head -1)
@@ -71,7 +72,7 @@ fi
 
 # Exportar para GitHub Actions
 if [ -n "${GITHUB_ENV:-}" ]; then
-    echo "MUNIN_PUBLIC_URL=${URL}" >> "$GITHUB_ENV"
+    echo "${ENV_NAME}=${URL}" >> "$GITHUB_ENV"
 fi
 
 echo "$URL"

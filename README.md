@@ -2,9 +2,24 @@
 
 > *"What was once seen is never forgotten."*
 
-Munin es un agente ReAct ofensivo con alma (*soul*), memoria persistente y capacidad de forjar sus propias herramientas en runtime. Absorbe y extiende [OFFX-MCP](https://github.com/PrinceOfPwn/OFFX-MCP) (con los bugs del PR#1 corregidos) y agrega una capa multi-agente completa.
+Munin es un agente ReAct ofensivo con **alma persistente** (soul), memoria
+episódica, forjado dinámico de tools/subagentes y una arquitectura que le
+permite **evolucionar sesión a sesión** en GitHub Actions.
 
-**65 tools MCP · ReAct orchestrator · tool_forge + graph_forge · LDAP recon · SQLite compartido · soul editable por humano**
+**Highlights de esta build:**
+
+- 65+ tools MCP nativas (LDAP, recon, intel, memoria, subagentes)
+- **`tool_forge` / `graph_forge`** — Munin escribe sus propias tools y
+  subagentes en runtime; se persisten en el repo y se rehidratan al arrancar
+- **Runner Kali** — nmap, nuclei, feroxbuster, ffuf, sqlmap, hydra, smbmap,
+  netexec, katana, searchsploit preinstalados
+- **Persistencia entre sesiones** — SQLite roundtripping vía artifact (free)
+  o Turso/libsql (opt-in, ~gratis)
+- **Auto-commit + PR** — forged tools se commitean, soul edits abren PRs
+- **Live subagent trace** — el frontend muestra iteración en vivo del
+  subagent con progress messages
+- **`munin_diagnostics`** — probe end-to-end que verifica forge → wake →
+  RESULT (modo `paranoid`) antes de shippear
 
 ---
 
@@ -15,11 +30,15 @@ Munin es un agente ReAct ofensivo con alma (*soul*), memoria persistente y capac
 3. [Mock LDAP](#3-mock-ldap)
 4. [Conectar desde Claude Code](#4-conectar-desde-claude-code)
 5. [Conectar el frontend](#5-conectar-el-frontend)
-6. [Secrets de GitHub](#6-secrets-de-github)
-7. [Workflow de GitHub Actions — CREAR MANUALMENTE](#7-workflow-de-github-actions)
-8. [Estructura del proyecto](#8-estructura-del-proyecto)
-9. [Comandos CLI](#9-comandos-cli)
+6. [Persistencia entre sesiones](#6-persistencia-entre-sesiones)
+7. [Diagnóstico end-to-end](#7-diagnóstico-end-to-end)
+8. [Secrets de GitHub](#8-secrets-de-github)
+9. [Estructura del proyecto](#9-estructura-del-proyecto)
 10. [Variables de entorno](#10-variables-de-entorno)
+11. [Comandos CLI](#11-comandos-cli)
+
+Para el detalle arquitectónico de persistencia, forge y multi-agente ver
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
@@ -39,7 +58,7 @@ poetry run munin mcp --transport streamable-http   # servidor MCP en :8890
 
 ### Proveedores LLM compatibles
 
-| Proveedor | LLM_BASE_URL | Modelo recomendado |
+| Proveedor | `LLM_BASE_URL` | Modelo recomendado |
 |-----------|-------------|-------------------|
 | **Groq** (gratis) | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | `meta/llama-3.3-70b-instruct` |
@@ -51,41 +70,62 @@ poetry run munin mcp --transport streamable-http   # servidor MCP en :8890
 
 ## 2. Inicio rápido — GitHub Actions
 
-1. Crear repo privado en GitHub y pushear este código
-2. Agregar los [4 secrets](#6-secrets-de-github)
-3. Crear el archivo `.github/workflows/live-session.yml` (ver [sección 7](#7-workflow-de-github-actions))
-4. Ir a **Actions → Munin Live Session → Run workflow**, elegir duración
-5. La URL pública aparece en el **Job Summary** del run
+El workflow `live-session.yml` corre Munin dentro de un contenedor Kali con la
+toolchain ofensiva completa, restaura el state de la última sesión, y al final
+sube el nuevo state + commitea las tools forjadas.
+
+1. Fork / clonar el repo, push a un remoto propio.
+2. Agregar los [4 secrets](#8-secrets-de-github).
+3. `Actions → Munin Live Session → Run workflow`. Configurable:
+   - **duration_minutes** (30 por defecto, max 55)
+   - **preflight_policy** (`off` en runner es lo normal)
+   - **munin_max_iterations** (dejar en blanco = sin cap)
+   - **persist_state** (dejar en `true` para roundtrip del SQLite)
+   - **open_web_gui** (`true` por defecto: levanta y publica el frontend Next.js)
+   - **open_public_tunnel** (opcional: publica MCP además de la GUI)
+4. Al finalizar el step "Print connection info" en el Job Summary aparece:
+   - **Web GUI**, lista para abrir en el navegador
+   - URL MCP pública si se solicitó; si no, la GUI usa su proxy same-origin
+   - referencia al secret `MUNIN_MCP_AUTH_TOKEN` (su valor no se imprime)
+5. Abrí **Web GUI** y pegá ese token en **Settings**. Para Claude Code, usá la
+   URL MCP pública.
+
+Al terminar la sesión el workflow:
+- Sube `data/shared_state.sqlite` como artifact `munin-state`.
+- Pushea las tools forjadas al branch `munin/session-<run_id>`.
+- Crea PRs `soul: <file>` etiquetados `soul-proposal` si Munin propuso ediciones.
+
+**En la siguiente corrida:** al bajarse el artifact, Munin recuerda todo del run
+anterior (memoria episódica, semantic, forge registry).
 
 ---
 
 ## 3. Mock LDAP
 
-Dominio `dc=meli,dc=com` con escenarios ofensivos pre-sembrados:
+Dominio `dc=meli,dc=com` con escenarios ofensivos pre-sembrados. **Sin pistas
+filtradas en descriptions** — las señales (SPNs, DONT_REQ_PREAUTH) viven en
+atributos estructurados (`title`, `employeeType`) para que el LLM tenga que
+inferir la vulnerabilidad, no leer prosa.
 
 | Usuario | Tipo | Detalle |
 |---------|------|---------|
-| `jdoe`, `administrator` | Domain Admins | Grupo Domain Admins |
+| `jdoe`, `administrator` | Domain Admins | Miembros de `Domain Admins` |
 | `asmith`, `rgarcia`, `mlopez` | Usuarios normales | IT, Dev, HR |
-| `htarget` | AS-REP Roastable | `DONT_REQ_PREAUTH` simulado |
-| `svc_backup` | Kerberoastable | SPN: `MSSQLSvc/DBSERVER01` |
-| `svc_mssql` | Kerberoastable | SPN: `MSSQLSvc/SQL01` |
-| `svc_http` | Kerberoastable | SPN: `HTTP/intranet` |
-| `svc_jenkins` | Kerberoastable | SPN: `HTTP/jenkins:8080` |
+| `htarget` | AS-REP Roastable | `employeeType: DONT_REQ_PREAUTH` |
+| `svc_backup` | Kerberoastable | `title: MSSQLSvc/DBSERVER01.meli.com:1433` |
+| `svc_mssql` | Kerberoastable | `title: MSSQLSvc/SQL01.meli.com:1433` |
+| `svc_http` | Kerberoastable | `title: HTTP/intranet.meli.com` |
+| `svc_jenkins` | Kerberoastable | `title: HTTP/jenkins.meli.com:8080` |
+
+Las tools LDAP (`find_kerberoastable_users`, `find_asrep_roastable_users`,
+`find_domain_admins`) detectan automáticamente si el servidor es AD o OpenLDAP
+y ajustan filtros/atributos.
 
 ```bash
 poetry run munin ldap-mock up        # levantar y sembrar
 poetry run munin ldap-mock down      # bajar y borrar contenedor
 poetry run munin ldap-mock status    # estado + conteo
 poetry run munin ldap-mock logs      # logs del contenedor
-```
-
-Variables `.env` para el mock:
-```
-LDAP_URI=ldap://localhost:389
-LDAP_BASE_DN=dc=meli,dc=com
-LDAP_BIND_DN=cn=admin,dc=meli,dc=com
-LDAP_PASSWORD=itachi
 ```
 
 ---
@@ -108,238 +148,200 @@ Agregar a `~/.claude.json`:
 }
 ```
 
-Para el runner de GitHub Actions, reemplazar la URL con la del Job Summary. Reiniciar Claude Code — las 65 tools aparecen como tools nativas.
+Para el runner de GitHub Actions, reemplazar la URL con la del Job Summary.
+Reiniciar Claude Code — las tools aparecen como tools nativas incluyendo
+`munin_diagnostics`, `subagent_trace`, `tool_forge`, `graph_forge`, etc.
 
 ---
 
 ## 5. Conectar el frontend
 
 ```bash
-cd munin-frontend/app
+cd munin-app/app
 npm install
 npm run dev   # → http://localhost:3000
 ```
 
-En **Settings**: MCP URL + Token del `.env`.
+En **Settings**: MCP URL + Token del `.env`. El frontend expone:
+
+- **Chat** con Munin (via `munin_chat`)
+- **Tool Explorer** con formulario validado por tool
+- **Memory** (episódica, semantic, forged graphs)
+- **Soul** editor con propose-edit → PR
+- **Agents** — presence table + wake queue + **panel de trace en vivo**
+  del subagente seleccionado (progress messages + eventos del ReAct loop)
 
 ---
 
-## 6. Secrets de GitHub
+## 6. Persistencia entre sesiones
+
+Munin puede evolucionar de una sesión a la próxima. Ver detalle completo en
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+**Tres capas de estado:**
+
+| Layer | Vive en | Persiste con |
+|---|---|---|
+| **Soul** — identidad | `soul/*.md` en el repo | PRs `soul-proposal` que el humano mergea |
+| **Forged tools/graphs** — código y specs generados | `munin/generated/*.py` + `munin/generated/graphs/*.json` | Commit automático al branch de sesión + catálogo en Turso |
+| **Memoria** — episódicos, semantic, wake queue | `data/shared_state.sqlite` | Free: artifact `munin-state`. Paid: Turso/libsql |
+
+**Modo free (default):** el workflow sube `shared_state.sqlite` como artifact
+al final de cada corrida, y baja el más reciente al arrancar la próxima.
+
+**Modo Turso (recomendado):** setear los repo secrets
+`MUNIN_DB_URL=libsql://xxx.turso.io` y `MUNIN_DB_AUTH_TOKEN=<token>`.
+Munin usa una réplica embebida por runner sincronizada contra Turso, conserva
+memoria, resultados, mensajes, grafos y cachés entre sesiones, y habilita
+sesiones concurrentes.
+
+---
+
+## 7. Diagnóstico end-to-end
+
+Antes de una demo, o cuando algo no cuadra, correr:
+
+```
+/munin_diagnostics mode=paranoid
+```
+
+Verifica en cascada:
+
+1. Backend SQLite/libsql (row counts por tabla)
+2. LLM configurado (URL + key + model)
+3. LDAP (bind real en modo `deep` o `paranoid`)
+4. Binarios de recon en PATH (nmap, nuclei, feroxbuster, ffuf, sqlmap, hydra…)
+5. Hugin cache freshness + refresh
+6. Tavily config
+7. Forge registry (cada script existe, cada callable importa limpio)
+8. Graphs (cada tool en cada whitelist existe realmente)
+9. Wake queue + agent presence
+10. Auth middleware
+11. git-persist config (auto-commit / auto-PR / branch)
+12. **[paranoid]** end-to-end real: forja `gen__echo_text`, forja grafo
+    especialista, `munin_wake`, espera RESULT hasta 45s, cleanup completo.
+
+Devuelve `{ok, hard_failures, advisories, checks: [{name, ok, latency_ms, detail}]}`.
+Con `ok=true` en modo `paranoid`, el sistema está ready to ship.
+
+Modos:
+- `mode=quick` (~500ms, sin llamadas externas)
+- `mode=deep` (~2-5s, además LDAP bind + Hugin refresh)
+- `mode=paranoid` (~30-60s, requiere LLM configurado)
+
+---
+
+## 8. Secrets de GitHub
 
 `Settings → Secrets and variables → Actions → New repository secret`
 
-| Secret | Ejemplo |
-|--------|---------|
-| `LLM_BASE_URL` | `https://api.groq.com/openai/v1` |
-| `LLM_API_KEY` | `gsk_...` |
-| `LLM_MODEL` | `llama-3.3-70b-versatile` |
-| `MUNIN_MCP_AUTH_TOKEN` | `munin2024` |
+| Secret | Ejemplo / Ejemplo | Requerido |
+|--------|---------|---|
+| `LLM_BASE_URL` | `https://api.groq.com/openai/v1` | sí |
+| `LLM_API_KEY` | `gsk_...` | sí |
+| `LLM_MODEL` | `llama-3.3-70b-versatile` | sí |
+| `MUNIN_MCP_AUTH_TOKEN` | `openssl rand -hex 32` | sí |
+| `MUNIN_DB_URL` | `libsql://xxx.turso.io` | recomendado (Turso) |
+| `MUNIN_DB_AUTH_TOKEN` | token read/write de la base | recomendado (Turso) |
+
+El workflow tiene ya declarado `permissions: contents: write, pull-requests: write`
+así que el `GITHUB_TOKEN` auto-generado puede hacer commit + push + abrir PRs.
 
 ---
 
-## 7. Workflow de GitHub Actions
-
-> **Crear manualmente el archivo** `.github/workflows/live-session.yml` con el contenido siguiente.
-> No está commiteado porque el clasificador de CI de este entorno lo bloquea.
-> El script `scripts/open_tunnel.sh` ya está incluido en el repo y maneja el tunnel.
-
-```yaml
-name: Munin Live Session
-
-on:
-  workflow_dispatch:
-    inputs:
-      duration_minutes:
-        description: "Duracion de la sesion en minutos (max 55)"
-        required: true
-        default: "30"
-        type: number
-
-jobs:
-  munin:
-    name: "Munin sesion ${{ inputs.duration_minutes }}min"
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    env:
-      LLM_BASE_URL:         ${{ secrets.LLM_BASE_URL }}
-      LLM_API_KEY:          ${{ secrets.LLM_API_KEY }}
-      LLM_MODEL:            ${{ secrets.LLM_MODEL }}
-      MUNIN_MCP_AUTH_TOKEN: ${{ secrets.MUNIN_MCP_AUTH_TOKEN }}
-      LDAP_URI:             ldap://localhost:389
-      LDAP_BASE_DN:         dc=meli,dc=com
-      LDAP_BIND_DN:         cn=admin,dc=meli,dc=com
-      LDAP_PASSWORD:        itachi
-      PREFLIGHT_POLICY:     active_only
-      LLM_TIMEOUT_FLOOR:    "40"
-      LLM_TIMEOUT_CEILING:  "240"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Install Munin
-        run: poetry install --no-interaction
-
-      - name: Start mock LDAP
-        run: |
-          docker run -d --name munin_ldap_mock -p 389:389 \
-            -e LDAP_ORGANISATION="MELI" \
-            -e LDAP_DOMAIN="meli.com" \
-            -e LDAP_BASE_DN="dc=meli,dc=com" \
-            -e LDAP_ADMIN_PASSWORD="itachi" \
-            -e LDAP_CONFIG_PASSWORD="itachi" \
-            -e LDAP_TLS="false" \
-            osixia/openldap:1.5.0
-
-      - name: Wait for LDAP
-        run: |
-          for i in $(seq 1 30); do
-            ldapsearch -H ldap://localhost:389 -x \
-              -D "cn=admin,dc=meli,dc=com" -w "itachi" \
-              -b "dc=meli,dc=com" "(objectClass=*)" dn 2>/dev/null \
-              | grep -q "result: 0" && echo "LDAP listo en ${i}s" && break
-            sleep 1
-          done
-
-      - name: Seed mock data
-        run: |
-          ldapadd -H ldap://localhost:389 -x \
-            -D "cn=admin,dc=meli,dc=com" -w "itachi" \
-            -f scripts/ldap_mock.ldif 2>&1 | tail -5
-
-      - name: Start Munin MCP
-        run: |
-          mkdir -p data soul
-          nohup poetry run munin mcp \
-            --transport streamable-http --host 0.0.0.0 --port 8890 \
-            > /tmp/munin.log 2>&1 &
-          sleep 5
-
-      - name: Verify Munin
-        run: |
-          sleep 3
-          python3 -c "
-          import os, json, urllib.request
-
-          url = 'http://localhost:8890/mcp'
-          token = os.environ.get('MUNIN_MCP_AUTH_TOKEN', '')
-
-          req_init = urllib.request.Request(
-              url,
-              data=json.dumps({
-                  'jsonrpc': '2.0',
-                  'id': 1,
-                  'method': 'initialize',
-                  'params': {
-                      'protocolVersion': '2024-11-05',
-                      'capabilities': {},
-                      'clientInfo': {'name': 'ci-verifier', 'version': '1.0'}
-                  }
-              }).encode('utf-8'),
-              headers={
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json, text/event-stream',
-                  'Authorization': f'Bearer {token}'
-              }
-          )
-
-          with urllib.request.urlopen(req_init) as resp:
-              session_id = resp.headers.get('mcp-session-id', '')
-
-          req_list = urllib.request.Request(
-              url,
-              data=json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}}).encode('utf-8'),
-              headers={
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json, text/event-stream',
-                  'Authorization': f'Bearer {token}',
-                  'mcp-session-id': session_id
-              }
-          )
-
-          with urllib.request.urlopen(req_list) as resp:
-              for line in resp.read().decode('utf-8').splitlines():
-                  if line.startswith('data: '):
-                      data = json.loads(line[6:])
-                      tools = data.get('result', {}).get('tools', [])
-                      print(f'OK — {len(tools)} tools registered')
-                      break
-          "
-
-      - name: Open public tunnel
-        run: bash scripts/open_tunnel.sh 8890
-
-      - name: Print connection info
-        run: |
-          URL="${MUNIN_PUBLIC_URL}"
-          TOKEN="${MUNIN_MCP_AUTH_TOKEN}"
-          echo "URL: ${URL}"
-          echo "Token: ${TOKEN}"
-          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
-          ## Munin en vivo
-          | | |
-          |---|---|
-          | **URL** | \`${URL}\` |
-          | **Token** | \`${TOKEN}\` |
-          | **Duracion** | ${{ inputs.duration_minutes }} min |
-
-          Test: \`curl -X POST ${URL}/mcp/ -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'\`
-          SUMMARY
-
-      - name: Keep alive
-        run: sleep $(( ${{ inputs.duration_minutes }} * 60 ))
-
-      - name: Logs
-        if: always()
-        run: |
-          tail -50 /tmp/munin.log 2>/dev/null || true
-          cat /tmp/tunnel.log 2>/dev/null || true
-```
-
----
-
-## 8. Estructura del proyecto
+## 9. Estructura del proyecto
 
 ```
 munin/
-├── munin/                      # Código Python
-│   ├── cli.py                  # CLI entry point
-│   ├── mcp/                    # MCP server + tools
-│   │   ├── main.py             # FastMCP, 65 tools
-│   │   ├── config.py           # Settings desde env
-│   │   ├── shared_state.py     # SQLite WAL, 9 tablas
-│   │   ├── registry.py         # Hot-load gen__ tools
-│   │   ├── audit.py            # Audit log + redacción
-│   │   ├── opsec.py            # Preflight policy
-│   │   ├── intel.py            # CVE/NVD/EPSS/CISA/OSV
-│   │   └── tools/              # 65 tools registradas
-│   ├── core/                   # LLM, soul, memory, orchestrator, agent
-│   └── subagents/              # sandbox, tool_forge, graph_forge, runner
-├── soul/                       # Identidad de Munin (Markdown)
+├── munin/                          # Código Python
+│   ├── cli.py                      # CLI entry point
+│   ├── mcp/                        # MCP server + tools
+│   │   ├── main.py                 # FastMCP, tools nativas, auth middleware
+│   │   ├── config.py               # Settings desde env
+│   │   ├── persistence.py          # ▸ NUEVO: SQLite / libsql / Turso abstraction
+│   │   ├── git_persist.py          # ▸ NUEVO: async commit worker for forged artifacts
+│   │   ├── shared_state.py         # SQLite WAL, 9 tablas, try_claim_spawn_slot
+│   │   ├── registry.py             # Hot-load gen__ tools, cache por mtime
+│   │   ├── audit.py                # Audit log + redacción de secretos
+│   │   ├── opsec.py                # Preflight policy + install hints
+│   │   ├── intel.py                # CVE/NVD/EPSS/CISA/OSV
+│   │   └── tools/                  # tools MCP registradas
+│   │       ├── diagnostics_tool.py # ▸ NUEVO: munin_diagnostics
+│   │       ├── ldap_tools.py       # LDAP compatible AD + OpenLDAP
+│   │       ├── forge_tool.py       # tool_forge (con commit a git)
+│   │       ├── graph_forge_tool.py # graph_forge, list/describe/drop
+│   │       ├── munin_tools.py      # memoria, soul, wake, subagent_trace
+│   │       ├── tavily_tool.py      # Tavily con errores estructurados
+│   │       └── hugin_tool.py       # Hugin con fallback multi-URL
+│   ├── core/                       # LLM, soul, memory, orchestrator, agent
+│   │   ├── munin_agent.py          # ReAct loop, guard de repetición
+│   │   ├── orchestrator.py         # Wake + spawn subprocess
+│   │   ├── memory.py
+│   │   ├── soul.py
+│   │   └── llm_client.py
+│   └── subagents/                  # ldap_agent, tool_forge, graph_forge, runner
+│       ├── runner.py               # subprocess entrypoint, RESULT overflow → artifact
+│       ├── base.py                 # ReActSubagentBase, build_tool_catalog con gen__
+│       ├── sandbox.py              # AST guard, banned attrs, validate_source_file
+│       ├── ldap_agent.py
+│       ├── tool_forge.py
+│       └── graph_forge.py
+├── soul/                           # Identidad de Munin (Markdown, editable via PR)
 ├── scripts/
-│   ├── ldap_mock.sh            # Toggle mock LDAP
-│   ├── ldap_mock.ldif          # Datos del mock
-│   └── open_tunnel.sh          # Tunnel público (localhost.run / cloudflared)
-├── tests/                      # 39 tests, pasan offline
-├── docs/                       # architecture, security-notes, tools_reference
-├── .github/workflows/          # live-session.yml va aqui (crear manualmente)
-├── .env.example
+│   ├── ldap_mock.sh                # Toggle mock LDAP
+│   ├── ldap_mock.ldif              # Datos del mock (SPNs en title, UAC en employeeType)
+│   └── open_tunnel.sh              # Tunnel público (localhost.run / cloudflared)
+├── tests/                          # ~40 tests offline
+├── docs/                           # architecture, security-notes, tools_reference
+├── .github/workflows/
+│   └── live-session.yml            # Kali runner + state roundtrip + auto-commit
+├── ARCHITECTURE.md                 # ▸ NUEVO: persistencia + multi-agente
+├── .env.example                    # ▸ ampliado con MUNIN_DB_URL, MUNIN_AUTO_COMMIT, MUNIN_AUTO_PR
 ├── pyproject.toml
 ├── MAP.md
 └── README.md
 ```
 
+Frontend en `munin-app/app/` (Next.js 14 + Tailwind + Zustand). Componente
+clave nuevo: `SubagentTrace.tsx` (live iteration view del subagent).
+
 ---
 
-## 9. Comandos CLI
+## 10. Variables de entorno
+
+Ver `.env.example` para el listado completo con comentarios.
+
+### Núcleo (siempre necesarias)
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `LLM_BASE_URL` | — | Endpoint OpenAI-compatible |
+| `LLM_API_KEY` | — | API key |
+| `LLM_MODEL` | — | Modelo |
+| `MUNIN_MCP_AUTH_TOKEN` | — | Bearer token para HTTP transport |
+
+### Persistencia (opcionales)
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `MUNIN_DB_URL` | `""` | Vacío = SQLite local. `libsql://...` = Turso |
+| `MUNIN_DB_AUTH_TOKEN` | `""` | Token separado para la base Turso |
+| `MUNIN_AUTO_COMMIT` | `0` | `1` para commitear forged tools al repo |
+| `MUNIN_AUTO_PR` | `0` | `1` para abrir PRs en `soul_propose_edit` |
+| `MUNIN_GIT_BRANCH` | *(unset)* | Branch destino para auto-commits |
+
+### ReAct + logging
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `MUNIN_MAX_ITERATIONS` | *(unset)* | Blank = sin cap (HARD_CEILING 10000) |
+| `MUNIN_LOG_LEVEL` | `INFO` | `DEBUG` para trace de tool calls |
+
+### LDAP, OPSEC, Munin paths, Hugin/Tavily — ver `.env.example`.
+
+---
+
+## 11. Comandos CLI
 
 ```bash
 poetry run munin run                            # REPL
@@ -349,26 +351,5 @@ poetry run munin snapshot-soul                  # freeze soul/
 poetry run munin reset                          # wipe + restore
 poetry run munin ldap-mock up/down/status/logs  # mock LDAP
 poetry run munin subagent ldap                  # subagente directo
-.venv/bin/python -m pytest tests/ -q           # tests
+.venv/bin/python -m pytest tests/ -q             # tests
 ```
-
----
-
-## 10. Variables de entorno
-
-| Variable | Default | Descripción |
-|----------|---------|-------------|
-| `LLM_BASE_URL` | — | Endpoint OpenAI-compatible |
-| `LLM_API_KEY` | — | API key |
-| `LLM_MODEL` | — | Modelo |
-| `LLM_TIMEOUT_FLOOR` | `40` | Timeout mínimo (segundos) |
-| `LLM_TIMEOUT_CEILING` | `240` | Timeout máximo (segundos) |
-| `LDAP_URI` | `ldap://localhost:389` | URI LDAP |
-| `LDAP_BASE_DN` | `dc=meli,dc=com` | Base DN |
-| `LDAP_BIND_DN` | — | Bind DN |
-| `LDAP_PASSWORD` | — | Password LDAP |
-| `MUNIN_MCP_AUTH_TOKEN` | — | Bearer token MCP |
-| `PREFLIGHT_POLICY` | `active_only` | `always/active_only/off` |
-| `HUGIN_URL` | GitHub Pages Hugin | Knowledge base URL |
-| `HUGIN_TTL_SECONDS` | `900` | Cache TTL de Hugin |
-| `TAVILY_API_KEY` | — | Búsqueda web |

@@ -21,7 +21,7 @@ import subprocess
 import sys
 from typing import Any
 
-from ..mcp.shared_state import SharedStateStore
+from ..mcp.shared_state import SharedStateStore, get_instance_id, presence_metadata
 
 logger = logging.getLogger("munin.orchestrator")
 
@@ -41,16 +41,60 @@ class Orchestrator:
         priority: int = 0,
         detached: bool = True,
     ) -> dict[str, Any]:
+        """Enqueue a task and ensure exactly one runner is live to claim it.
+
+        Idempotent under concurrency. Historical race: two near-simultaneous
+        wakes for the same agent both checked "no live runner", both spawned,
+        producing duplicate subprocesses that raced for the queue. Now the
+        decision is made inside a SQLite BEGIN IMMEDIATE transaction on the
+        presence row (agent_name is PK) — see
+        :meth:`SharedStateStore.try_claim_spawn_slot`. Only one caller wins the
+        claim; every other caller sees the winner's pid and returns
+        ``spawned=False`` without touching subprocess.
+
+        We enqueue the task FIRST so the winner (whether it's us or another
+        thread) has something to claim on its next poll.
+        """
         wake_id = self.state.enqueue_wake(target_agent=subagent_name.strip(), task=task, priority=priority)
-        pid = self._spawn_runner(subagent_name, detached=detached)
+
+        claim = self.state.try_claim_spawn_slot(agent_name=subagent_name, spawner_pid=os.getpid())
+        if not claim["claimed"]:
+            existing_pid = claim.get("existing_pid")
+            logger.info(
+                "wake %s: runner already alive (pid=%s reason=%s) — skipping spawn",
+                subagent_name, existing_pid, claim.get("reason"),
+            )
+            return {
+                "wake_id": wake_id,
+                "target_agent": subagent_name,
+                "pid": existing_pid,
+                "spawned": False,
+            }
+
+        # We won the claim — spawn and promote SPAWNING → RUNNING once we have a pid.
+        try:
+            pid = self._spawn_runner(subagent_name, detached=detached)
+        except Exception:
+            # Release the slot so the next caller can try.
+            self.state.upsert_presence(
+                agent_name=subagent_name,
+                role="",
+                status="IDLE",
+                current_task_id=None,
+                metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
+            )
+            raise
         self.state.upsert_presence(
             agent_name=subagent_name,
             role=task.get("role", ""),
             status="RUNNING",
             current_task_id=None,
-            metadata_json=json.dumps({"wake_id": wake_id, "pid": pid}, ensure_ascii=True),
+            metadata_json=json.dumps(
+                presence_metadata(pid, extra={"wake_id": wake_id}),
+                ensure_ascii=True,
+            ),
         )
-        return {"wake_id": wake_id, "target_agent": subagent_name, "pid": pid}
+        return {"wake_id": wake_id, "target_agent": subagent_name, "pid": pid, "spawned": True}
 
     def sleep(self, subagent_name: str) -> dict[str, Any]:
         """Mark presence as IDLE. The runner subprocess exits on its own when the
@@ -61,7 +105,7 @@ class Orchestrator:
             role="",
             status="IDLE",
             current_task_id=None,
-            metadata_json="{}",
+            metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
         )
         return {"target_agent": subagent_name, "status": "IDLE"}
 
@@ -73,6 +117,9 @@ class Orchestrator:
             popen_kwargs["stderr"] = subprocess.DEVNULL
             if os.name == "posix":
                 popen_kwargs["start_new_session"] = True
+        child_env = os.environ.copy()
+        child_env["MUNIN_INSTANCE_ID"] = get_instance_id()
+        popen_kwargs["env"] = child_env
         proc = subprocess.Popen(cmd, **popen_kwargs)
         logger.info("spawned subagent runner %s pid=%d", subagent_name, proc.pid)
         return proc.pid
