@@ -233,7 +233,10 @@ export class McpClient {
   get circuitState(): CbState { return this.cb.status; }
 
   private endpoint(): string {
-    return `${this.baseUrl}/mcp/`;
+    // Next.js normalizes `/mcp/` to `/mcp` in the hosted GUI. Avoid that
+    // redirect: browsers may not retain the bearer header across the proxy's
+    // redirect chain, turning a valid token into a misleading 403.
+    return this.baseUrl.endsWith("/mcp") ? this.baseUrl : `${this.baseUrl}/mcp`;
   }
 
   private async ensureSession(timeoutMs: number): Promise<void> {

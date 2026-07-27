@@ -32,7 +32,7 @@ remain server-side.
 
 - Node.js 18+ (Node 20 recommended)
 - Munin's FastMCP server running at the configured base URL with
-  `streamable-http` transport exposing `/mcp/`.
+  `streamable-http` transport exposing `/mcp`.
 
 ## Architecture
 
