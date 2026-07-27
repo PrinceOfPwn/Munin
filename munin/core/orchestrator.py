@@ -21,7 +21,7 @@ import subprocess
 import sys
 from typing import Any
 
-from ..mcp.shared_state import SharedStateStore
+from ..mcp.shared_state import SharedStateStore, get_instance_id, presence_metadata
 
 logger = logging.getLogger("munin.orchestrator")
 
@@ -81,7 +81,7 @@ class Orchestrator:
                 role="",
                 status="IDLE",
                 current_task_id=None,
-                metadata_json="{}",
+                metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
             )
             raise
         self.state.upsert_presence(
@@ -89,7 +89,10 @@ class Orchestrator:
             role=task.get("role", ""),
             status="RUNNING",
             current_task_id=None,
-            metadata_json=json.dumps({"wake_id": wake_id, "pid": pid}, ensure_ascii=True),
+            metadata_json=json.dumps(
+                presence_metadata(pid, extra={"wake_id": wake_id}),
+                ensure_ascii=True,
+            ),
         )
         return {"wake_id": wake_id, "target_agent": subagent_name, "pid": pid, "spawned": True}
 
@@ -102,7 +105,7 @@ class Orchestrator:
             role="",
             status="IDLE",
             current_task_id=None,
-            metadata_json="{}",
+            metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
         )
         return {"target_agent": subagent_name, "status": "IDLE"}
 
@@ -114,6 +117,9 @@ class Orchestrator:
             popen_kwargs["stderr"] = subprocess.DEVNULL
             if os.name == "posix":
                 popen_kwargs["start_new_session"] = True
+        child_env = os.environ.copy()
+        child_env["MUNIN_INSTANCE_ID"] = get_instance_id()
+        popen_kwargs["env"] = child_env
         proc = subprocess.Popen(cmd, **popen_kwargs)
         logger.info("spawned subagent runner %s pid=%d", subagent_name, proc.pid)
         return proc.pid

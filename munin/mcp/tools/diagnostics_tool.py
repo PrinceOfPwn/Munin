@@ -201,14 +201,12 @@ def _probe_tavily() -> dict[str, Any]:
 
 def _probe_forge() -> dict[str, Any]:
     """Count forged tools, verify each script still exists and is loadable."""
-    from pathlib import Path as _Path  # noqa: PLC0415
-
     from .. import registry  # noqa: TID252,PLC0415
     rows = registry.list_generated(STATE)
     healthy: list[str] = []
     broken: list[dict[str, Any]] = []
     for row in rows:
-        path = _Path(row.get("script_path", ""))
+        path = registry.resolve_script_path(STATE.settings, row.get("script_path", ""))
         if not path.exists():
             broken.append({"name": row["name"], "reason": "script_missing", "path": str(path)})
             continue
@@ -378,7 +376,7 @@ def _probe_e2e_forge_wake() -> dict[str, Any]:
         logger.debug("diagnostics probe graph cleanup failed: %s", exc)
     try:
         from .. import registry  # noqa: PLC0415
-        registry.deactivate(STATE, tool_name)
+        registry.deactivate(MCP, STATE, tool_name)
     except Exception as exc:
         logger.debug("diagnostics probe tool cleanup failed: %s", exc)
 
