@@ -15,7 +15,7 @@ story:
 |---|---|---|---|
 | **Soul** — identity, principles, goals, skills | `soul/*.md` in the repo | Yes | Human merges `soul-proposal/*` PRs opened by Munin |
 | **Forged tools + graphs** — code Munin wrote at runtime | `munin/generated/*.py` (code) + `procedural` / `generated_graphs` SQLite tables (registry) | Yes | Auto-committed to branch `munin/session-<run_id>` |
-| **Memory + working state** — episodic events, semantic facts, wake queue, agent messages, shared intel | `data/shared_state.sqlite` (WAL) | Yes (either mode) | Free tier: rolled between runs via a GitHub Actions artifact. Paid tier: Turso / libsql cloud DB |
+| **Memory + working state** — episodic events, semantic facts, wake queue, agent messages, shared intel | `data/shared_state.sqlite` (WAL) | Yes (either mode) | Free tier: rolled between runs via a GitHub Actions artifact.  Turso / libsql cloud DB |
 
 ## Persistence modes
 
