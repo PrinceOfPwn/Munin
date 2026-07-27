@@ -13,7 +13,7 @@ import pytest
 
 
 def test_escape_filter_chars_neutralizes_injection(isolated_workspace, monkeypatch):
-    monkeypatch.setenv("LDAP_BIND_DN", "cn=admin,dc=meli,dc=com")
+    monkeypatch.setenv("LDAP_BIND_DN", "cn=admin,dc=akatsuki,dc=com")
     monkeypatch.setenv("LDAP_PASSWORD", "itachi")
 
     from munin.mcp.tools import ldap_tools
@@ -24,7 +24,7 @@ def test_escape_filter_chars_neutralizes_injection(isolated_workspace, monkeypat
         conn.entries = []
         mock_connect.return_value = conn
         ldap_tools.ldap_search(
-            base_dn="dc=meli,dc=com",
+            base_dn="dc=akatsuki,dc=com",
             filter_template="(uid={u})",
             params_json=f'{{"u": "{injection}"}}',
             attributes_csv="dn,uid",
@@ -39,7 +39,7 @@ def test_escape_filter_chars_neutralizes_injection(isolated_workspace, monkeypat
 
 
 def test_get_user_groups_escapes_username(isolated_workspace, monkeypatch):
-    monkeypatch.setenv("LDAP_BIND_DN", "cn=admin,dc=meli,dc=com")
+    monkeypatch.setenv("LDAP_BIND_DN", "cn=admin,dc=akatsuki,dc=com")
     monkeypatch.setenv("LDAP_PASSWORD", "itachi")
 
     from munin.mcp.tools import ldap_tools
