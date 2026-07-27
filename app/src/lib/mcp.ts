@@ -607,3 +607,15 @@ export function extractToolResultContent(result: McpToolResult): {
   if (json === undefined && text) json = text;
   return { text, json, isError };
 }
+
+/**
+ * Munin tools consistently return an envelope ``{ ok, tool, data }``.  Keep
+ * UI panels from accidentally treating the envelope itself as a list/result.
+ * Older external MCP servers may return data directly, so those remain valid.
+ */
+export function unwrapToolData(json: any): any {
+  if (json && typeof json === "object" && !Array.isArray(json) && "data" in json) {
+    return json.data;
+  }
+  return json;
+}
