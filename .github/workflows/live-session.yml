@@ -499,6 +499,9 @@ jobs:
       # sources those rows reference. In SQLite mode it also carries the DB.
       - name: Upload Munin durable state and generated sources
         if: always() && inputs.persist_state
+        # Turso is now authoritative for graphs, memory, and generated Python.
+        # Artifact quota exhaustion must not turn an otherwise-valid session red.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: munin-state
