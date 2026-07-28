@@ -103,7 +103,14 @@ class McpClient:
             raise RuntimeError(f"MCP {method} error: {message['error']}")
         return message
 
-    def tool(self, request_id: int, name: str, arguments: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+    def tool(
+        self,
+        request_id: int,
+        name: str,
+        arguments: dict[str, Any],
+        timeout: int = 120,
+        require_ok: bool = True,
+    ) -> dict[str, Any]:
         message = self.rpc(request_id, "tools/call", {"name": name, "arguments": arguments}, timeout=timeout)
         result = message.get("result", {})
         if result.get("isError"):
@@ -116,7 +123,7 @@ class McpClient:
             payload = json.loads(text)
         except ValueError as exc:
             raise RuntimeError(f"{name} returned non-JSON tool content: {text[:500]!r}") from exc
-        if not payload.get("ok"):
+        if require_ok and not payload.get("ok"):
             raise RuntimeError(f"{name} failed: {payload.get('error') or payload.get('summary')}")
         return payload
 
@@ -156,7 +163,18 @@ def main() -> None:
         raise RuntimeError(f"missing required MCP tools: {missing}")
     print(f"OK catalog: {len(_tool_names(catalog))} tools; critical surface registered")
 
-    diagnostics = client.tool(3, "munin_diagnostics", {"mode": "quick", "run_id": "actions-e2e-diagnostics"})
+    diagnostics = client.tool(
+        3,
+        "munin_diagnostics",
+        {"mode": "quick", "run_id": "actions-e2e-diagnostics"},
+        require_ok=False,
+    )
+    if not diagnostics.get("ok"):
+        details = diagnostics.get("data", {})
+        raise RuntimeError(
+            "munin_diagnostics hard failures: "
+            f"{details.get('hard_failures', [])}; checks={json.dumps(details.get('checks', []), ensure_ascii=False)}"
+        )
     if args.require_turso:
         _contains(diagnostics, "libsql", "Turso diagnostics")
     print("OK diagnostics reachable through MCP")
