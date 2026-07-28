@@ -6,7 +6,7 @@
 
 > *What was once seen is never forgotten.*
 
-**Munin** is an autonomous cybersecurity, threat intelligence, and offensive security orchestration platform built on top of **MCP (Model Context Protocol)**. Designed for authorized security research, lab simulations, and threat assessment, Munin combines multi-step **ReAct reasoning loops**, durable cloud database state (**Turso**), episodic memory, dynamic **Python Tool Forging**, and real-time multi-agent subagent delegation.
+**Munin** is an operator-governed cybersecurity, threat-intelligence, and security-orchestration platform built on **MCP (Model Context Protocol)**. For authorized research and lab simulations, it combines multi-step **ReAct loops**, durable **Turso** state, episodic memory, dynamic Python tools, evidence-aware subagents, and reviewable self-extension proposals.
 
 Munin enables operators to automate vulnerability analysis, Active Directory & OpenLDAP enumeration (`akatsuki.com`), passive intelligence enrichment (NVD, CVE, EPSS, CISA KEV, OSV, Hugin), and active reconnaissance (Nmap, Nuclei, Ffuf, Feroxbuster), while maintaining complete visibility via its modern Next.js control terminal.
 
@@ -22,6 +22,9 @@ Munin enables operators to automate vulnerability analysis, Active Directory & O
 | **Adaptive Directory Enumeration** | Parametric tools for Active Directory and OpenLDAP (`dc=akatsuki,dc=com`), evaluating OUs, users, and groups. |
 | **Threat Intelligence Engines** | Native integration with Hugin Knowledge Base, CVE/NVD/EPSS/CISA KEV enrichment pipelines, and Tavily. |
 | **Dynamic Tool & Graph Forging** | `tool_forge` generates Python tools (`gen__*`) on the fly; `graph_forge` builds specialized subagents. |
+| **Evidence Mesh + Hugin RAG** | Graph-aware Hugin retrieval supplies scored evidence and plan candidates without granting extra scope. |
+| **Governed Self-Extension** | `extension_forge` validates an inert diff proposal; only an explicitly approved `extension_open_pr` creates a reviewable PR. |
+| **Discord Operator Bridge** | Optional allowlisted Discord control plane for 24/7 notifications and operator messages; active tools retain scope and OPSEC gates. |
 | **Control Web Terminal** | Next.js dashboard featuring live chat, 70+ tool explorer, Soul/Memory inspection, and real-time subagent traces. |
 
 > 🎯 **Recommended Exercise Planner**: For maximum efficiency during security exercise planning and tool execution, we invite operators to use the fine-tuned [OFFX-Qwen3.5-9B Track A (DoRA Planner)](https://www.kaggle.com/code/emilianoperalta/offx-qwen35-9b-track-a-dora-planner-w10-20260701) model. See [LLM Providers](docs/llm-providers.md) for deployment instructions.

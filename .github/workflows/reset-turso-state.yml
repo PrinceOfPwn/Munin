@@ -1,0 +1,33 @@
+name: Reset Munin Turso State
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type WIPE_MUNIN_TURSO to delete Munin operational rows while preserving the schema.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: munin-turso-reset
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    if: ${{ inputs.confirmation == 'WIPE_MUNIN_TURSO' }}
+    runs-on: ubuntu-latest
+    env:
+      MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
+      MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Munin
+        run: pip install .
+      - name: Wipe remote operational state
+        run: python scripts/reset_turso_state.py --confirm WIPE_MUNIN_TURSO
