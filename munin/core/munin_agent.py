@@ -339,7 +339,21 @@ class MuninAgent:
             specs = _tool_specs(catalog)
             emit({"stage": "reasoning", "iteration": step + 1, "message": "Requesting model response"})
             try:
-                completion = self.llm.chat(messages=messages, tools=specs, temperature=0.2)
+                chat_kwargs: dict[str, Any] = {"messages": messages, "tools": specs, "temperature": 0.2}
+                # Production LLMClient can surface transient-provider retries to
+                # the human-in-the-loop UI. Lightweight test doubles and custom
+                # adapters remain compatible with the original call contract.
+                if isinstance(self.llm, LLMClient):
+                    chat_kwargs["on_retry"] = lambda retry: emit({
+                        "stage": "llm_retry",
+                        "iteration": step + 1,
+                        "message": (
+                            f"LLM {retry['reason']}; retry {retry['attempt'] + 1}/"
+                            f"{retry['max_attempts']} in {retry['retry_in_seconds']:.0f}s"
+                        ),
+                        **retry,
+                    })
+                completion = self.llm.chat(**chat_kwargs)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("LLM call failed at step %d", step)
                 raise RuntimeError(f"LLM call failed at step {step}: {exc}") from exc
