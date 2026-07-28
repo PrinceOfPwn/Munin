@@ -2,6 +2,19 @@
 
 Munin interacts with any OpenAI-compatible `/v1/chat/completions` endpoint via `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`. Below are canonical provider configurations and recommended models.
 
+## MiMo-V2-Flash (preferred Chinese-first agentic profile)
+
+The current MiMo target is **`MiMo-V2-Flash`**, not the older MiMo 7B release. Xiaomi describes it as a 309B-parameter MoE model with 15B active parameters, a 256k context window, tool-call parsing support, and recommended lower temperature for agentic tool use. Use the exact model identifier exposed by your provider; self-hosted deployments should follow Xiaomi's current SGLang guidance rather than the obsolete `MiMo-7B-RL-v2.5` vLLM example.
+
+```bash
+# Example: OpenAI-compatible MiMo endpoint supplied by your provider
+LLM_BASE_URL=https://<your-mimo-endpoint>/v1
+LLM_API_KEY=<provider-key>
+LLM_MODEL=mimo-v2-flash
+```
+
+Munin's soul supports concise Chinese operator terminology, but it does not expose private model reasoning. Tool progress, evidence, and decisions remain observable in the UI/Discord trace. See Xiaomi's [MiMo-V2-Flash repository](https://github.com/XiaomiMiMo/MiMo-V2-Flash) for model-specific serving and tool-history requirements.
+
 ---
 
 ## 🎯 Fine-Tuned Model Recommendation for Exercise Planning

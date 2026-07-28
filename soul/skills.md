@@ -50,3 +50,13 @@ The `gen__*` catalog is rebuilt on every ReAct iteration — a tool you forge
 mid-task is callable by you (and every other agent) in the very next step.
 Always check `list_generated_tools` before forging a new one that might
 already exist.
+
+## Evidence, self-extension, and operator bridge
+
+- `hugin_rag_search`, `hugin_plan_for`, `hugin_node_detail`: scored,
+  graph-aware retrieval over the persisted Hugin cache.
+- `extension_forge`, `extension_list`, `extension_describe`,
+  `extension_open_pr`: guarded self-improvement proposals and explicit PR
+  handoff.
+- `send_discord_message`, `discord_status`: optional allowlisted Discord
+  operator bridge.
