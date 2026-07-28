@@ -66,6 +66,14 @@ html, body {
   border-radius: 6px; padding: 12px; overflow-x: auto; margin: 0.75em 0;
 }
 .prose-munin pre code { background: transparent; padding: 0; color: #e2e8f0; }
+.munin-code-artifact { margin: 0.75em 0; }
+.munin-code-artifact pre { margin: 0 !important; }
+.artifact-action {
+  display: inline-flex; align-items: center; gap: 3px; padding: 3px 6px;
+  border: 1px solid #2a2140; border-radius: 4px; color: #a78bfa;
+  background: rgba(124, 58, 237, .07);
+}
+.artifact-action:hover { background: rgba(124, 58, 237, .16); color: #ddd6fe; }
 .prose-munin a { color: #38bdf8; text-decoration: underline; }
 .prose-munin ul, .prose-munin ol { padding-left: 1.5em; margin: 0.5em 0; }
 .prose-munin li { margin: 0.25em 0; }

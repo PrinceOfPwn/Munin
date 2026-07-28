@@ -24,6 +24,7 @@ from ..mcp import registry
 from ..mcp.config import Settings, get_settings
 from ..mcp.shared_state import SharedStateStore
 from ..mcp.tools import (
+    capabilities_tool,
     diagnostics_tool,
     forge_tool,
     graph_forge_tool,
@@ -33,6 +34,7 @@ from ..mcp.tools import (
     tavily_tool,
 )
 from ..subagents.base import _tool_specs, build_tool_catalog
+from .execution_progress import tool_progress_scope
 from .llm_client import LLMClient
 from .memory import Memory
 from .orchestrator import Orchestrator
@@ -78,6 +80,7 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
     "hugin_neighbors": hugin_tool.hugin_neighbors,
+    "munin_capabilities": capabilities_tool.munin_capabilities,
     # Munin self-inspection & diagnostics
     "munin_self_diagnose": munin_tools.munin_self_diagnose,
     "munin_diagnostics":   diagnostics_tool.munin_diagnostics,
@@ -144,7 +147,8 @@ class MuninAgent:
                 self.soul.as_system_prompt(),
                 self.memory.summarize_for_prompt(),
                 "## Working rules",
-                "1. Before calling `tool_forge`, ALWAYS call `list_generated_tools` first — reuse an existing `gen__*` tool over regenerating a duplicate.",
+                "1. Before calling `tool_forge`, call `list_generated_tools`. Reuse only an exact requested name/contract; a related tool is a lead, not a substitute for a specialised requirement.",
+                "1b. Call `munin_capabilities` when selecting a domain workflow. It describes directory, Hugin/intel, web/service recon and agent-composition contracts without granting extra authorization.",
                 "2. To delegate structured work, call `munin_wake(subagent, task_json)` and monitor it via `subagent_trace` rather than replicating a specialist's job yourself.",
                 "3. For LDAP, always use `ldap_search(filter_template=..., params_json=...)` — never build a filter string by hand.",
                 "4. Active-tool calls (nmap, nuclei, sqlmap, hydra, etc.) run an automatic OPSEC preflight/postflight. If a result reports an opsec/egress/route failure, stop and report it to the operator — do not retry the same call blindly.",
@@ -282,7 +286,20 @@ class MuninAgent:
                     tool_result = {"ok": False, "error": {"code": "unknown_tool", "message": tool_name}}
                 else:
                     try:
-                        tool_result = fn(**args)
+                        # Nested long-running tools (notably tool_forge) can
+                        # publish lifecycle milestones through this scope. The
+                        # callback intentionally exposes only observable work,
+                        # never private model reasoning.
+                        with tool_progress_scope(
+                            lambda event, current_step=step + 1, current_tool=tool_name: emit(
+                                {
+                                    "iteration": current_step,
+                                    "tool": current_tool,
+                                    **event,
+                                }
+                            )
+                        ):
+                            tool_result = fn(**args)
                     except TypeError as exc:
                         tool_result = {"ok": False, "error": {"code": "bad_args", "message": str(exc)}}
                     except Exception as exc:  # noqa: BLE001

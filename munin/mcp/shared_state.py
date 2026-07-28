@@ -259,6 +259,7 @@ class SharedStateStore:
                     purpose TEXT NOT NULL DEFAULT '',
                     system_prompt TEXT NOT NULL DEFAULT '',
                     tool_whitelist_json TEXT NOT NULL DEFAULT '[]',
+                    execution_contract_json TEXT NOT NULL DEFAULT '{}',
                     reset_policy TEXT NOT NULL DEFAULT 'on_reset',
                     created_by_agent TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -319,6 +320,19 @@ class SharedStateStore:
                     # Two ephemeral runners can initialize an existing Turso
                     # database concurrently. If the other one won this small
                     # migration race, continue with the now-current schema.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            graph_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(generated_graphs)").fetchall()
+            }
+            if "execution_contract_json" not in graph_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE generated_graphs "
+                        "ADD COLUMN execution_contract_json TEXT NOT NULL DEFAULT '{}'"
+                    )
+                except Exception as exc:
                     if "duplicate column" not in str(exc).lower():
                         raise
 
@@ -1256,17 +1270,20 @@ class SharedStateStore:
         tool_whitelist: list[str],
         reset_policy: str,
         created_by_agent: str,
+        execution_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO generated_graphs (
-                    name, purpose, system_prompt, tool_whitelist_json, reset_policy, created_by_agent, active
-                ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                    name, purpose, system_prompt, tool_whitelist_json, execution_contract_json,
+                    reset_policy, created_by_agent, active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(name) DO UPDATE SET
                     purpose = excluded.purpose,
                     system_prompt = excluded.system_prompt,
                     tool_whitelist_json = excluded.tool_whitelist_json,
+                    execution_contract_json = excluded.execution_contract_json,
                     reset_policy = excluded.reset_policy,
                     active = 1
                 """,
@@ -1275,6 +1292,7 @@ class SharedStateStore:
                     purpose.strip(),
                     system_prompt,
                     json.dumps(tool_whitelist, ensure_ascii=True),
+                    json.dumps(execution_contract or {}, ensure_ascii=True, default=str),
                     reset_policy.strip() or "on_reset",
                     created_by_agent.strip(),
                 ),
@@ -1294,6 +1312,7 @@ class SharedStateStore:
                 "purpose": row["purpose"],
                 "system_prompt": row["system_prompt"],
                 "tool_whitelist": _normalize_jsonish(row["tool_whitelist_json"] or "[]"),
+                "execution_contract": _normalize_jsonish(row["execution_contract_json"] or "{}"),
                 "reset_policy": row["reset_policy"],
                 "created_by_agent": row["created_by_agent"],
                 "created_at": row["created_at"],
@@ -1325,6 +1344,7 @@ class SharedStateStore:
             "purpose": row["purpose"],
             "system_prompt": row["system_prompt"],
             "tool_whitelist": _normalize_jsonish(row["tool_whitelist_json"] or "[]"),
+            "execution_contract": _normalize_jsonish(row["execution_contract_json"] or "{}"),
             "reset_policy": row["reset_policy"],
             "created_by_agent": row["created_by_agent"],
             "created_at": row["created_at"],

@@ -523,7 +523,11 @@ async function runMuninChatJob(
     const jobId = json?.data?.job_id || json?.job_id;
     if (!jobId) throw new Error("Munin did not return a conversation job ID");
 
-    const deadline = Date.now() + 12 * 60_000;
+    // A 60-iteration Evidence Mesh run can legitimately outlive twelve
+    // minutes. Keep observing it for the same practical ceiling as the live
+    // session instead of replacing a healthy in-flight conversation with a
+    // false error at minute twelve.
+    const deadline = Date.now() + 55 * 60_000;
     while (Date.now() < deadline) {
       await sleep(1_500);
       const statusResponse = await client.callTool("job_status", { job_id: jobId, include_result: true });
@@ -571,7 +575,7 @@ async function runMuninChatJob(
       }));
       return;
     }
-    throw new Error("Conversation is still running after 12 minutes; it continues on the server.");
+    throw new Error("Conversation is still running after 55 minutes; it continues on the server.");
   } catch (e: any) {
     get().updateToolCall(assistantId, callId, {
       status: "error",
@@ -585,6 +589,11 @@ async function runMuninChatJob(
           : m
       ),
     }));
+  } finally {
+    // A conversation can forge/register capabilities while it runs. Refresh
+    // the client catalog as it settles so the new tool is usable immediately.
+    void get().refreshTools();
+    void get().refreshLive();
   }
 }
 
@@ -679,6 +688,10 @@ async function runToolCallInline(
             : m
         ),
       }));
+      if (["tool_forge", "graph_forge", "munin_wake"].includes(toolName)) {
+        void get().refreshTools();
+        void get().refreshLive();
+      }
     }
   } catch (e: any) {
     done("exception");

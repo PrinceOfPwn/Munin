@@ -23,3 +23,10 @@ def test_hugin_legacy_entity_list_is_supported():
         "edges": [],
         "source_format": "entity-list",
     }
+
+
+def test_hugin_boolean_coercion_handles_mcp_strings():
+    from munin.mcp.tools.hugin_tool import _coerce_bool
+
+    assert _coerce_bool("false") is False
+    assert _coerce_bool("True") is True
