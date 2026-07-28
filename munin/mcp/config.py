@@ -26,6 +26,7 @@ class Settings:
     llm_model: str = ""
     llm_timeout_floor: int = 40
     llm_timeout_ceiling: int = 240
+    operator_language: str = "auto"
 
     # --- Passive intel providers ---
     tavily_api_key: str = ""
@@ -138,6 +139,7 @@ def get_settings() -> Settings:
         llm_model=os.environ.get("LLM_MODEL", "").strip(),
         llm_timeout_floor=int(os.environ.get("LLM_TIMEOUT_FLOOR", "40")),
         llm_timeout_ceiling=int(os.environ.get("LLM_TIMEOUT_CEILING", "240")),
+        operator_language=os.environ.get("MUNIN_OPERATOR_LANGUAGE", "auto").strip() or "auto",
         # Intel providers
         tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip(),
         hugin_url=os.environ.get(

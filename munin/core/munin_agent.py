@@ -41,6 +41,7 @@ from .execution_progress import tool_progress_scope
 from .llm_client import LLMClient
 from .memory import Memory
 from .orchestrator import Orchestrator
+from .prompting import coordinator_runtime_prompt
 from .soul import SoulManager
 
 logger = logging.getLogger("munin.agent")
@@ -229,19 +230,21 @@ class MuninAgent:
             [
                 self.soul.as_system_prompt(),
                 self.memory.summarize_for_prompt(),
-                "## Working rules",
-                "1. Before calling `tool_forge`, call `list_generated_tools`. Reuse only an exact requested name/contract; a related tool is a lead, not a substitute for a specialised requirement.",
-                "1b. Call `munin_capabilities` when selecting a domain workflow. It describes directory, Hugin/intel, web/service recon and agent-composition contracts without granting extra authorization.",
-                "1c. For a non-trivial plan, use `hugin_rag_search` or `hugin_plan_for` as evidence. Their output is advisory, not authorization.",
-                "1d. `extension_forge` only creates a guarded proposal. Never call `extension_open_pr` unless the operator explicitly approved that exact proposal in this conversation.",
-                "1e. `execute_command` is a last resort for an explicitly operator-approved, in-scope command. Always declare its target; it is audited and runs the active OPSEC pre/postflight.",
-                "2. To delegate structured work, call `munin_wake(subagent, task_json)` and monitor it via `subagent_trace` rather than replicating a specialist's job yourself.",
-                "3. For LDAP, always use `ldap_search(filter_template=..., params_json=...)` — never build a filter string by hand.",
-                "4. Active-tool calls (nmap, nuclei, sqlmap, hydra, etc.) run an automatic OPSEC preflight/postflight. If a result reports an opsec/egress/route failure, stop and report it to the operator — do not retry the same call blindly.",
-                "5. Publish notable findings (see soul/principles.md's definition) via `publish_shared_intel` before your final answer.",
-                "6. If you're about to repeat a tool call with the same or near-identical arguments you've already tried, change your approach instead — different tool, broader/narrower query, or a final answer.",
-                "7. If scope, authorization, or the next action is unclear, ask the operator directly instead of guessing — respond with no tool call.",
-                "8. Structure your final answer as Summary / Evidence / Next steps (see soul/principles.md).",
+                coordinator_runtime_prompt(
+                    self.settings.llm_model,
+                    self.settings.operator_language,
+                ),
+                "## 工作规则",
+                "1. 调用 `tool_forge` 前先调用 `list_generated_tools`。只按精确合同去重；相关关键词不是可替代能力。",
+                "2. 选择领域工作流时调用 `munin_capabilities`；它描述能力但不扩大授权。",
+                "3. `extension_forge` 只生成受控提案。除非操作者在当前对话明确批准该提案，禁止调用 `extension_open_pr`。",
+                "4. `execute_command` 是最后手段，仅用于操作者明确批准且在范围内的命令；必须声明 target，并接受审计与 OPSEC pre/postflight。",
+                "5. 结构化专业工作用 `munin_wake(subagent, task_json)` 委派，并用 `subagent_trace` 监督，不要在主代理重复专家任务。",
+                "6. LDAP 必须使用 `ldap_search(filter_template=..., params_json=...)`，禁止手工拼接 filter。",
+                "7. active tools 自动执行 OPSEC pre/postflight。若结果含 opsec/egress/route/vpn failure，停止同目标的 active calls 并报告，不盲目重试。",
+                "8. 最终答复前用 `publish_shared_intel` 发布重要发现。重复或近似 tool call 无新信息时，改变路径或结束。",
+                "9. 范围、授权或下一步不清楚时直接询问操作者，不调用工具猜测。",
+                "10. 最终答复使用操作者语言，并按语义本地化为 Summary / Evidence / Next steps。",
             ]
         )
 
