@@ -137,7 +137,10 @@ jobs:
           curl --fail --silent --show-error --retry 15 --retry-connrefused http://127.0.0.1:80/ >/dev/null
       - name: Start MCP server
         run: |
-          nohup python -m munin.mcp.main --transport streamable-http --host 127.0.0.1 --port 8890 \
+          # Use the installed entrypoint. Running main with `python -m` creates
+          # a second module instance, while extension modules import the
+          # canonical `munin.mcp.main` singleton to register their tools.
+          nohup munin mcp --transport streamable-http --host 127.0.0.1 --port 8890 \
             </dev/null > /tmp/munin-e2e.log 2>&1 &
           echo $! > /tmp/munin-e2e.pid
       - name: Exercise MCP against online lab services
