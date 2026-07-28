@@ -53,10 +53,6 @@ export interface ChatMessage {
   content: string;
   toolCalls?: ToolCall[];
   artifacts?: ConversationArtifact[];
-  /** Observable lifecycle milestones, never private model chain-of-thought. */
-  executionTrace?: Array<{ at?: string; stage?: string; message?: string; tool?: string; summary?: string; ok?: boolean }>;
-  runStatus?: "queued" | "running" | "completed" | "failed" | string;
-  jobId?: string;
   thinking?: boolean;
   timestamp: number;
 }

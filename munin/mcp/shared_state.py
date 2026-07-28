@@ -1183,48 +1183,6 @@ class SharedStateStore:
             raise RuntimeError("conversation message creation did not return a row")
         return self._conversation_message_row_to_dict(row)
 
-    def conversation_update_message(
-        self,
-        *,
-        conversation_id: str,
-        message_id: int,
-        content: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Update a durable conversation turn in place.
-
-        Async conversations create an assistant placeholder before their worker
-        starts. Updating that row (rather than adding a second assistant turn)
-        lets a reconnected GUI recover a live run and its observable trace.
-        """
-        conversation_id = self._conversation_id(conversation_id)
-        normalized_message_id = _coerce_int(message_id, 0)
-        if normalized_message_id < 1:
-            raise ValueError("message_id must be positive")
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM conversation_messages WHERE id = ? AND conversation_id = ?",
-                (normalized_message_id, conversation_id),
-            ).fetchone()
-            if row is None:
-                raise ValueError("message_id does not belong to conversation_id")
-            next_content = row["content"] if content is None else str(content)
-            if not next_content.strip():
-                raise ValueError("conversation content is required")
-            current_metadata = _normalize_jsonish(row["metadata_json"] or "{}")
-            merged_metadata = dict(current_metadata) if isinstance(current_metadata, dict) else {}
-            if metadata:
-                merged_metadata.update(metadata)
-            conn.execute(
-                "UPDATE conversation_messages SET content = ?, metadata_json = ? WHERE id = ?",
-                (next_content, json.dumps(merged_metadata, ensure_ascii=True, default=str), normalized_message_id),
-            )
-            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_utc_now_db(), conversation_id))
-            updated = conn.execute("SELECT * FROM conversation_messages WHERE id = ?", (normalized_message_id,)).fetchone()
-        if updated is None:  # pragma: no cover - integrity guard
-            raise RuntimeError("conversation message update did not return a row")
-        return self._conversation_message_row_to_dict(updated)
-
     def conversation_set_summary(self, *, conversation_id: str, summary: str, summary_message_id: int) -> None:
         conversation_id = self._conversation_id(conversation_id)
         if len(summary) > 24_000:
