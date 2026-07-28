@@ -7,6 +7,7 @@ import rehypeHighlight from "rehype-highlight";
 import { ArrowDown, Send, Terminal } from "lucide-react";
 import Raven from "./Raven";
 import ToolCallCard from "./ToolCallCard";
+import ArtifactActions, { artifactKindFromLanguage } from "./ArtifactActions";
 import EmptyState from "./EmptyState";
 import { useMuninStore } from "@/store/muninStore";
 import { cn } from "@/lib/utils";
@@ -150,6 +151,24 @@ function MessageBubble({ message }: { message: import("@/types/mcp").ChatMessage
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeHighlight]}
+                components={{
+                  pre({ children }) {
+                    // Code blocks are first-class local artifacts: the user can keep a
+                    // generated report/script without copying the whole conversation.
+                    const child = Array.isArray(children) ? children[0] : children;
+                    const props = (child as any)?.props;
+                    const className = String(props?.className || "");
+                    const language = className.match(/language-([\w+-]+)/)?.[1];
+                    const value = typeof props?.children === "string" ? props.children.replace(/\n$/, "") : "";
+                    const useful = value.length > 0 && artifactKindFromLanguage(language) !== "text";
+                    return (
+                      <div className="munin-code-artifact">
+                        {useful && <div className="mb-1 flex justify-end"><ArtifactActions content={value} language={language} /></div>}
+                        <pre>{children}</pre>
+                      </div>
+                    );
+                  },
+                }}
               >
                 {message.content}
               </ReactMarkdown>

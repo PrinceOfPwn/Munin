@@ -32,6 +32,19 @@ _FALLBACK_URLS = (
 )
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Handle MCP clients that serialize booleans as strings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    return default if value is None else bool(value)
+
+
 def _get_settings() -> Any:
     from ..config import get_settings  # noqa: TID252
 
@@ -224,7 +237,7 @@ def hugin_search(
             "error": {"code": "bad_input", "message": "match_mode must be substring, regex, or exact"},
         }
 
-    bundle, refresh, age, is_stale = _bundle_or_error(bool(force_refresh))
+    bundle, refresh, age, is_stale = _bundle_or_error(_coerce_bool(force_refresh))
     if not bundle:
         return {
             "ok": False,
@@ -241,11 +254,12 @@ def hugin_search(
     aliases = {"title": "label", "summary": "content"}
     fields = [aliases.get(field.strip(), field.strip()) for field in fields_csv.split(",") if field.strip()]
     fields = fields or ["label", "tags", "category", "mitre", "content"]
-    needle = query if case_sensitive else query.lower()
+    sensitive = _coerce_bool(case_sensitive)
+    needle = query if sensitive else query.lower()
     pattern = None
     if match_mode == "regex":
         try:
-            pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE)
+            pattern = re.compile(query, 0 if sensitive else re.IGNORECASE)
         except re.error as exc:
             return {
                 "ok": False,
@@ -261,7 +275,7 @@ def hugin_search(
         matched: list[str] = []
         for field in fields:
             value = _field_text(entity.get(field))
-            candidate = value if case_sensitive else value.lower()
+            candidate = value if sensitive else value.lower()
             if match_mode == "regex" and pattern and pattern.search(value):
                 matched.append(field)
             elif match_mode == "exact" and candidate == needle:
@@ -301,7 +315,7 @@ def hugin_neighbors(
     run_id: str = "",
 ) -> dict[str, Any]:
     """Traverse Hugin relationships around a node (one to three hops)."""
-    bundle, refresh, age, is_stale = _bundle_or_error(bool(force_refresh))
+    bundle, refresh, age, is_stale = _bundle_or_error(_coerce_bool(force_refresh))
     if not bundle:
         return {
             "ok": False,

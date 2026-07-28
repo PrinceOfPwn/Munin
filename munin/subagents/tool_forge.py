@@ -18,6 +18,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from ..core.llm_client import LLMClient
@@ -56,6 +57,10 @@ safety here matter more than in ordinary scratch code.
   identifier if the caller needs to correlate it elsewhere.
 - Signature parameters must have type annotations and, where sensible, defaults, so
   the tool stays usable with partial arguments.
+- New tools may optionally accept ``context: dict | None = None``. The runtime
+  supplies this only when requested and it contains non-secret defaults such as
+  LDAP URI/base DN and Hugin cache metadata. Never require callers to provide
+  secrets as tool arguments.
 - Pick a `function_name` that describes what the tool does (snake_case, specific) —
   avoid a generic name like `run` or `check` that could collide with another forged
   tool already in the catalog.
@@ -117,17 +122,43 @@ class ToolForgeSubagent:
         allowed_imports: list[str] | None = None,
         max_iterations: int = 5,
         llm: LLMClient | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.state = state
         self.allowed_imports_hint = allowed_imports or []
         self.max_iterations = max_iterations
         self.llm = llm or LLMClient(state.settings)
+        self.on_progress = on_progress
+
+    def _emit(self, stage: str, message: str, **details: Any) -> None:
+        """Record and expose a lifecycle milestone without model reasoning."""
+        event = {"stage": stage, "message": message, **details}
+        try:
+            self.state.episodic_record(
+                agent="tool_forge",
+                action=stage,
+                output_data=event,
+                tags=["forge", "lifecycle"],
+            )
+        except Exception:
+            logger.debug("could not record forge progress", exc_info=True)
+        if self.on_progress is not None:
+            try:
+                self.on_progress(event)
+            except Exception:
+                logger.debug("could not publish forge progress", exc_info=True)
 
     def forge(self, spec: str) -> dict[str, Any]:
         transcript: list[str] = [f"spec: {spec}"]
         error_hint = ""
         for iteration in range(1, self.max_iterations + 1):
             transcript.append(f"--- iteration {iteration} ---")
+            self._emit(
+                "forge_generation",
+                f"Requesting implementation draft ({iteration}/{self.max_iterations})",
+                forge_iteration=iteration,
+                max_iterations=self.max_iterations,
+            )
             messages = [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {
@@ -142,6 +173,7 @@ class ToolForgeSubagent:
             content = completion["choices"][0]["message"]["content"] or ""
             data = _extract_json(content)
             if not data:
+                self._emit("forge_validation", "Model reply was not valid forge JSON", forge_iteration=iteration, ok=False)
                 error_hint = "Your last response was not valid JSON. Return ONLY the JSON object as specified."
                 transcript.append("bad JSON")
                 continue
@@ -149,13 +181,16 @@ class ToolForgeSubagent:
             function_name = str(data.get("function_name", "")).strip()
             allowed = set(data.get("allowed_imports", [])) | set(self.allowed_imports_hint)
             if not script or not function_name:
+                self._emit("forge_validation", "Generated draft is missing required fields", forge_iteration=iteration, ok=False)
                 error_hint = "Missing `python` or `function_name` in your JSON."
                 transcript.append("missing fields")
                 continue
 
+            self._emit("forge_validation", "Validating draft in the sandbox", forge_iteration=iteration)
             sandbox_result = self._exercise(script, function_name, allowed)
             transcript.append(f"sandbox ok={sandbox_result.ok} error={sandbox_result.error}")
             if not sandbox_result.ok:
+                self._emit("forge_validation", "Sandbox rejected generated draft", forge_iteration=iteration, ok=False)
                 error_hint = (
                     f"Your previous attempt failed sandbox validation:\n"
                     f"error: {sandbox_result.error}\n"
@@ -167,11 +202,13 @@ class ToolForgeSubagent:
             # Persist
             slug = safe_slug([function_name])
             script_path = self.state.settings.generated_tools_dir / f"{slug}.py"
+            self._emit("forge_persist", "Persisting validated Python source", forge_iteration=iteration, tool_slug=slug)
             script_path.write_text(script, encoding="utf-8")
             sig = _extract_signature(script, function_name)
             signature_json = signature_to_json_schema(sig) if sig else {}
             signature_json["function_name"] = function_name
             self.log_success(spec=spec, slug=slug, description=data.get("description", ""), tags=data.get("tags", []))
+            self._emit("forge_ready", "Validated Python source is ready for MCP registration", forge_iteration=iteration, tool_slug=slug, ok=True)
             return {
                 "ok": True,
                 "summary": f"forged {slug} in {iteration} iterations",

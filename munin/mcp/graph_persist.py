@@ -26,11 +26,12 @@ def persist_graph_manifest(
     if not name or not purpose:
         raise ValueError("graph manifest requires name and purpose")
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "name": name,
         "purpose": purpose,
         "system_prompt": str(graph.get("system_prompt", "")),
         "tool_whitelist": list(graph.get("tool_whitelist") or []),
+        "execution_contract": dict(graph.get("execution_contract") or {}),
         "reset_policy": str(graph.get("reset_policy", "on_reset")),
         "created_by_agent": str(graph.get("created_by_agent", "munin")),
         "active": bool(graph.get("active", True)),
@@ -78,6 +79,7 @@ def rehydrate_graph_manifests(
                 tool_whitelist=[str(item) for item in payload.get("tool_whitelist", [])],
                 reset_policy=str(payload.get("reset_policy", "on_reset")),
                 created_by_agent=str(payload.get("created_by_agent", "manifest")),
+                execution_contract=dict(payload.get("execution_contract") or {}),
             )
             loaded += 1
         except (OSError, ValueError, KeyError, TypeError) as exc:
