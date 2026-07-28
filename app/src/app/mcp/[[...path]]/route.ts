@@ -24,6 +24,8 @@ const RESPONSE_HEADERS = [
  * A Next rewrite is convenient locally, but it can alter or drop the bearer
  * header before the request reaches FastMCP. This route copies the small MCP
  * header allow-list explicitly, keeping the browser token end-to-end intact.
+ * A temporary, operator-approved live session can opt into server-side auth;
+ * the secret then stays on the Next server and never reaches browser code.
  */
 async function proxy(request: Request): Promise<Response> {
   const incomingUrl = new URL(request.url);
@@ -31,6 +33,12 @@ async function proxy(request: Request): Promise<Response> {
   for (const name of MCP_HEADERS) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
+  }
+  const serverToken = process.env.MUNIN_GUI_SERVER_AUTH_PROXY === "1"
+    ? process.env.MUNIN_MCP_AUTH_TOKEN?.trim()
+    : "";
+  if (!headers.has("authorization") && serverToken) {
+    headers.set("authorization", `Bearer ${serverToken}`);
   }
 
   const method = request.method.toUpperCase();
