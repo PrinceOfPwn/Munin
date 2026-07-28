@@ -22,3 +22,14 @@ def test_hugin_payload_does_not_accept_broken_json_structure():
 
     with pytest.raises(ValueError):
         _decode_payload('{"nodes":[}', source_url="https://example.invalid/hugin.json")
+
+
+def test_hugin_payload_recovers_a_bare_quote_inside_markdown_content():
+    from munin.mcp.tools.hugin_tool import _decode_payload
+
+    payload = _decode_payload(
+        r'{"nodes":[{"id":"T-1","label":"prefix "TT\" suffix"}],"edges":[]}',
+        source_url="https://example.invalid/hugin.json",
+    )
+
+    assert payload["nodes"][0]["label"] == 'prefix "TT" suffix'
