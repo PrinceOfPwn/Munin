@@ -17,6 +17,15 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+# ``python -m munin.mcp.main`` executes this file as ``__main__``.  Extension
+# modules import ``munin.mcp.main`` to obtain the shared FastMCP singleton;
+# without this alias Python constructs a second module (and its second MCP
+# instance), leaving those tools absent from the running server.  The CLI uses
+# the canonical import already, while this makes direct module execution safe
+# too.
+if __name__ == "__main__" and __package__:
+    sys.modules.setdefault(f"{__package__}.main", sys.modules[__name__])
+
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from munin.mcp.audit import AuditTrailLogger
