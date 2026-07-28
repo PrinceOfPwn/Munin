@@ -250,13 +250,6 @@ Subagentes nativos: `ldap`, más cualquier grafo en `generated_graphs` (cargados
 
 ---
 
-### 12. Archivos que crear manualmente
-
-El siguiente archivo no está incluido en el repo (bloqueado por el clasificador de CI del entorno de desarrollo). Crearlo manualmente copiando el YAML de `README.md` sección 7:
-
-```
-.github/workflows/live-session.yml
-```
 
 Scripts ya incluidos que el workflow referencia:
 - `scripts/open_tunnel.sh` — abre tunnel público (localhost.run → cloudflared fallback)
