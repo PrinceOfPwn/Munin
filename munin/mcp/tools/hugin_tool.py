@@ -82,8 +82,49 @@ def _candidate_urls(primary: str) -> list[str]:
     return urls
 
 
+def _escape_likely_inner_quotes(text: str) -> tuple[str, int]:
+    """Escape a quote embedded in a JSON string when it cannot terminate it.
+
+    A normal JSON string can only end before a structural delimiter. Hugin's
+    Markdown snippets occasionally contain a bare quote before prose/code, so
+    preserve it as data instead of abandoning the whole graph.
+    """
+    output: list[str] = []
+    in_string = False
+    repaired = 0
+    for index, character in enumerate(text):
+        if character != '"':
+            output.append(character)
+            continue
+
+        preceding_backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            preceding_backslashes += 1
+            cursor -= 1
+        if not in_string:
+            in_string = True
+            output.append(character)
+            continue
+        if preceding_backslashes % 2:
+            output.append(character)
+            continue
+
+        following = index + 1
+        while following < len(text) and text[following].isspace():
+            following += 1
+        next_character = text[following] if following < len(text) else ""
+        if next_character in {"", ":", ",", "}", "]"}:
+            in_string = False
+            output.append(character)
+        else:
+            output.append('\\"')
+            repaired += 1
+    return "".join(output), repaired
+
+
 def _decode_payload(text: str, *, source_url: str) -> Any:
-    """Decode an upstream Hugin payload, repairing only invalid JSON escapes.
+    """Decode an upstream Hugin payload, repairing narrowly malformed snippets.
 
     Hugin's graph includes source snippets.  A malformed upstream snippet such
     as ``C:\\Temp`` can leave a lone ``\\T`` in an otherwise valid graph.  The
@@ -96,7 +137,11 @@ def _decode_payload(text: str, *, source_url: str) -> Any:
     # Repair a complete Windows-style path first.  Some valid JSON escapes
     # such as ``\\n`` otherwise decode as a newline even though the upstream
     # source intended ``\\notes`` as part of a path.
-    repaired_paths, path_count = _WINDOWS_PATH_WITH_LONE_SEPARATORS.subn(escape_windows_path, text)
+    repaired_quotes, quote_count = _escape_likely_inner_quotes(text)
+    repaired_paths, path_count = _WINDOWS_PATH_WITH_LONE_SEPARATORS.subn(
+        escape_windows_path,
+        repaired_quotes,
+    )
     repaired_count = 0
     try:
         parsed = json.loads(repaired_paths)
@@ -112,10 +157,11 @@ def _decode_payload(text: str, *, source_url: str) -> Any:
             parsed = json.loads(repaired)
         except json.JSONDecodeError as repaired_error:
             raise original_error from repaired_error
-    if path_count or repaired_count:
+    if quote_count or path_count or repaired_count:
         logger.warning(
-            "Recovered Hugin graph from %s by escaping %d Windows path(s) and %d malformed JSON sequence(s)",
+            "Recovered Hugin graph from %s by escaping %d inner quote(s), %d Windows path(s), and %d malformed JSON sequence(s)",
             source_url,
+            quote_count,
             path_count,
             repaired_count,
         )
