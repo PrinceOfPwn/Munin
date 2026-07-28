@@ -158,6 +158,9 @@ def main() -> None:
         "extension_forge",
         "graph_forge",
         "tool_forge",
+        "conversation_create",
+        "conversation_get",
+        "conversation_list",
     }
     missing = sorted(required_tools - _tool_names(catalog))
     if missing:
@@ -196,8 +199,37 @@ def main() -> None:
         print(f"OK same-origin GUI proxy: {_endpoint()}")
         return
 
-    ldap = client.tool(
+    conversation_id = f"actions_e2e_conversation_{os.environ.get('GITHUB_RUN_ID', 'manual')}"
+    created = client.tool(
         6,
+        "conversation_create",
+        {
+            "conversation_id": conversation_id,
+            "title": "Actions Turso persistence smoke",
+            "run_id": "actions-e2e-conversation-create",
+        },
+    )
+    _contains(created, conversation_id, "Turso conversation create")
+    loaded = client.tool(
+        7,
+        "conversation_get",
+        {
+            "conversation_id": conversation_id,
+            "message_limit": 20,
+            "run_id": "actions-e2e-conversation-get",
+        },
+    )
+    _contains(loaded, conversation_id, "Turso conversation get")
+    conversations = client.tool(
+        8,
+        "conversation_list",
+        {"limit": 100, "run_id": "actions-e2e-conversation-list"},
+    )
+    _contains(conversations, conversation_id, "Turso conversation list")
+    print("OK conversations are created, read, and listed through online Turso")
+
+    ldap = client.tool(
+        9,
         "ldap_search",
         {
             "filter_template": "(&(objectClass=device)(cn=WEB01))",
@@ -211,7 +243,7 @@ def main() -> None:
     print("OK LDAP fixture contains the Apache training node")
 
     ldap_nmap = client.tool(
-        7,
+        10,
         "nmap_scan",
         {
             "target": LDAP_TARGET,
@@ -227,7 +259,7 @@ def main() -> None:
     print("OK nmap_scan reached the authorized LDAP service")
 
     apache_nmap = client.tool(
-        8,
+        11,
         "nmap_scan",
         {
             "target": APACHE_TARGET,
@@ -244,7 +276,7 @@ def main() -> None:
     print("OK nmap_scan fingerprinted the isolated Apache fixture")
 
     httpx = client.tool(
-        9,
+        12,
         "httpx_probe",
         {
             "targets": f"http://{APACHE_TARGET}:80",
@@ -257,7 +289,7 @@ def main() -> None:
     print("OK httpx_probe collected web evidence from Apache")
 
     command = client.tool(
-        10,
+        13,
         "execute_command",
         {
             "command": f"curl -fsSI http://{APACHE_TARGET}:80/",

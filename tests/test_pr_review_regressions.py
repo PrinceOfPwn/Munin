@@ -486,7 +486,9 @@ def test_munin_agent_propagates_llm_failure_to_mcp(store, monkeypatch):
         llm_model="test",
     )
     monkeypatch.setattr(munin_agent, "MuninAgent", FailingAgent)
+    monkeypatch.setattr(munin_tools, "STATE", store)
     monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
+    monkeypatch.setattr(munin_tools, "_conversation_backend_error", lambda _settings: None)
 
     result = munin_tools.munin_chat("hello")
     assert result["ok"] is False
@@ -531,7 +533,9 @@ def test_munin_chat_async_returns_job_and_operator_safe_progress(store, monkeypa
         llm_model="test",
     )
     monkeypatch.setattr(munin_agent, "MuninAgent", FakeAgent)
+    monkeypatch.setattr(munin_tools, "STATE", store)
     monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
+    monkeypatch.setattr(munin_tools, "_conversation_backend_error", lambda _settings: None)
 
     submitted = munin_tools.munin_chat("hello", mode="async")
     assert submitted["ok"] is True

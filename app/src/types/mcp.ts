@@ -52,8 +52,30 @@ export interface ChatMessage {
   role: "user" | "assistant" | "tool";
   content: string;
   toolCalls?: ToolCall[];
+  artifacts?: ConversationArtifact[];
   thinking?: boolean;
   timestamp: number;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  summary?: string;
+  created_at?: string;
+  updated_at?: string;
+  archived_at?: string;
+  message_count?: number;
+}
+
+export interface ConversationArtifact {
+  id: number | string;
+  conversation_id: string;
+  message_id: number | string;
+  filename: string;
+  language?: string;
+  media_type?: string;
+  content: string;
+  created_at?: string;
 }
 
 export type ViewKey = "chat" | "tools" | "memory" | "soul" | "agents";
