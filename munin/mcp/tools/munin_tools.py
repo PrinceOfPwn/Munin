@@ -7,7 +7,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -526,41 +525,14 @@ def munin_chat(
             "error": {"code": "bad_input", "message": str(exc)},
         }
 
-    async_message_id = 0
-    async_trace: list[dict[str, Any]] = []
-    async_run_id = ""
-    if mode == "async":
-        async_run_id = f"run_{uuid.uuid4().hex}"
-        placeholder = conversation_service.begin_async_turn(
-            conversation_id=prepared.conversation_id,
-            run_id=async_run_id,
-        )
-        async_message_id = int(placeholder["id"])
-
     def execute(progress=None) -> dict[str, Any]:
-        def report(event: dict[str, Any]) -> None:
-            observable = dict(event)
-            async_trace.append(observable)
-            if async_message_id:
-                try:
-                    conversation_service.update_async_turn(
-                        conversation_id=prepared.conversation_id,
-                        message_id=async_message_id,
-                        run_status="running",
-                        trace=async_trace,
-                    )
-                except Exception:
-                    logger.exception("munin_chat: unable to persist live execution trace")
-            if progress is not None:
-                progress(observable)
-
         try:
             from ...core.munin_agent import MuninAgent  # noqa: PLC0415
             agent = MuninAgent(settings)
             result = agent.respond(
                 message.strip(),
                 max_iterations=iterations,
-                progress=report,
+                progress=progress,
                 conversation_id=prepared.conversation_id,
                 conversation_history=prepared.history,
             )
@@ -568,25 +540,13 @@ def munin_chat(
             logger.exception("munin_chat: agent error")
             error_message = f"Munin could not complete this turn: {exc}"
             try:
-                if async_message_id:
-                    conversation_service.complete_async_turn(
-                        conversation_id=prepared.conversation_id,
-                        message_id=async_message_id,
-                        content=error_message,
-                        tool_calls=[],
-                        stop_reason="agent_error",
-                        iterations=0,
-                        trace=async_trace,
-                        failed=True,
-                    )
-                else:
-                    conversation_service.complete_turn(
-                        conversation_id=prepared.conversation_id,
-                        content=error_message,
-                        tool_calls=[],
-                        stop_reason="agent_error",
-                        iterations=0,
-                    )
+                conversation_service.complete_turn(
+                    conversation_id=prepared.conversation_id,
+                    content=error_message,
+                    tool_calls=[],
+                    stop_reason="agent_error",
+                    iterations=0,
+                )
             except Exception:
                 logger.exception("munin_chat: unable to persist failed turn")
             return {
@@ -596,24 +556,13 @@ def munin_chat(
             }
         content = result.get("content", "")
         try:
-            if async_message_id:
-                assistant_message, artifacts = conversation_service.complete_async_turn(
-                    conversation_id=prepared.conversation_id,
-                    message_id=async_message_id,
-                    content=content,
-                    tool_calls=result.get("tool_calls", []),
-                    stop_reason=result.get("stop_reason", "unknown"),
-                    iterations=result.get("iterations", 0),
-                    trace=async_trace,
-                )
-            else:
-                assistant_message, artifacts = conversation_service.complete_turn(
-                    conversation_id=prepared.conversation_id,
-                    content=content,
-                    tool_calls=result.get("tool_calls", []),
-                    stop_reason=result.get("stop_reason", "unknown"),
-                    iterations=result.get("iterations", 0),
-                )
+            assistant_message, artifacts = conversation_service.complete_turn(
+                conversation_id=prepared.conversation_id,
+                content=content,
+                tool_calls=result.get("tool_calls", []),
+                stop_reason=result.get("stop_reason", "unknown"),
+                iterations=result.get("iterations", 0),
+            )
         except Exception as exc:
             logger.exception("munin_chat: unable to persist completed turn")
             return {
@@ -649,14 +598,6 @@ def munin_chat(
             ),
         )
         JOBS.add_progress(job.job_id, {"stage": "queued", "message": "Conversation queued"})
-        try:
-            STATE.conversation_update_message(
-                conversation_id=prepared.conversation_id,
-                message_id=async_message_id,
-                metadata={"job_id": job.job_id},
-            )
-        except Exception:
-            logger.exception("munin_chat: unable to persist queued conversation run")
         return {
             "ok": True,
             "tool": "munin_chat",
@@ -668,8 +609,6 @@ def munin_chat(
                 "status": job.status,
                 "conversation_id": prepared.conversation_id,
                 "user_message_id": prepared.user_message_id,
-                "assistant_message_id": async_message_id,
-                "run_id": async_run_id,
             },
         }
 
