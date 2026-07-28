@@ -12,6 +12,8 @@ import type {
   AgentPresence,
   WakeItem,
   EpisodicEvent,
+  ConversationSummary,
+  ConversationArtifact,
 } from "@/types/mcp";
 
 interface LiveState {
@@ -41,6 +43,9 @@ interface MuninState {
   // Chat
   messages: ChatMessage[];
   chatInput: string;
+  conversations: ConversationSummary[];
+  conversationsLoading: boolean;
+  activeConversationId: string;
 
   // Live state
   live: LiveState;
@@ -56,6 +61,9 @@ interface MuninState {
   refreshLive: () => Promise<void>;
 
   setChatInput: (s: string) => void;
+  newConversation: () => void;
+  selectConversation: (conversationId: string) => Promise<void>;
+  loadConversations: () => Promise<void>;
   sendChatMessage: () => Promise<void>;
   appendToolCallToMessage: (messageId: string, call: ToolCall) => void;
   updateToolCall: (messageId: string, callId: string, patch: Partial<ToolCall>) => void;
@@ -131,6 +139,9 @@ export const useMuninStore = create<MuninState>((set, get) => ({
     },
   ],
   chatInput: "",
+  conversations: [],
+  conversationsLoading: false,
+  activeConversationId: "",
   live: initialLive,
 
   init: () => {
@@ -140,6 +151,7 @@ export const useMuninStore = create<MuninState>((set, get) => ({
     // Fire and forget — errors are caught inside each fn
     get().refreshTools();
     get().refreshLive();
+    get().loadConversations();
   },
 
   setView: (v) => set({ view: v }),
@@ -171,6 +183,9 @@ export const useMuninStore = create<MuninState>((set, get) => ({
           lastUpdated: Date.now(),
         },
       }));
+      // Conversation data has no browser-side fallback: after a successful
+      // connection, hydrate the durable Turso-backed history immediately.
+      void get().loadConversations();
       return { ok: true, message: `Connected. ${tools.length} tools available.` };
     } catch (e: any) {
       done("error");
@@ -332,6 +347,73 @@ export const useMuninStore = create<MuninState>((set, get) => ({
 
   setChatInput: (s) => set({ chatInput: s }),
 
+  newConversation: () => {
+    const id = "conv_" + uuid().replace(/-/g, "");
+    set({
+      activeConversationId: id,
+      messages: [
+        {
+          id: "intro-" + id,
+          role: "assistant",
+          content:
+            "I am **Munin**. This is a new persistent conversation. Its turns and generated files will be stored in Turso once you send the first message.",
+          timestamp: Date.now(),
+        },
+      ],
+      chatInput: "",
+      view: "chat",
+    });
+  },
+
+  loadConversations: async () => {
+    const { mcpUrl, mcpToken } = get();
+    set({ conversationsLoading: true });
+    try {
+      const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
+      const response = await client.callTool("conversation_list", { limit: 100 });
+      const { json, text, isError } = extractToolResultContent(response);
+      if (isError) throw new Error(text || "Unable to load conversations");
+      const data = unwrapToolData(json);
+      const conversations = Array.isArray(data?.conversations) ? data.conversations : [];
+      set({ conversations, conversationsLoading: false });
+      const active = get().activeConversationId;
+      if (!active && conversations.length > 0) {
+        await get().selectConversation(conversations[0].id);
+      }
+    } catch (e: any) {
+      // Chat persistence is deliberately Turso-only. Keep the compose surface
+      // available, but never synthesize a local history when the remote store
+      // is unavailable.
+      L.warn("loadConversations failed", { error: e?.message || String(e) });
+      set({ conversationsLoading: false });
+    }
+  },
+
+  selectConversation: async (conversationId) => {
+    const { mcpUrl, mcpToken } = get();
+    set({ conversationsLoading: true });
+    try {
+      const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
+      const response = await client.callTool("conversation_get", {
+        conversation_id: conversationId,
+        message_limit: 1_000,
+      });
+      const { json, text, isError } = extractToolResultContent(response);
+      if (isError) throw new Error(text || "Unable to load conversation");
+      const data = unwrapToolData(json);
+      const artifacts = Array.isArray(data?.artifacts) ? data.artifacts : [];
+      set({
+        activeConversationId: conversationId,
+        messages: conversationMessagesToChat(data?.messages || [], artifacts),
+        conversationsLoading: false,
+        view: "chat",
+      });
+    } catch (e: any) {
+      L.warn("selectConversation failed", { conversationId, error: e?.message || String(e) });
+      set({ conversationsLoading: false });
+    }
+  },
+
   sendChatMessage: async () => {
     const text = get().chatInput.trim();
     if (!text) return;
@@ -351,10 +433,15 @@ export const useMuninStore = create<MuninState>((set, get) => ({
       thinking: true,
       timestamp: Date.now(),
     };
+    let conversationId = get().activeConversationId;
+    if (!conversationId) {
+      conversationId = "conv_" + uuid().replace(/-/g, "");
+    }
 
     set((s) => ({
       messages: [...s.messages, userMsg, assistantMsg],
       chatInput: "",
+      activeConversationId: conversationId,
     }));
 
     // Slash command -> direct tool call
@@ -406,7 +493,7 @@ export const useMuninStore = create<MuninState>((set, get) => ({
 
     if (chatTool) {
       if (chatTool.name === "munin_chat") {
-        await runMuninChatJob(assistantId, text, set, get);
+        await runMuninChatJob(assistantId, text, conversationId, set, get);
         return;
       }
       await runToolCallInline(
@@ -466,6 +553,40 @@ export const useMuninStore = create<MuninState>((set, get) => ({
 
 // --- helpers ---
 
+function conversationMessagesToChat(rows: any[], artifacts: ConversationArtifact[]): ChatMessage[] {
+  const artifactsByMessage = new Map<string, ConversationArtifact[]>();
+  for (const artifact of artifacts) {
+    const key = String(artifact.message_id);
+    artifactsByMessage.set(key, [...(artifactsByMessage.get(key) || []), artifact]);
+  }
+  return rows
+    .filter((row) => row && ["user", "assistant", "tool"].includes(String(row.role)))
+    .map((row) => {
+      const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+      const timestamp = Date.parse(String(row.created_at || ""));
+      const toolCalls = Array.isArray(metadata.tool_calls)
+        ? metadata.tool_calls.map((call: any, index: number) => ({
+            id: `persisted-${row.id}-${index}`,
+            name: String(call?.name || "tool"),
+            arguments: call?.arguments && typeof call.arguments === "object" ? call.arguments : {},
+            status: call?.ok === false ? "error" : "success",
+            startTime: Number.isFinite(timestamp) ? timestamp : Date.now(),
+            endTime: Number.isFinite(timestamp) ? timestamp : Date.now(),
+            result: call?.result,
+            error: call?.error,
+          }))
+        : undefined;
+      return {
+        id: String(row.id),
+        role: row.role,
+        content: String(row.content || ""),
+        toolCalls,
+        artifacts: artifactsByMessage.get(String(row.id)) || [],
+        timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+      } as ChatMessage;
+    });
+}
+
 function parseSlashCommand(input: string): {
   name: string;
   args: Record<string, any>;
@@ -501,6 +622,7 @@ function parseSlashCommand(input: string): {
 async function runMuninChatJob(
   assistantId: string,
   message: string,
+  conversationId: string,
   set: (fn: (s: MuninState) => Partial<MuninState>) => void,
   get: () => MuninState
 ) {
@@ -517,7 +639,11 @@ async function runMuninChatJob(
 
   const client = getMcpClient({ baseUrl: get().mcpUrl, token: get().mcpToken });
   try {
-    const started = await client.callTool("munin_chat", { message, mode: "async" });
+    const started = await client.callTool("munin_chat", {
+      message,
+      mode: "async",
+      conversation_id: conversationId,
+    });
     const { json, text, isError } = extractToolResultContent(started);
     if (isError) throw new Error(text || "Munin rejected the conversation");
     const jobId = json?.data?.job_id || json?.job_id;
@@ -569,10 +695,16 @@ async function runMuninChatJob(
       set((s) => ({
         messages: s.messages.map((m) =>
           m.id === assistantId
-            ? { ...m, content: output.content || "(no response)", thinking: false }
+            ? {
+                ...m,
+                content: output.content || "(no response)",
+                artifacts: Array.isArray(output.artifacts) ? output.artifacts : [],
+                thinking: false,
+              }
             : m
         ),
       }));
+      void get().loadConversations();
       return;
     }
     throw new Error("Conversation is still running after 55 minutes; it continues on the server.");

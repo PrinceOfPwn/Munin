@@ -22,6 +22,12 @@ function safeFilename(value?: string) {
   return cleaned || "munin-artifact";
 }
 
+function filenameWithExtension(value: string | undefined, kind: ArtifactKind) {
+  const cleaned = safeFilename(value);
+  const suffix = "." + extension(kind);
+  return cleaned.toLowerCase().endsWith(suffix) ? cleaned : cleaned + suffix;
+}
+
 /** Download/copy controls for model and tool output. Content stays local to the browser. */
 export default function ArtifactActions({
   content,
@@ -46,7 +52,7 @@ export default function ArtifactActions({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${safeFilename(filename)}.${extension(kind)}`;
+    anchor.download = filenameWithExtension(filename, kind);
     anchor.click();
     URL.revokeObjectURL(url);
   };
