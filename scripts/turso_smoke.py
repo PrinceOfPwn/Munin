@@ -33,9 +33,16 @@ def main() -> None:
         "sha": os.environ.get("GITHUB_SHA", "local"),
         "written_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
     }
+    # A workflow run can contain more than one job that validates the same
+    # Turso database in parallel (for example, the fast backend job and the
+    # full LDAP/Apache E2E job).  ``GITHUB_RUN_ID`` alone would make those
+    # jobs reuse a task key, turning a healthy authoritative claim into a
+    # false collision.  The job id keeps the test namespace isolated while
+    # preserving cross-replica contention inside each individual smoke test.
     marker_key = (
         "ci:turso:roundtrip:"
-        f"{marker['run_id']}:{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+        f"{marker['run_id']}:{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}:"
+        f"{os.environ.get('GITHUB_JOB', 'manual')}"
     )
     with tempfile.TemporaryDirectory(prefix="munin-turso-smoke-") as temp_dir:
         root = Path(temp_dir)
