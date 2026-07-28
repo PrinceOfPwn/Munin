@@ -374,11 +374,16 @@ export const useMuninStore = create<MuninState>((set, get) => ({
       const { json, text, isError } = extractToolResultContent(response);
       if (isError) throw new Error(text || "Unable to load conversations");
       const data = unwrapToolData(json);
-      const conversations = Array.isArray(data?.conversations) ? data.conversations : [];
+      const conversations: ConversationSummary[] = Array.isArray(data?.conversations)
+        ? data.conversations
+        : [];
       set({ conversations, conversationsLoading: false });
       const active = get().activeConversationId;
-      if (!active && conversations.length > 0) {
-        await get().selectConversation(conversations[0].id);
+      const requested = active && conversations.some((item: ConversationSummary) => item.id === active)
+        ? active
+        : conversations[0]?.id;
+      if (requested) {
+        await get().selectConversation(requested);
       }
     } catch (e: any) {
       // Chat persistence is deliberately Turso-only. Keep the compose surface

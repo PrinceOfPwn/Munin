@@ -63,6 +63,9 @@ class Settings:
     # ``file:/abs/path`` → explicit local file path.
     db_url: str = ""
     db_auth_token: str = ""
+    # Root secret used to encrypt BYOK provider keys at rest in Turso. It is
+    # deliberately environment-only and is never returned by an MCP tool.
+    byok_master_key: str = ""
 
     @property
     def runs_root(self) -> Path:
@@ -173,6 +176,7 @@ def get_settings() -> Settings:
         # Persistence — empty falls back to local file
         db_url=os.environ.get("MUNIN_DB_URL", "").strip(),
         db_auth_token=os.environ.get("MUNIN_DB_AUTH_TOKEN", "").strip(),
+        byok_master_key=os.environ.get("MUNIN_BYOK_MASTER_KEY", ""),
     )
     settings.ensure_workspace()
     return settings
@@ -231,4 +235,5 @@ def redact_settings(settings: Settings) -> Settings:
         mcp_auth_token="***REDACTED***" if settings.mcp_auth_token else "",
         db_url=_redact_db_url(settings.db_url),
         db_auth_token="***REDACTED***" if settings.db_auth_token else "",
+        byok_master_key="***REDACTED***" if settings.byok_master_key else "",
     )

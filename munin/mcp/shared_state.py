@@ -322,6 +322,21 @@ class SharedStateStore:
                     FOREIGN KEY(message_id) REFERENCES conversation_messages(id)
                 );
 
+                -- Encrypted provider credentials. API keys never appear in
+                -- metadata, audit rows, browser storage, or normal queries.
+                CREATE TABLE IF NOT EXISTS provider_profiles (
+                    id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    key_ciphertext TEXT NOT NULL,
+                    key_fingerprint TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_shared_intel_target ON shared_intel(target_ip);
                 CREATE INDEX IF NOT EXISTS idx_shared_intel_service ON shared_intel(service);
@@ -344,6 +359,7 @@ class SharedStateStore:
                 CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(archived_at, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_conversation_messages_thread ON conversation_messages(conversation_id, id);
                 CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_thread ON conversation_artifacts(conversation_id, message_id);
+                CREATE INDEX IF NOT EXISTS idx_provider_profiles_active ON provider_profiles(active, updated_at DESC);
                 """
             )
             # Existing Turso installations predate source_code. Keep generated
@@ -1520,6 +1536,94 @@ class SharedStateStore:
             "age_seconds": max(0, int(now - float(row["updated_at_epoch"]))),
             "is_stale": is_stale,
         }
+
+    # ---- encrypted BYOK provider profiles ----
+    @staticmethod
+    def _provider_profile_row_to_dict(row: Any, *, include_ciphertext: bool = False) -> dict[str, Any]:
+        value = {
+            "id": row["id"],
+            "label": row["label"],
+            "provider": row["provider"],
+            "base_url": row["base_url"],
+            "model": row["model"],
+            "key_fingerprint": row["key_fingerprint"],
+            "active": bool(row["active"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if include_ciphertext:
+            value["key_ciphertext"] = row["key_ciphertext"]
+        return value
+
+    def provider_profile_upsert(
+        self,
+        *,
+        profile_id: str,
+        label: str,
+        provider: str,
+        base_url: str,
+        model: str,
+        key_ciphertext: str,
+        key_fingerprint: str,
+        activate: bool = False,
+    ) -> dict[str, Any]:
+        profile_id = self._conversation_id(profile_id)
+        now = _utc_now_db()
+        with self._connect() as conn:
+            if activate:
+                conn.execute("UPDATE provider_profiles SET active = 0 WHERE active = 1")
+            conn.execute(
+                """
+                INSERT INTO provider_profiles (
+                    id, label, provider, base_url, model, key_ciphertext,
+                    key_fingerprint, active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    label = excluded.label, provider = excluded.provider,
+                    base_url = excluded.base_url, model = excluded.model,
+                    key_ciphertext = excluded.key_ciphertext,
+                    key_fingerprint = excluded.key_fingerprint,
+                    active = excluded.active, updated_at = excluded.updated_at
+                """,
+                (
+                    profile_id, label.strip()[:120], provider.strip()[:64], base_url.strip()[:500],
+                    model.strip()[:240], key_ciphertext, key_fingerprint[:64], int(activate), now, now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
+        if not row:
+            raise RuntimeError("provider profile write did not return a row")
+        return self._provider_profile_row_to_dict(row)
+
+    def provider_profile_list(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM provider_profiles ORDER BY active DESC, updated_at DESC").fetchall()
+        return [self._provider_profile_row_to_dict(row) for row in rows]
+
+    def provider_profile_get(self, profile_id: str = "", *, active_only: bool = False) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            if profile_id:
+                row = conn.execute("SELECT * FROM provider_profiles WHERE id = ?", (self._conversation_id(profile_id),)).fetchone()
+            elif active_only:
+                row = conn.execute("SELECT * FROM provider_profiles WHERE active = 1 ORDER BY updated_at DESC LIMIT 1").fetchone()
+            else:
+                return None
+        return self._provider_profile_row_to_dict(row, include_ciphertext=True) if row else None
+
+    def provider_profile_activate(self, profile_id: str) -> dict[str, Any] | None:
+        profile_id = self._conversation_id(profile_id)
+        with self._connect() as conn:
+            if not conn.execute("SELECT 1 FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone():
+                return None
+            conn.execute("UPDATE provider_profiles SET active = 0 WHERE active = 1")
+            conn.execute("UPDATE provider_profiles SET active = 1, updated_at = ? WHERE id = ?", (_utc_now_db(), profile_id))
+            row = conn.execute("SELECT * FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
+        return self._provider_profile_row_to_dict(row) if row else None
+
+    def provider_profile_delete(self, profile_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM provider_profiles WHERE id = ?", (self._conversation_id(profile_id),))
+        return bool(cursor.rowcount)
 
     # ---- generated_graphs ----
     def graph_register(
