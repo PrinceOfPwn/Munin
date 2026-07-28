@@ -105,6 +105,7 @@ _DYNAMIC_TOOL_NAMES: set[str] = {
 # at response time (after MCP initialization) so the coordinator receives the
 # same active-recon surface as the server without creating an import cycle.
 _ACTIVE_RECON_TOOL_NAMES = (
+    "execute_command",
     "nmap_scan",
     "nmap_advanced_scan",
     "httpx_probe",
@@ -233,6 +234,7 @@ class MuninAgent:
                 "1b. Call `munin_capabilities` when selecting a domain workflow. It describes directory, Hugin/intel, web/service recon and agent-composition contracts without granting extra authorization.",
                 "1c. For a non-trivial plan, use `hugin_rag_search` or `hugin_plan_for` as evidence. Their output is advisory, not authorization.",
                 "1d. `extension_forge` only creates a guarded proposal. Never call `extension_open_pr` unless the operator explicitly approved that exact proposal in this conversation.",
+                "1e. `execute_command` is a last resort for an explicitly operator-approved, in-scope command. Always declare its target; it is audited and runs the active OPSEC pre/postflight.",
                 "2. To delegate structured work, call `munin_wake(subagent, task_json)` and monitor it via `subagent_trace` rather than replicating a specialist's job yourself.",
                 "3. For LDAP, always use `ldap_search(filter_template=..., params_json=...)` — never build a filter string by hand.",
                 "4. Active-tool calls (nmap, nuclei, sqlmap, hydra, etc.) run an automatic OPSEC preflight/postflight. If a result reports an opsec/egress/route failure, stop and report it to the operator — do not retry the same call blindly.",
