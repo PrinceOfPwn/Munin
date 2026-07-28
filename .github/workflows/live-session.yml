@@ -115,6 +115,9 @@ jobs:
       PREFLIGHT_POLICY:     ${{ inputs.preflight_policy }}
       LLM_TIMEOUT_FLOOR:    "40"
       LLM_TIMEOUT_CEILING:  "240"
+      LLM_RETRY_ATTEMPTS:   "5"
+      LLM_RETRY_BASE_DELAY: "5"
+      LLM_RETRY_MAX_DELAY:  "60"
       # Iteration budget — blank string means "no cap" (agent uses HARD_CEILING)
       MUNIN_MAX_ITERATIONS: ${{ inputs.munin_max_iterations }}
       MUNIN_LOG_LEVEL:      "INFO"
