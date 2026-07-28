@@ -22,13 +22,14 @@ When triggered, the workflow:
 
 ---
 
-## 🔑 Step 1: Configure Required GitHub Secrets
+## 🔑 Step 1: Fork and Configure Required GitHub Secrets
 
-Before launching the workflow for the first time, set up your secrets in GitHub:
+Before launching the workflow for the first time, you need your own copy of the repository to run Actions and store your secrets safely:
 
-1. Navigate to your repository on GitHub.
-2. Go to **Settings** → **Secrets and variables** → **Actions**.
-3. Click **New repository secret** and add the following required variables:
+1. **Fork this repository** to your personal GitHub account (click the "Fork" button at the top right of the original repo).
+2. Navigate to your newly forked repository on GitHub.
+3. Go to **Settings** → **Secrets and variables** → **Actions**.
+4. Click **New repository secret** and add the following required variables:
 
 | Secret Name | Description & Example Value |
 | --- | --- |
