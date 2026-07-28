@@ -16,32 +16,56 @@ from ..mcp.shared_state import SharedStateStore
 
 logger = logging.getLogger("munin.graph_forge")
 
-_SYSTEM_PROMPT = """You are the Graph-Forge subagent of Munin. Given a NAME, a PURPOSE
-and optional HINTS + TOOL WHITELIST, you refine them into a production-ready ReAct
-system prompt for a subagent that will be spawned on demand.
+_SYSTEM_PROMPT = """你是 Munin 的 Graph-Forge 子代理。输入包含 NAME、PURPOSE、
+HINTS 和 TOOL WHITELIST。你的唯一任务是生成可持久化、可审计、可终止的 ReAct
+子代理配置。
 
-Rules for the system prompt you produce:
-- Second-person imperative, concise, actionable.
-- Cite the tools this subagent is allowed to use (the whitelist provided).
-- Include hard rules: "publish findings via publish_shared_intel", "never call tools
-  outside your whitelist", "escape LDAP filter parameters with escape_filter_chars",
-  and "if uncertain about scope, post a message to the parent agent via post_agent_message".
+## 生成规则
+- `name`, `purpose`, JSON keys、tool names 保持英文；`system_prompt` 使用简体中文。
+- 输入 `tool_whitelist` 是起始建议，不是上限。可以为实现 PURPOSE 增加必要的已注册
+  tools，也可以删除无关 tools；最终 whitelist 应最小、完整并可实际执行。
+- prompt 必须说明：角色、单一目标、范围、输入、工作流、证据标准、停止条件和中文交接格式。
+- 代理间 `post_agent_message` 使用简体中文；代码、JSON keys、工具参数和查询语法使用英文。
+- 禁止泄露隐藏思维链；只交付目标、动作、证据、风险、未知项和下一步。
+- 始终包含：只使用 whitelist；不清楚范围时通过 `post_agent_message` 请求父代理；
+  重要发现用 `publish_shared_intel`（仅当 whitelist 中存在）；完成后必须向父代理交接。
+- whitelist 含 `ldap_search` 时，强制使用 `filter_template` + `params_json`，禁止拼接 filter。
+- whitelist 含 Hugin tools 时，定义其角色为候选知识/关系证据：
+  查询用英文安全术语，分析用中文，结果不构成授权；refresh 最多一次。
+- whitelist 含 active tool 时，要求明确 target 与 active authorization，并尊重 OPSEC failure。
+- system prompt 必须让代理在得到 evidence-backed result 或精确 blocker 后结束，禁止无限轮询。
 
-Reply with a single JSON object:
+## Few-shot shape
+输入 purpose: `Correlate LDAP service identities with exposed web services`
+输入 whitelist: `["memory_recall","hugin_plan_for","ldap_search","nmap_scan",
+"publish_shared_intel","post_agent_message"]`
+正确输出中的 system_prompt 应表达以下动作链：
+`memory_recall` → `hugin_plan_for` → 验证 scope → 最小 LDAP/web 查询 →
+交叉验证 → `publish_shared_intel` → 中文 `post_agent_message` → stop。
+如果起始 whitelist 缺少完成目标所需的 Hugin detail、memory 或 messaging tool，
+应补充对应的已注册 tool；不要添加与 PURPOSE 无关的能力。
+
+只回复一个有效 JSON object，不要 markdown fence 或额外 prose：
 {
-  "name": "<name>",
-  "purpose": "<one-line purpose>",
-  "system_prompt": "<multiline system prompt>",
-  "tool_whitelist": ["<tool1>", "<tool2>", ...]
+  "name": "<english-kebab-case>",
+  "purpose": "<one-line English purpose>",
+  "system_prompt": "<multiline Simplified Chinese prompt>",
+  "tool_whitelist": ["<exact-tool-name>"]
 }
-No prose outside the JSON. No markdown fences.
 """
 
 
 def _execution_contract(tool_whitelist: list[str]) -> dict[str, Any]:
     """Give every forged graph the same observable, evidence-first shape."""
     contexts = ["semantic_memory", "shared_intel"]
-    if {"hugin_search", "hugin_neighbors", "hugin_refresh"} & set(tool_whitelist):
+    if {
+        "hugin_search",
+        "hugin_neighbors",
+        "hugin_refresh",
+        "hugin_rag_search",
+        "hugin_plan_for",
+        "hugin_node_detail",
+    } & set(tool_whitelist):
         contexts.append("hugin_cached_graph")
     return {
         "version": 1,
@@ -96,20 +120,33 @@ class GraphForgeSubagent:
             return {"ok": False, "summary": "bad JSON reply", "error": {"code": "bad_json", "message": content[:400]}}
         if not payload.get("system_prompt"):
             return {"ok": False, "summary": "missing system_prompt", "error": {"code": "bad_reply", "message": "no system_prompt"}}
+        requested_tools = list(dict.fromkeys(tool_whitelist))
+        returned_tools = payload.get("tool_whitelist")
+        if not isinstance(returned_tools, list):
+            returned_tools = requested_tools
+        effective_tools = list(
+            dict.fromkeys(
+                tool.strip()
+                for tool in returned_tools
+                if isinstance(tool, str) and tool.strip()
+            )
+        )
+        if not effective_tools:
+            effective_tools = requested_tools
         self.state.episodic_record(
             agent="graph_forge",
             action="forge_success",
             input_data={"name": name, "purpose": purpose, "hints": hints, "tool_whitelist": tool_whitelist},
-            output_data={"name": payload["name"], "tool_whitelist": payload["tool_whitelist"]},
+            output_data={"name": name, "tool_whitelist": effective_tools},
             tags=["forge", "graph"],
         )
-        contract = _execution_contract(payload.get("tool_whitelist") or tool_whitelist)
+        contract = _execution_contract(effective_tools)
         return {
             "ok": True,
-            "summary": f"graph forged: {payload['name']}",
-            "name": payload["name"],
-            "purpose": payload["purpose"],
+            "summary": f"graph forged: {name}",
+            "name": name,
+            "purpose": str(payload.get("purpose") or purpose),
             "system_prompt": payload["system_prompt"],
-            "tool_whitelist": payload.get("tool_whitelist") or tool_whitelist,
+            "tool_whitelist": effective_tools,
             "execution_contract": contract,
         }
