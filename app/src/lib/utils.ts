@@ -55,3 +55,14 @@ export const TERMINAL_RUN_STATES = new Set(["completed", "failed", "interrupted"
 export function isTerminalRun(state: string | undefined): boolean {
   return !!state && TERMINAL_RUN_STATES.has(state);
 }
+
+export function uuid(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return (
+    Math.random().toString(36).slice(2, 10) +
+    Date.now().toString(36) +
+    Math.random().toString(36).slice(2, 6)
+  );
+}
