@@ -1399,9 +1399,15 @@ def _start_discord_operator_bridge() -> None:
         def handle_message(author_id: int, author: str, prompt: str, channel_id: int) -> None:
             # Import lazily: MuninAgent imports MCP tool modules, so importing it
             # during module construction would create a circular dependency.
-            from ..core.munin_agent import MuninAgent
-
             try:
+                if os.environ.get("MUNIN_DISCORD_DURABLE_ACTOR_ID", "").strip():
+                    from ..production.discord_adapter import DurableDiscordAdapter
+
+                    queued = DurableDiscordAdapter(SETTINGS).enqueue(author_id=author_id, author=author, prompt=prompt)
+                    post_to_discord(f"Munin — {author}\nQueued durable operation `{queued['run_id'][-8:]}`. Continue it in the Flight Deck.", channel_id=channel_id)
+                    return
+                from ..core.munin_agent import MuninAgent
+
                 result = MuninAgent(SETTINGS).respond(prompt, max_iterations=config.max_iterations)
                 answer = str(result.get("content") or result.get("summary") or "Task completed without a text response.")
                 post_to_discord(f"Munin — {author}\n{answer}", channel_id=channel_id)
@@ -1543,6 +1549,7 @@ def _install_signal_handlers() -> None:
             _flush_git(timeout=20.0)
         except Exception as exc:  # pragma: no cover
             logger.warning("git_persist.flush failed during shutdown: %s", exc)
+        JOBS.shutdown()
         # Let the default handler proceed. FastMCP + uvicorn handle the graceful stop.
         # For stdio transport, raise KeyboardInterrupt so MCP.run() returns.
         raise SystemExit(0)
@@ -1587,6 +1594,8 @@ def main() -> None:
             MCP.run()
         except SystemExit:
             pass
+        finally:
+            JOBS.shutdown()
         return
 
     MCP.settings.host = args.host
@@ -1631,6 +1640,8 @@ def main() -> None:
     except Exception:
         logger.exception("munin-mcp crashed")
         raise
+    finally:
+        JOBS.shutdown()
 
 
 if __name__ == "__main__":
