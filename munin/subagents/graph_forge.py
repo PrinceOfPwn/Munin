@@ -3,6 +3,14 @@
 Produces (name, purpose, system_prompt, tool_whitelist) that gets persisted in
 ``generated_graphs``. The subagent runner reads that row at wake-time and builds a
 ``create_react_agent`` on the fly using the operator's LLM and the whitelisted MCP tools.
+
+v3.1.1 hardening — canonical forge stages
+-----------------------------------------
+When ``store`` + ``run_id`` are passed at construction time (the production
+dispatcher does; MCP callers may not), the graph-forge lifecycle also emits
+canonical ``forge_*`` reasoning events for the UI floating window.  Passing
+``store=None`` is a no-op, so the base behaviour is untouched for legacy
+callers and unit tests.
 """
 
 from __future__ import annotations
@@ -89,9 +97,57 @@ def _execution_contract(tool_whitelist: list[str]) -> dict[str, Any]:
 
 
 class GraphForgeSubagent:
-    def __init__(self, state: SharedStateStore, llm: LLMClient | None = None) -> None:
+    """Compile a natural-language spec into a persistable subagent config.
+
+    v3.1.1 kwargs (all backwards-compatible):
+
+    * ``store`` — a ``ProductionStore`` with the v3.1 extensions installed.
+      Enables canonical ``forge_*`` reasoning-event emission.
+    * ``run_id`` — the run to attribute forge events to; required when
+      ``store`` is set.
+    * ``agent_name`` — AgentProfile id used as the floating-window key.
+      Defaults to ``"graph-engineer"``.
+    """
+
+    def __init__(
+        self,
+        state: SharedStateStore,
+        llm: LLMClient | None = None,
+        *,
+        store: Any = None,
+        run_id: str = "",
+        agent_name: str = "graph-engineer",
+    ) -> None:
         self.state = state
         self.llm = llm or LLMClient(state.settings)
+        self.store = store
+        self.run_id = run_id
+        self.agent_name = agent_name
+
+    def _emit_forge(
+        self,
+        stage: str,
+        message: str,
+        *,
+        step: int = 0,
+        **extra: Any,
+    ) -> None:
+        if self.store is None or not self.run_id:
+            return
+        try:
+            from ..production.forge_progress import emit_forge_stage
+
+            emit_forge_stage(
+                self.store,
+                run_id=self.run_id,
+                agent_name=self.agent_name,
+                stage=stage,
+                message=message,
+                step=step,
+                **extra,
+            )
+        except Exception:
+            logger.debug("emit_forge_stage failed for stage %s", stage, exc_info=True)
 
     def forge(
         self,
@@ -101,6 +157,13 @@ class GraphForgeSubagent:
         hints: list[str],
         tool_whitelist: list[str],
     ) -> dict[str, Any]:
+        self._emit_forge(
+            "forge_propose",
+            f"Composing graph subagent '{name}'",
+            step=1,
+            purpose=purpose,
+            tool_whitelist=tool_whitelist,
+        )
         user_prompt = json.dumps(
             {"name": name, "purpose": purpose, "hints": hints, "tool_whitelist": tool_whitelist},
             ensure_ascii=True,
@@ -112,14 +175,61 @@ class GraphForgeSubagent:
         try:
             completion = self.llm.chat(messages=messages, temperature=0.2)
         except Exception as exc:
+            self._emit_forge(
+                "forge_failed",
+                f"LLM call failed: {exc}",
+                step=1,
+                error_code="llm_failed",
+            )
             return {"ok": False, "summary": "LLM failed", "error": {"code": "llm_failed", "message": str(exc)}}
         content = completion["choices"][0]["message"]["content"] or ""
+        self._emit_forge(
+            "forge_diff_ready",
+            "Received subagent config draft; validating fields",
+            step=1,
+            content_bytes=len(content),
+        )
+        self._emit_forge(
+            "forge_typecheck_start",
+            "Parsing JSON + verifying required fields",
+            step=1,
+        )
         try:
             payload = json.loads(content.strip().strip("`").replace("json\n", "", 1))
         except Exception:
+            self._emit_forge(
+                "forge_typecheck_done",
+                "Draft was not valid JSON",
+                step=1,
+                ok=False,
+            )
+            self._emit_forge(
+                "forge_failed",
+                "Graph subagent draft was not valid JSON",
+                step=1,
+                error_code="bad_json",
+            )
             return {"ok": False, "summary": "bad JSON reply", "error": {"code": "bad_json", "message": content[:400]}}
         if not payload.get("system_prompt"):
+            self._emit_forge(
+                "forge_typecheck_done",
+                "Draft missing required `system_prompt`",
+                step=1,
+                ok=False,
+            )
+            self._emit_forge(
+                "forge_failed",
+                "Graph subagent draft missing required `system_prompt`",
+                step=1,
+                error_code="bad_reply",
+            )
             return {"ok": False, "summary": "missing system_prompt", "error": {"code": "bad_reply", "message": "no system_prompt"}}
+        self._emit_forge(
+            "forge_typecheck_done",
+            "Draft passed required-field checks",
+            step=1,
+            ok=True,
+        )
         requested_tools = list(dict.fromkeys(tool_whitelist))
         returned_tools = payload.get("tool_whitelist")
         if not isinstance(returned_tools, list):
@@ -141,6 +251,20 @@ class GraphForgeSubagent:
             tags=["forge", "graph"],
         )
         contract = _execution_contract(effective_tools)
+        self._emit_forge(
+            "forge_awaiting_approval",
+            f"Graph subagent '{name}' ready — awaiting operator approval",
+            step=1,
+            name=name,
+            tool_whitelist=effective_tools,
+        )
+        self._emit_forge(
+            "forge_completed",
+            f"Graph subagent '{name}' compiled",
+            step=1,
+            name=name,
+            tool_whitelist=effective_tools,
+        )
         return {
             "ok": True,
             "summary": f"graph forged: {name}",
