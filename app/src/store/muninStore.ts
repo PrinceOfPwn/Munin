@@ -91,8 +91,11 @@ function loadStoredConfig(): { url: string; token: string } {
     if (raw) {
       const parsed = JSON.parse(raw);
       const url = parsed.url || fallbackUrl;
-      L.info("Config loaded from localStorage", { url, hasToken: !!parsed.token });
-      return { url, token: parsed.token || DEFAULT_TOKEN };
+      // A legacy build stored an MCP bearer here. Do not revive it: the
+      // production Flight Deck uses an HttpOnly operator session instead.
+      window.localStorage.removeItem("munin.config");
+      L.info("Legacy MCP URL found; browser bearer credential discarded", { url });
+      return { url, token: DEFAULT_TOKEN };
     }
   } catch (e) {
     L.warn("Failed to load config from localStorage — using defaults", e);
@@ -104,8 +107,8 @@ function loadStoredConfig(): { url: string; token: string } {
 function saveStoredConfig(url: string, token: string) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem("munin.config", JSON.stringify({ url, token }));
-    L.debug("Config saved to localStorage", { url, hasToken: !!token });
+    window.localStorage.setItem("munin.config", JSON.stringify({ url }));
+    L.debug("MCP URL saved without browser credential", { url, suppliedTokenDiscarded: !!token });
   } catch (e) {
     L.warn("Failed to save config to localStorage", e);
   }
@@ -159,8 +162,8 @@ export const useMuninStore = create<MuninState>((set, get) => ({
   closeSettings: () => set({ settingsOpen: false }),
 
   setConfig: (url, token) => {
-    L.info("setConfig", { url, hasToken: !!token });
-    set({ mcpUrl: url, mcpToken: token });
+    L.info("setConfig", { url, suppliedTokenDiscarded: !!token });
+    set({ mcpUrl: url, mcpToken: DEFAULT_TOKEN });
     saveStoredConfig(url, token);
   },
 
