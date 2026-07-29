@@ -8,7 +8,10 @@ packages = [{ include = "munin" }]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-mcp = ">=1.0.0"
+# Munin imports the stable v1 FastMCP surface.  The v2 SDK moved that module,
+# so an unbounded constraint makes fresh CI environments install an
+# incompatible release and prevents the MCP server from starting.
+mcp = ">=1.0.0,<2"
 requests = ">=2.31.0"
 ldap3 = ">=2.9.1"
 openai = ">=1.40.0"
