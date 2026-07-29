@@ -91,6 +91,20 @@ function Desk({ actor, error, setError, logout }: { actor: Actor; error: string;
     if (!selectedRun) { setRunDetail(null); return; }
     productionApi.runDetail(selectedRun.id).then(setRunDetail).catch((cause) => setError(message(cause)));
   }, [selectedRun?.id]);
+  useEffect(() => {
+    if (!selectedRun || ["completed", "failed", "interrupted", "cancelled"].includes(selectedRun.state)) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const latest = await productionApi.runDetail(selectedRun.id);
+        if (stopped) return;
+        setRunDetail(latest); setSelectedRun(latest.run);
+        if (detail?.conversation.id) setDetail(await productionApi.conversation(detail.conversation.id));
+      } catch (cause) { if (!stopped) setError(message(cause)); }
+    };
+    const timer = window.setInterval(() => { void poll(); }, 2_000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [selectedRun?.id, selectedRun?.state, detail?.conversation.id]);
   async function select(id: string) {
     try {
       const next = await productionApi.conversation(id);

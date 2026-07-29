@@ -101,6 +101,21 @@ services:
     networks:
       - munin
 
+  munin-production-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: munin-production-worker
+    profiles: ["runtime"]
+    restart: unless-stopped
+    env_file: .env
+    command: ["munin", "production-worker", "--poll-seconds", "2"]
+    depends_on:
+      munin-production-api:
+        condition: service_started
+    networks:
+      - munin
+
 volumes:
   openldap_data:
   openldap_config:
