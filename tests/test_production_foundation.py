@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +39,24 @@ def test_migrations_create_the_production_aggregate_schema(production_store):
     }
     assert expected <= production_store.schema_tables()
     assert production_store.applied_migration_ids() == ["20260729_001_production_foundation"]
+
+
+def test_namespaced_remote_store_does_not_collide_with_legacy_mcp_tables(tmp_path: Path):
+    from munin.production.store import ProductionStore, _NamespacedConnection
+
+    path = tmp_path / "shared-turso-shape.sqlite"
+
+    def connect():
+        connection = sqlite3.connect(path, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, legacy_value TEXT)")
+        return _NamespacedConnection(connection)
+
+    store = ProductionStore(connect, master_key=b"n" * 32)
+    assert "production_conversations" in store.schema_tables()
+    operator = store.create_user(username="namespaced", password="strong passphrase", role="operator")
+    conversation = store.create_conversation(owner_id=operator["id"], title="Parallel durable state")
+    assert conversation["id"]
 
 
 def test_bootstrap_login_and_rotating_session_are_server_side(production_store):

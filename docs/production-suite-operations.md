@@ -114,8 +114,11 @@ credentials, mutate production, or alter authentication.
 
 ## Deployment prerequisites
 
-1. Set `MUNIN_DB_URL` to a dedicated `libsql://`/`libsqls://` Turso database
-   and `MUNIN_DB_AUTH_TOKEN`; the production API refuses `file:` storage.
+1. Set `MUNIN_DB_URL` to `libsql://`/`libsqls://` Turso storage and
+   `MUNIN_DB_AUTH_TOKEN`; the production API refuses `file:` storage.
+   Production Suite uses a `production_` table namespace, so it can share the
+   Turso account/database with legacy MCP state without touching legacy tables.
+   A dedicated Turso database remains a valid isolation choice.
 2. Put a 32-byte `MUNIN_MASTER_KEY` in the deployment secret manager, never an
    image, browser variable, log, or PR.
 3. Set the exact `MUNIN_ALLOWED_ORIGINS`, enable secure cookies, and keep the
