@@ -344,9 +344,9 @@ class MuninAgent:
                 # the human-in-the-loop UI. Lightweight test doubles and custom
                 # adapters remain compatible with the original call contract.
                 if isinstance(self.llm, LLMClient):
-                    chat_kwargs["on_retry"] = lambda retry: emit({
+                    chat_kwargs["on_retry"] = lambda retry, current_step=step + 1: emit({
                         "stage": "llm_retry",
-                        "iteration": step + 1,
+                        "iteration": current_step,
                         "message": (
                             f"LLM {retry['reason']}; retry {retry['attempt'] + 1}/"
                             f"{retry['max_attempts']} in {retry['retry_in_seconds']:.0f}s"
@@ -359,6 +359,19 @@ class MuninAgent:
                 raise RuntimeError(f"LLM call failed at step {step}: {exc}") from exc
             message = completion["choices"][0]["message"]
             messages.append(message)
+            # Some OpenAI-compatible providers return an explicit reasoning or
+            # thinking field. Surface only that provider-supplied field through
+            # the operator-safe progress channel; never synthesize hidden CoT.
+            provider_reasoning = next(
+                (
+                    str(message[key]).strip()
+                    for key in ("reasoning_content", "reasoning", "thinking", "reasoning_summary")
+                    if isinstance(message.get(key), str) and str(message[key]).strip()
+                ),
+                "",
+            )
+            if provider_reasoning:
+                emit({"stage": "provider_reasoning", "iteration": step + 1, "message": provider_reasoning, "provider_exposed": True})
             content_now = (message.get("content") or "").strip()
             self.memory.log_step(
                 agent="munin",

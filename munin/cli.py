@@ -78,6 +78,22 @@ def mcp(transport: str, host: str, port: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# munin production-api
+# ---------------------------------------------------------------------------
+
+@cli.command("production-api")
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8787, show_default=True, type=int)
+def production_api(host: str, port: int) -> None:
+    """Start the authenticated Turso-backed operator API."""
+    import uvicorn
+
+    from .production.asgi import app_from_environment
+
+    uvicorn.run(app_from_environment(), host=host, port=port, log_level="info")
+
+
+# ---------------------------------------------------------------------------
 # munin subagent
 # ---------------------------------------------------------------------------
 
