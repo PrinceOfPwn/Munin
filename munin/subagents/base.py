@@ -29,6 +29,7 @@ import os
 import time
 from typing import Any, Callable, TYPE_CHECKING
 
+from ..mcp.audit import redact_secrets
 from ..mcp.shared_state import SharedStateStore
 from ..mcp.tools import hugin_tool, ldap_tools, tavily_tool
 
@@ -611,7 +612,11 @@ def build_tool_catalog(state: SharedStateStore, allowed_tools: set[str]) -> dict
                 fn_name = sig.get("function_name") or name.removeprefix("gen__")
                 try:
                     fn = registry._load_callable(_Path(row["script_path"]), fn_name)
-                    all_tools[name] = fn
+                    all_tools[name] = registry.wrap_generated_callable(
+                        fn,
+                        tool_name=name,
+                        state=state,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("could not load generated tool %s: %s", name, exc)
         except Exception:
@@ -788,6 +793,7 @@ class ReActSubagentBase:
                     args = json.loads(call["function"].get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                safe_args = redact_secrets(args)
 
                 # PROGRESS message: post an INFO message to munin BEFORE the
                 # tool call executes so the frontend / operator sees "about to
@@ -799,7 +805,11 @@ class ReActSubagentBase:
                         recipient_agent="munin",
                         subject=f"step {step}: {tool_name}",
                         message_type="PROGRESS",
-                        body=json.dumps({"tool": tool_name, "args": args, "step": step}, ensure_ascii=True, default=str)[:1500],
+                        body=json.dumps(
+                            {"tool": tool_name, "args": safe_args, "step": step},
+                            ensure_ascii=True,
+                            default=str,
+                        )[:1500],
                         related_task_id=None,
                         related_target_ip="",
                         metadata_json=json.dumps({"subagent": self.name, "step": step, "tool": tool_name}, ensure_ascii=True),
@@ -826,14 +836,14 @@ class ReActSubagentBase:
                 self.state.episodic_record(
                     agent=self.name,
                     action=f"tool:{tool_name}",
-                    input_data=args,
+                    input_data=safe_args,
                     output_data={"ok": tool_result.get("ok"), "summary": tool_result.get("summary"), "elapsed_ms": elapsed_ms},
                     tags=["tool"],
                 )
 
                 entry: dict[str, Any] = {
                     "name": tool_name,
-                    "arguments": args,
+                    "arguments": safe_args,
                     "elapsed_ms": elapsed_ms,
                     "ok": tool_result.get("ok", True),
                     "summary": tool_result.get("summary", ""),
