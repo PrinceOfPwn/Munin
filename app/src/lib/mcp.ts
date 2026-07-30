@@ -461,9 +461,12 @@ export class McpClient {
     L.info(`callTool(${name})`, { args });
     const done = L.time(`callTool(${name})`);
 
-    // Tool timeout: 5 min for heavy recon tools, 30s otherwise
-    const heavyTools = /nmap|nuclei|feroxbuster|ffuf|hydra|sqlmap|katana|screenshotter/i;
-    const timeoutMs = heavyTools.test(name) ? 300_000 : DEFAULTS.requestTimeout;
+    // ReAct/forge operations are intentionally long-lived. Their server-side
+    // LLM floor is 40s, so the old 30s UI timeout guaranteed a false failure
+    // before even a slow first token could arrive. Direct calls retain a five
+    // minute budget; the GUI uses munin_chat async mode and polls progress.
+    const longRunningTools = /^(munin_chat|tool_forge|graph_forge|munin_wake)$|nmap|nuclei|feroxbuster|ffuf|hydra|sqlmap|katana|screenshotter/i;
+    const timeoutMs = longRunningTools.test(name) ? 300_000 : DEFAULTS.requestTimeout;
 
     if (!this.cb.canRequest()) {
       done("circuit-open");

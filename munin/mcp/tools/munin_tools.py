@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import registry  # noqa: TID252
-from ..main import MCP, STATE, audited_tool  # noqa: TID252
+from ..main import JOBS, MCP, STATE, audited_tool  # noqa: TID252
 from ..shared_state import _coerce_int  # noqa: TID252,PLC2701
 
 logger = logging.getLogger("munin-mcp.munin_tools")
@@ -374,10 +374,11 @@ def list_subagent_tools(category: str = "", run_id: str = "") -> dict[str, Any]:
 # ─────────────────────────────────────────────
 
 @MCP.tool()
-@audited_tool("munin_chat", "passive", lambda *a, **k: "sync")
+@audited_tool("munin_chat", "passive", lambda *a, **k: str(k.get("mode", "sync")))
 def munin_chat(
     message: str,
     max_iterations: int = 40,
+    mode: str = "sync",
     run_id: str = "",
 ) -> dict[str, Any]:
     """Full conversational ReAct interface. Send natural language — Munin reasons,
@@ -403,33 +404,62 @@ def munin_chat(
                 "message": "LLM_BASE_URL, LLM_API_KEY and LLM_MODEL must be set to use munin_chat",
             },
         }
-    try:
-        from ...core.munin_agent import MuninAgent  # noqa: PLC0415
-        agent = MuninAgent(settings)
-        result = agent.respond(
-            message.strip(),
-            max_iterations=max(1, min(_coerce_int(max_iterations, 40), 400)),
-        )
-    except Exception as exc:
-        logger.exception("munin_chat: agent error")
+    if mode not in {"sync", "async"}:
         return {
             "ok": False, "tool": "munin_chat", "mode": "sync",
-            "summary": "agent error",
-            "error": {"code": "agent_error", "message": str(exc)},
+            "summary": "bad mode",
+            "error": {"code": "bad_input", "message": "mode must be sync or async"},
         }
-    content = result.get("content", "")
-    return {
-        "ok": True,
-        "tool": "munin_chat",
-        "mode": "sync",
-        "summary": content[:120] if content else "(no response)",
-        "data": {
-            "content": content,
-            "tool_calls": result.get("tool_calls", []),
-            "iterations": result.get("iterations", 0),
-            "stop_reason": result.get("stop_reason", "unknown"),
-        },
-    }
+
+    iterations = max(1, min(_coerce_int(max_iterations, 40), 400))
+
+    def execute(progress=None) -> dict[str, Any]:
+        try:
+            from ...core.munin_agent import MuninAgent  # noqa: PLC0415
+            agent = MuninAgent(settings)
+            result = agent.respond(message.strip(), max_iterations=iterations, progress=progress)
+        except Exception as exc:
+            logger.exception("munin_chat: agent error")
+            return {
+                "ok": False, "tool": "munin_chat", "mode": "sync",
+                "summary": "agent error",
+                "error": {"code": "agent_error", "message": str(exc)},
+            }
+        content = result.get("content", "")
+        return {
+            "ok": True,
+            "tool": "munin_chat",
+            "mode": "sync",
+            "summary": content[:120] if content else "(no response)",
+            "data": {
+                "content": content,
+                "tool_calls": result.get("tool_calls", []),
+                "iterations": result.get("iterations", 0),
+                "stop_reason": result.get("stop_reason", "unknown"),
+            },
+        }
+
+    if mode == "async":
+        job = JOBS.submit(
+            tool="munin_chat",
+            level="passive",
+            target="conversation",
+            command_preview="ReAct conversation",
+            fn=lambda current_job: execute(
+                lambda event: JOBS.add_progress(current_job.job_id, event)
+            ),
+        )
+        JOBS.add_progress(job.job_id, {"stage": "queued", "message": "Conversation queued"})
+        return {
+            "ok": True,
+            "tool": "munin_chat",
+            "mode": "async",
+            "job_id": job.job_id,
+            "summary": "Munin conversation started",
+            "data": {"job_id": job.job_id, "status": job.status},
+        }
+
+    return execute()
 
 
 # ─────────────────────────────────────────────

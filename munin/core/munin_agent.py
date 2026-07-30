@@ -170,7 +170,13 @@ class MuninAgent:
     # hiding evidence the model needs (dump_domain_structure, cve_enrich, etc.).
     _HARD_CEILING = 10_000
 
-    def respond(self, user_input: str, *, max_iterations: int | None = None) -> dict[str, Any]:
+    def respond(
+        self,
+        user_input: str,
+        *,
+        max_iterations: int | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         import os
         import time
 
@@ -213,9 +219,19 @@ class MuninAgent:
         recent_calls: list[str] = []
         nudged_once = False
 
+        def emit(event: dict[str, Any]) -> None:
+            """Best-effort public execution telemetry for an async operator UI."""
+            if progress is None:
+                return
+            try:
+                progress(event)
+            except Exception:  # telemetry must never derail the agent
+                logger.debug("progress observer failed", exc_info=True)
+
         for step in range(max_iterations):
             catalog = self._current_catalog()
             specs = _tool_specs(catalog)
+            emit({"stage": "reasoning", "iteration": step + 1, "message": "Requesting model response"})
             try:
                 completion = self.llm.chat(messages=messages, tools=specs, temperature=0.2)
             except Exception as exc:  # noqa: BLE001
@@ -239,6 +255,7 @@ class MuninAgent:
                 # Natural stop — LLM has decided to speak instead of tool-call.
                 final_content = content_now
                 stop_reason = "final_answer"
+                emit({"stage": "completed", "iteration": step + 1, "message": "Model returned a final response"})
                 break
 
             # Keep the running content in case we hit the iteration cap mid-tool-loop —
@@ -257,6 +274,7 @@ class MuninAgent:
                 step_fingerprints.append(f"{tool_name}::{json.dumps(args, sort_keys=True, default=str)}")
                 fn = catalog.get(tool_name)
                 t0 = time.monotonic()
+                emit({"stage": "tool_start", "iteration": step + 1, "tool": tool_name, "arguments": args})
                 if not fn:
                     tool_result = {"ok": False, "error": {"code": "unknown_tool", "message": tool_name}}
                 else:
@@ -268,6 +286,14 @@ class MuninAgent:
                         logger.exception("tool %s crashed", tool_name)
                         tool_result = {"ok": False, "error": {"code": "tool_crashed", "message": str(exc)}}
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
+                emit({
+                    "stage": "tool_result",
+                    "iteration": step + 1,
+                    "tool": tool_name,
+                    "ok": tool_result.get("ok", True),
+                    "elapsed_ms": elapsed_ms,
+                    "summary": tool_result.get("summary", ""),
+                })
                 self.memory.log_step(
                     agent="munin",
                     action=f"tool:{tool_name}",
