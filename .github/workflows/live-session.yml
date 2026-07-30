@@ -95,8 +95,16 @@ jobs:
           import munin.mcp.main  # registra todas las tools
           import uvicorn
           from starlette.staticfiles import StaticFiles
+          from starlette.middleware.cors import CORSMiddleware
 
           app = munin.mcp.main.MCP.streamable_http_app()
+          app.add_middleware(
+              CORSMiddleware,
+              allow_origins=['*'],
+              allow_credentials=True,
+              allow_methods=['*'],
+              allow_headers=['*'],
+          )
           static_dir = Path('app/out')
           if static_dir.exists():
               app.mount('/', StaticFiles(directory=str(static_dir), html=True), name='frontend')
