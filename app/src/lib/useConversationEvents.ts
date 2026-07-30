@@ -3,20 +3,11 @@
 /**
  * SSE subscription for a conversation's collaboration channel.
  *
- * Mirrors :file:`useRunEvents.ts` but scopes to a single conversation and
- * multiplexes four distinct payload types:
- *
- *   * `note-appended`      → invalidates `["conversation-notes", id]`
- *   * `presence-changed`   → replaces `["conversation-presence", id]`
- *   * `run-transition`     → invalidates `["conversation", id]` so a state
- *                            change (queued → running → completed) refreshes
- *                            the run bar in the composer.
- *   * `guidance-delivered` → invalidates `["run", id, "detail"]` so the
- *                            inline GuidanceBlock renders its "delivered at
- *                            step N" chip immediately.
- *
- * Terminal `close` events stop reconnect; `warning` events keep the
- * connection alive but hint that a store hiccup happened.
+ * The stream accelerates cache invalidation, but it must never suppress the
+ * polling repair path merely because an EventSource object was constructed.
+ * We only report `live` after an actual open/event/heartbeat signal and mark
+ * server warnings as `stale` so React Query can repair the read model. The
+ * stream is also closed whenever the operator leaves the Conversations view.
  */
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -34,26 +25,36 @@ export function useConversationEvents({ conversationId }: Options): {
   const qc = useQueryClient();
   const [status, setStatus] = useState<ConversationStreamStatus>("connecting");
   const staleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamEnabled =
+    typeof window !== "undefined" &&
+    window.localStorage.getItem("munin.activeView") === "conversations";
 
   useEffect(() => {
-    if (!conversationId) {
+    if (!conversationId || !streamEnabled) {
+      if (staleTimer.current) clearTimeout(staleTimer.current);
       setStatus("closed");
       return;
     }
+
     setStatus("connecting");
     const url = `/api/production/conversations/${encodeURIComponent(conversationId)}/events`;
     const es = new EventSource(url, { withCredentials: true });
 
-    const bump = () => {
-      setStatus("live");
+    const armStaleTimer = () => {
       if (staleTimer.current) clearTimeout(staleTimer.current);
       staleTimer.current = setTimeout(() => setStatus("stale"), 45_000);
     };
-    // Arm the stale timer at connect time so a silent server still trips us.
-    bump();
+
+    const markLive = () => {
+      setStatus("live");
+      armStaleTimer();
+    };
+
+    // A connection that never opens must leave `connecting` and become stale.
+    armStaleTimer();
 
     es.addEventListener("note-appended", (msg) => {
-      bump();
+      markLive();
       try {
         const note = JSON.parse((msg as MessageEvent).data) as ConversationNote;
         qc.setQueryData<ConversationNote[] | undefined>(
@@ -69,7 +70,7 @@ export function useConversationEvents({ conversationId }: Options): {
     });
 
     es.addEventListener("presence-changed", (msg) => {
-      bump();
+      markLive();
       try {
         const raw = JSON.parse((msg as MessageEvent).data) as
           | { presence: PresenceEntry[] }
@@ -77,12 +78,12 @@ export function useConversationEvents({ conversationId }: Options): {
         const presence = Array.isArray(raw) ? raw : raw.presence;
         qc.setQueryData(["conversation-presence", conversationId], presence);
       } catch {
-        /* ignore */
+        /* ignore malformed */
       }
     });
 
     es.addEventListener("run-transition", (msg) => {
-      bump();
+      markLive();
       try {
         const payload = JSON.parse((msg as MessageEvent).data) as {
           run_id?: string;
@@ -92,13 +93,14 @@ export function useConversationEvents({ conversationId }: Options): {
           qc.invalidateQueries({ queryKey: ["run", payload.run_id, "detail"] });
         }
       } catch {
-        /* ignore */
+        /* ignore malformed */
       }
       qc.invalidateQueries({ queryKey: ["conversation", conversationId] });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     });
 
     es.addEventListener("guidance-delivered", (msg) => {
-      bump();
+      markLive();
       try {
         const payload = JSON.parse((msg as MessageEvent).data) as {
           run_id?: string;
@@ -110,18 +112,22 @@ export function useConversationEvents({ conversationId }: Options): {
           qc.invalidateQueries({ queryKey: ["run", payload.run_id, "guidance"] });
         }
       } catch {
-        /* ignore */
+        /* ignore malformed */
       }
     });
 
-    es.addEventListener("heartbeat", () => bump());
-    es.addEventListener("warning", () => bump());
+    es.addEventListener("heartbeat", () => markLive());
+    es.addEventListener("warning", () => {
+      if (staleTimer.current) clearTimeout(staleTimer.current);
+      setStatus("stale");
+      qc.invalidateQueries({ queryKey: ["conversation", conversationId] });
+    });
     es.addEventListener("close", () => {
       setStatus("closed");
       es.close();
     });
 
-    es.onopen = () => bump();
+    es.onopen = () => markLive();
     es.onerror = () => {
       if (staleTimer.current) clearTimeout(staleTimer.current);
       setStatus("stale");
@@ -132,7 +138,7 @@ export function useConversationEvents({ conversationId }: Options): {
       if (staleTimer.current) clearTimeout(staleTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId]);
+  }, [conversationId, streamEnabled]);
 
   return { status };
 }
