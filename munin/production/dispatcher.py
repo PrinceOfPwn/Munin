@@ -1,30 +1,21 @@
-"""Leased bridge from durable runs to Munin's current ReAct executor.
+"""Leased bridge from durable runs to Munin's ReAct executor.
 
-v3.1.1 hardening (source edit — no monkey-patch)
------------------------------------------------
-The dispatcher no longer relies on an import-time monkey-patch of
-``MuninAgent.respond``.  ``MuninAgent.respond`` now natively accepts a
-``pre_iteration_hook`` keyword and dispatches multi-tool batches through
-:mod:`munin.production.parallel` on its own.  The dispatcher's job is just to:
-
-* Drain ``run_guidance_queue`` at the top of every ReAct iteration and hand
-  the assembled ``<operator_guidance>`` block back to Munin via the
-  ``pre_iteration_hook`` callback — the callback also records a
-  ``reasoning_events`` row of kind ``operational_summary`` so the UI timeline
-  shows "operator {name} sent guidance: ..." attributed to the delivered
-  step number.
-* Consume the ``parallel_group_id`` and ``tool_use_id`` fields that
-  ``MuninAgent.respond`` now emits directly on ``tool_start`` /
-  ``tool_result`` progress events, and stamp them onto the ``tool_calls``
-  row so the UI can render the batch as a single group.
+In addition to durable tool/run telemetry, the dispatcher now exposes live model
+activity. Assistant text is written into the existing placeholder while it is
+generated. Provider-supplied reasoning is retained only for a short viewing
+window and is then scrubbed automatically; hidden chain-of-thought is never
+synthesised.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
+import time
 from typing import Any
 
+from ..core.llm_stream import llm_stream_scope
 from .store import ProductionStore
 from .store_v3_1 import install_v3_1_extensions
 
@@ -37,7 +28,7 @@ class ProductionDispatcher:
         self.settings = settings
         self.worker_id = worker_id
 
-    def run_once(self) -> str | None:  # noqa: C901 - matches the original layout
+    def run_once(self) -> str | None:  # noqa: C901 - orchestration boundary
         claim = self.store.claim_next_run(worker_id=self.worker_id, lease_seconds=60)
         if not claim:
             return None
@@ -50,6 +41,11 @@ class ProductionDispatcher:
         stop = threading.Event()
         tool_call_ids: dict[tuple[int, str], str] = {}
         tool_call_ids_by_use: dict[str, str] = {}
+        assistant_stream: list[str] = []
+        provider_stream: list[str] = []
+        provider_reasoning_id: str | None = None
+        last_refresh = 0.0
+        stream_lock = threading.RLock()
 
         def heartbeat() -> None:
             while not stop.wait(15):
@@ -63,10 +59,84 @@ class ProductionDispatcher:
         )
         heartbeat_thread.start()
 
-        def progress(event: dict[str, Any]) -> None:
+        def refresh_clients(*, force: bool = False) -> None:
+            """Invalidate live conversation/run caches without creating a new state."""
+
+            nonlocal last_refresh
+            now = time.monotonic()
+            if not force and now - last_refresh < 0.25:
+                return
+            last_refresh = now
+            self.store.append_conversation_broadcast(
+                conversation_id=context["conversation_id"],
+                kind="run-transition",
+                payload={"run_id": claim["id"], "state": "running", "streaming": True},
+            )
+
+        def update_assistant_placeholder(content: str) -> None:
+            """Make the final answer visible while the provider is still generating it."""
+
+            now_ms = int(time.time() * 1000)
+            safe_content = content[-1_000_000:]
+            with self.store._transaction() as conn:  # noqa: SLF001 - same aggregate transaction
+                conn.execute(
+                    "UPDATE messages SET content=?,content_hash=?,updated_at_ms=?,version=version+1 "
+                    "WHERE id=? AND kind='assistant_placeholder' AND status='running'",
+                    (
+                        safe_content,
+                        hashlib.sha256(safe_content.encode()).hexdigest(),
+                        now_ms,
+                        claim["assistant_message_id"],
+                    ),
+                )
+
+        def update_provider_reasoning(content: str, step: int) -> None:
+            """Upsert one temporarily visible provider-reasoning row for this run."""
+
+            nonlocal provider_reasoning_id
+            if provider_reasoning_id is None:
+                row = self.store.append_reasoning_event(
+                    run_id=claim["id"],
+                    kind="provider_reasoning",
+                    content=content,
+                    provider="stream",
+                    persistence_enabled=True,
+                    agent_name="munin",
+                    step=step,
+                )
+                provider_reasoning_id = str(row["id"])
+                return
+            with self.store._transaction() as conn:  # noqa: SLF001
+                conn.execute(
+                    "UPDATE reasoning_events SET content=?,persisted=1 WHERE id=? AND run_id=?",
+                    (content[-250_000:], provider_reasoning_id, claim["id"]),
+                )
+
+        def progress(event: dict[str, Any]) -> None:  # noqa: C901 - event adapter
             stage = str(event.get("stage", ""))
             tool_name = str(event.get("tool", ""))
             step = int(event.get("iteration") or 0)
+
+            if stage == "assistant_delta":
+                delta = str(event.get("delta") or event.get("message") or "")
+                if not delta:
+                    return
+                with stream_lock:
+                    assistant_stream.append(delta)
+                    update_assistant_placeholder("".join(assistant_stream))
+                    refresh_clients()
+                return
+
+            if stage == "provider_reasoning_delta" and bool(event.get("provider_exposed")):
+                delta = str(event.get("delta") or event.get("message") or "")
+                if not delta:
+                    return
+                with stream_lock:
+                    provider_stream.append(delta)
+                    update_provider_reasoning("".join(provider_stream), step)
+                    refresh_clients()
+                return
+
             if stage == "tool_start" and tool_name:
                 tool = self.store.append_tool_call_with_parallel_group(
                     run_id=claim["id"],
@@ -101,11 +171,18 @@ class ProductionDispatcher:
                     },
                     tool_call_id=tool_call_id,
                 )
-                # No reasoning event: the tool_calls row already carries the
-                # result payload and the UI dedupes on ``tool_use_id``.  A
-                # parallel reasoning entry here would duplicate the timeline.
+                refresh_clients(force=True)
                 return
+
+            # MuninAgent emits the provider's full reasoning field once after the
+            # stream. The delta path already owns the live row, so update it rather
+            # than creating a duplicate.
             if stage == "provider_reasoning" and bool(event.get("provider_exposed")):
+                text = str(event.get("message") or "")
+                if provider_reasoning_id and text:
+                    update_provider_reasoning(text, step)
+                    refresh_clients(force=True)
+                    return
                 kind = "provider_reasoning"
             elif stage in {"reasoning", "llm_retry"}:
                 kind = "model_request"
@@ -115,6 +192,7 @@ class ProductionDispatcher:
                 kind = "observation"
             else:
                 kind = "operational_summary"
+
             self.store.append_reasoning_event(
                 run_id=claim["id"],
                 kind=kind,
@@ -127,12 +205,8 @@ class ProductionDispatcher:
                 agent_name="munin",
                 step=step,
             )
+            refresh_clients(force=stage in {"model_stream_started", "model_stream_completed"})
 
-        # ── v3.1.1 pre-iteration hook (native kwarg, no monkey-patch) ──────
-        # Drain the operator guidance queue at the top of every ReAct step and
-        # return the buffered bodies as a wrapped ``<operator_guidance>``
-        # block so MuninAgent.respond can append it as a system message before
-        # the next model call.
         def pre_iteration_hook(step: int) -> str | None:
             pending = self.store.consume_pending_guidance(
                 run_id=claim["id"], target_agent_id=None, delivered_at_step=step
@@ -165,8 +239,6 @@ class ProductionDispatcher:
                     step=step,
                 )
                 extra_seconds += int(g.get("budget_extension_seconds") or 0)
-                # Broadcast delivery so the conversation SSE stream flips the
-                # inline GuidanceBlock chip from ``queued`` → ``delivered @ N``.
                 self.store.append_conversation_broadcast(
                     conversation_id=context["conversation_id"],
                     kind="guidance-delivered",
@@ -177,8 +249,6 @@ class ProductionDispatcher:
                         "actor_username": g.get("actor_username"),
                     },
                 )
-            # Apply queued budget extensions to the current lease so a
-            # long-running run inherits the operator-granted extra time.
             if extra_seconds > 0:
                 self.store.renew_lease(
                     run_id=claim["id"],
@@ -192,6 +262,25 @@ class ProductionDispatcher:
             )
             return preface + blocks
 
+        def scrub_provider_reasoning_later() -> None:
+            """Remove provider reasoning after the operator had time to inspect it."""
+
+            if not provider_reasoning_id:
+                return
+            retention = max(10, int(os.environ.get("MUNIN_LIVE_REASONING_SECONDS", "120")))
+            if stop.wait(retention):
+                # The run stopping starts the retention window; do not abort cleanup.
+                time.sleep(retention)
+            try:
+                with self.store._transaction() as conn:  # noqa: SLF001
+                    conn.execute(
+                        "UPDATE reasoning_events SET content='[EPHEMERAL_EXPIRED]',persisted=0 "
+                        "WHERE id=? AND run_id=?",
+                        (provider_reasoning_id, claim["id"]),
+                    )
+            except Exception:
+                return
+
         try:
             from ..core.munin_agent import MuninAgent
 
@@ -200,22 +289,19 @@ class ProductionDispatcher:
                 and self.settings.llm_api_key
                 and self.settings.llm_model
             ):
-                raise RuntimeError(
-                    "no configured LLM profile or environment fallback is available"
+                raise RuntimeError("no configured LLM profile or environment fallback is available")
+            with llm_stream_scope(progress):
+                result = MuninAgent(self.settings).respond(
+                    context["message"],
+                    conversation_id=context["conversation_id"],
+                    conversation_history=context["history"],
+                    progress=progress,
+                    pre_iteration_hook=pre_iteration_hook,
                 )
-            result = MuninAgent(self.settings).respond(
-                context["message"],
-                conversation_id=context["conversation_id"],
-                conversation_history=context["history"],
-                progress=progress,
-                pre_iteration_hook=pre_iteration_hook,
-            )
             self.store.complete_run(
                 run_id=claim["id"],
                 lease_token=claim["lease_token"],
-                content=str(
-                    result.get("content") or result.get("summary") or "(no response)"
-                ),
+                content=str(result.get("content") or result.get("summary") or "(no response)"),
                 outcome="completed",
             )
             self.store.append_conversation_broadcast(
@@ -238,6 +324,12 @@ class ProductionDispatcher:
         finally:
             stop.set()
             heartbeat_thread.join(timeout=2)
+            if provider_reasoning_id:
+                threading.Thread(
+                    target=scrub_provider_reasoning_later,
+                    name=f"munin-reasoning-scrub-{claim['id']}",
+                    daemon=True,
+                ).start()
         return claim["id"]
 
     def run_forever(
@@ -247,6 +339,7 @@ class ProductionDispatcher:
         stop: threading.Event | None = None,
     ) -> None:
         """Durable queue worker: claims from Turso, not from an HTTP request."""
+
         stopper = stop or threading.Event()
         while not stopper.is_set():
             self.store.recover_expired_runs()
