@@ -575,7 +575,7 @@ class SharedStateStore:
             # closing-window state — the runner is about to end and has told
             # us it's safe to spawn a fresh one to catch pending wakes.
             # IDLE / anything else = free slot.
-            if row and row["status"] in ("RUNNING", "SPAWNING"):
+            if row and row["status"] in ("RUNNING", "SPAWNING", "IDLE"):
                 # Verify the recorded pid is still alive; a stale RUNNING with a
                 # dead pid means the previous runner crashed and we're free to spawn.
                 try:
@@ -1014,7 +1014,10 @@ class SharedStateStore:
 
     def procedural_deactivate(self, name: str) -> bool:
         with self._connect() as conn:
-            cursor = conn.execute("UPDATE procedural SET active = 0 WHERE name = ?", (name.strip(),))
+            cursor = conn.execute(
+                "UPDATE procedural SET active = 0 WHERE name = ? AND active = 1",
+                (name.strip(),),
+            )
             return cursor.rowcount > 0
 
     def procedural_purge_inactive(self) -> int:

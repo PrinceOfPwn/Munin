@@ -82,3 +82,20 @@ def rehydrate_graph_manifests(
             errors.append({"path": str(path), "error": str(exc)})
             logger.warning("invalid graph manifest %s: %s", path, exc)
     return {"loaded": loaded, "errors": errors}
+
+
+def purge_resettable_graph_manifests(settings: Settings) -> dict[str, Any]:
+    """Delete manifests whose graph contract says they should disappear on reset."""
+    removed = 0
+    errors: list[dict[str, str]] = []
+    for path in sorted(settings.generated_graphs_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if str(payload.get("reset_policy", "on_reset")) != "on_reset":
+                continue
+            path.unlink()
+            removed += 1
+        except (OSError, ValueError, TypeError) as exc:
+            errors.append({"path": str(path), "error": str(exc)})
+            logger.warning("could not purge resettable graph manifest %s: %s", path, exc)
+    return {"removed": removed, "errors": errors}

@@ -391,6 +391,12 @@ jobs:
           echo "── /tmp/tunnel.log ──"
           cat /tmp/tunnel.log 2>/dev/null || echo "(no tunnel log)"
 
+      # Runners are detached process-group leaders. Stop and await them before
+      # MCP flushes git/Turso and before SQLite artifacts are snapshotted.
+      - name: Stop detached subagents
+        if: always()
+        run: poetry run python -m munin.subagents.process_control --timeout 15
+
       # Gracefully stop MCP so SQLite flushes WAL and pending git-persist
       # commits ship. If the process is stuck we SIGKILL after 15s.
       - name: Stop Munin cleanly
