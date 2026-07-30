@@ -35,7 +35,7 @@ def test_stop_reason_final_answer(isolated_workspace, scripted_llm_factory):
     agent.settings = get_settings()
     agent.state = SharedStateStore(agent.settings)
     from munin.core.memory import Memory
-    from munin.mcp.soul import SoulManager
+    from munin.core.soul import SoulManager
     agent.memory = Memory(agent.state)
     agent.soul = SoulManager(agent.settings.munin_soul_path, agent.settings.munin_data_path)
     from munin.core.orchestrator import Orchestrator
@@ -63,7 +63,7 @@ def test_stop_reason_max_iterations(isolated_workspace, scripted_llm_factory):
     agent.settings = get_settings()
     agent.state = SharedStateStore(agent.settings)
     from munin.core.memory import Memory
-    from munin.mcp.soul import SoulManager
+    from munin.core.soul import SoulManager
     agent.memory = Memory(agent.state)
     agent.soul = SoulManager(agent.settings.munin_soul_path, agent.settings.munin_data_path)
     from munin.core.orchestrator import Orchestrator
@@ -92,7 +92,7 @@ def test_stop_reason_repetition_detected(isolated_workspace, scripted_llm_factor
     agent.settings = get_settings()
     agent.state = SharedStateStore(agent.settings)
     from munin.core.memory import Memory
-    from munin.mcp.soul import SoulManager
+    from munin.core.soul import SoulManager
     agent.memory = Memory(agent.state)
     agent.soul = SoulManager(agent.settings.munin_soul_path, agent.settings.munin_data_path)
     from munin.core.orchestrator import Orchestrator
@@ -135,7 +135,7 @@ def test_tool_calls_log_ordering(isolated_workspace, scripted_llm_factory):
     agent.settings = get_settings()
     agent.state = SharedStateStore(agent.settings)
     from munin.core.memory import Memory
-    from munin.mcp.soul import SoulManager
+    from munin.core.soul import SoulManager
     agent.memory = Memory(agent.state)
     agent.soul = SoulManager(agent.settings.munin_soul_path, agent.settings.munin_data_path)
     from munin.core.orchestrator import Orchestrator
@@ -166,7 +166,7 @@ def test_progress_event_sequence(isolated_workspace, scripted_llm_factory):
     agent.settings = get_settings()
     agent.state = SharedStateStore(agent.settings)
     from munin.core.memory import Memory
-    from munin.mcp.soul import SoulManager
+    from munin.core.soul import SoulManager
     agent.memory = Memory(agent.state)
     agent.soul = SoulManager(agent.settings.munin_soul_path, agent.settings.munin_data_path)
     from munin.core.orchestrator import Orchestrator
@@ -206,7 +206,7 @@ def test_operator_guidance_format(isolated_workspace, scripted_llm_factory):
     agent.settings = get_settings()
     agent.state = SharedStateStore(agent.settings)
     from munin.core.memory import Memory
-    from munin.mcp.soul import SoulManager
+    from munin.core.soul import SoulManager
     agent.memory = Memory(agent.state)
     agent.soul = SoulManager(agent.settings.munin_soul_path, agent.settings.munin_data_path)
     from munin.core.orchestrator import Orchestrator

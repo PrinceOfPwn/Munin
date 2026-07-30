@@ -1,9 +1,16 @@
 """Characterization tests for the generated-tool registry.
 
 Asserts CURRENT behaviour at munin/mcp/registry.py and munin/mcp/tools/forge_tool.py:81-99.
-"""
 
-from __future__ import annotations
+Note: this file deliberately does NOT use `from __future__ import annotations`
+because `signature_to_json_schema` relies on real type objects being present
+on `inspect.Signature.parameters[name].annotation`. The PEP 563 string-deferred
+mode would turn `int` annotations into the literal string "int", which then
+fails the `annotation in (int,)` membership check in production code at
+`munin/mcp/registry.py:508-525` (fallthrough to default `json_type = "string"`).
+Characterization posture here is to assert the documented production behaviour
+against un-deferred annotations.
+"""
 
 import inspect
 import json

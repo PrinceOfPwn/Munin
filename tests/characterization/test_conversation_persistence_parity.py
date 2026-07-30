@@ -76,16 +76,20 @@ def test_v3_1_extension_install(tmp_path):
 
 
 def test_uuid_helper_generates_v4_shape():
-    """_id() produces IDs that are RFC 4122 v4-shaped."""
+    """_id() returns f"{prefix}_{uuid.uuid4().hex}" — 32 hex chars, no hyphens,
+    with the v4 version marker at hex position 12 (corresponding to the first
+    nibble of the third UUID group). Verified against ``munin/production/store.py:45-46``.
+    """
     from munin.production.store import _id
 
     sample = _id("usr")
     prefix, uuid_part = sample.split("_", 1)
     assert prefix == "usr"
-    # UUID v4: third group starts with 4
-    parts = uuid_part.split("-")
-    assert len(parts) == 5
-    assert parts[2][0] == "4"
+    # uuid.uuid4().hex is 32 hex chars (no hyphens); production shape verified
+    # at munin/production/store.py:45-46. RFC 4122 v4 marker lives at hex index 12.
+    assert len(uuid_part) == 32, f"expected 32 hex chars, got {len(uuid_part)}: {uuid_part!r}"
+    assert all(c in "0123456789abcdef" for c in uuid_part)
+    assert uuid_part[12] == "4", f"v4 version nibble not 4: {uuid_part[12]!r}"
 
 
 def test_timeline_reasoning_tool_calls_persist_close_reopen(tmp_path):
@@ -117,10 +121,12 @@ def test_timeline_reasoning_tool_calls_persist_close_reopen(tmp_path):
         store1._append_event(conn, run_id=run_id, kind="test.event1", payload={"x": 1})
         store1._append_event(conn, run_id=run_id, kind="test.event2", payload={"x": 2})
 
-    # Append reasoning
+    # Append reasoning — `kind` must be one of the validated enum set:
+    # {provider_reasoning, operational_summary, tool_intent, observation,
+    #  decision, model_request} per munin/production/store.py:1004.
     store1.append_reasoning_event(
         run_id=run_id,
-        kind="test_reasoning",
+        kind="observation",
         content="reasoning content",
         provider="test",
         persistence_enabled=True,
@@ -161,9 +167,12 @@ def test_timeline_reasoning_tool_calls_persist_close_reopen(tmp_path):
     assert len(detail2["events"]) >= 2
     assert len(detail2["reasoning"]) >= 1
     assert len(detail2["tools"]) >= 2
-    # Verify content matches
-    assert detail2["events"][0]["kind"] == "test.event1"
-    assert detail2["events"][1]["kind"] == "test.event2"
+    # Verify content matches. The events list also contains `run.queued`
+    # emitted by `create_turn` at munin/production/store.py:652, so assert only
+    # our appended test events (filter by kind prefix) rather than absolute
+    # index in events[].
+    test_kinds = [e["kind"] for e in detail2["events"] if str(e["kind"]).startswith("test.")]
+    assert test_kinds == ["test.event1", "test.event2"]
     assert detail2["reasoning"][0]["content"] == "reasoning content"
     tool_names = [t["tool_name"] for t in detail2["tools"]]
     assert "test_tool" in tool_names
