@@ -36,6 +36,26 @@ _REQUIRED_NFT_TABLES: list[str] = [
 ]
 
 
+# Install hints for offensive binaries commonly missing on generic runners / dev boxes.
+# Consumed by ExecutionEngine.dependency_result to give the LLM (and the human) an
+# actionable next step instead of a bare "missing_dependency" error.
+_INSTALL_HINTS: dict[str, str] = {
+    "nmap":         "apt install nmap  |  brew install nmap",
+    "nuclei":       "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest  |  brew install nuclei",
+    "feroxbuster":  "cargo install feroxbuster  |  apt install feroxbuster  |  brew install feroxbuster",
+    "ffuf":         "go install github.com/ffuf/ffuf/v2@latest  |  apt install ffuf  |  brew install ffuf",
+    "sqlmap":       "apt install sqlmap  |  brew install sqlmap  |  pip install sqlmap",
+    "httpx":        "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest",
+    "pd-httpx":     "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest  (aliased as pd-httpx to avoid conflict with python-httpx)",
+    "katana":       "go install github.com/projectdiscovery/katana/cmd/katana@latest",
+    "hydra":        "apt install hydra  |  brew install hydra",
+    "smbmap":       "pip install smbmap  |  apt install smbmap",
+    "netexec":      "pip install netexec  |  https://www.netexec.wiki/getting-started/installation",
+    "EyeWitness":   "apt install eyewitness  |  git clone https://github.com/RedSiege/EyeWitness && ./Python/setup/setup.sh",
+    "searchsploit": "apt install exploitdb",
+}
+
+
 class OpsecError(RuntimeError):
     pass
 
@@ -292,12 +312,29 @@ class ExecutionEngine:
         }
 
     def dependency_result(self, tool: str, dependency: str) -> dict[str, Any]:
+        """Return a structured error when a required system binary is not in PATH.
+
+        Includes an install hint so the LLM (and the human operator) know what to
+        do next. Previously this returned a bare "missing_dependency" which the
+        LLM often retried into a loop.
+        """
         return {
             "ok": False,
             "tool": tool,
             "mode": "sync",
-            "summary": f"missing dependency: {dependency}",
-            "error": {"code": "missing_dependency", "message": f"{dependency} is required"},
+            "summary": f"{tool} unavailable — required binary '{dependency}' not on PATH",
+            "error": {
+                "code": "missing_dependency",
+                "message": f"{dependency} is required for {tool} but was not found on PATH",
+                "dependency": dependency,
+                "path": os.environ.get("PATH", ""),
+                "install_hint": _INSTALL_HINTS.get(dependency, f"install {dependency} from your OS package manager or its upstream release page"),
+            },
+            "data": {
+                "dependency": dependency,
+                "found": False,
+                "path_searched": os.environ.get("PATH", ""),
+            },
         }
 
     def _run_text(self, args: list[str], timeout: int) -> str:

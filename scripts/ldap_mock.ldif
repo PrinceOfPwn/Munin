@@ -1,7 +1,18 @@
 # Munin Mock LDAP — dominio dc=meli,dc=com
-# Contiene: usuarios normales, service accounts Kerberoastables,
-# usuarios AS-REP Roastables, grupos privilegiados y OUs.
-# Cargar con: ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=meli,dc=com" -w itachi -f ldap_mock.ldif
+#
+# Contiene usuarios, service accounts, grupos privilegiados y OUs.
+# Las señales de vulnerabilidad (SPNs, DONT_REQ_PREAUTH) están codificadas
+# en atributos ESTRUCTURADOS (title, employeeType, businessCategory), no en
+# descripciones en texto libre. El LLM debe inferir las condiciones ofensivas
+# ejecutando las tools LDAP y examinando los atributos — no leyendo prosa.
+#
+# Convención del mock (compatible con OpenLDAP inetOrgPerson):
+#   title            → placeholder para servicePrincipalName (SPN)
+#   employeeType     → placeholder para userAccountControl flags
+#   businessCategory → placeholder para admin flags (opcional)
+#
+# Cargar con:
+#   ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=meli,dc=com" -w itachi -f ldap_mock.ldif
 
 # ── Organizational Units ──────────────────────────────────────────────────────
 
@@ -40,7 +51,8 @@ uidNumber: 1001
 gidNumber: 1001
 homeDirectory: /home/jdoe
 loginShell: /bin/bash
-description: Senior Engineer — IT
+title: Senior Engineer
+ou: IT
 
 dn: uid=asmith,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -55,7 +67,8 @@ uidNumber: 1002
 gidNumber: 1001
 homeDirectory: /home/asmith
 loginShell: /bin/bash
-description: DevOps Engineer
+title: DevOps Engineer
+ou: DevOps
 
 dn: uid=rgarcia,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -70,8 +83,13 @@ uidNumber: 1003
 gidNumber: 1001
 homeDirectory: /home/rgarcia
 loginShell: /bin/bash
-description: Junior Developer
+title: Software Engineer
+ou: Development
 
+# htarget: DONT_REQ_PREAUTH encoded in employeeType.
+# Real AD would set the userAccountControl bit 0x400000. In the OpenLDAP mock
+# we use employeeType (a normal inetOrgPerson attribute) as the placeholder.
+# NO leaky description — the LLM must query and interpret employeeType.
 dn: uid=htarget,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
 objectClass: posixAccount
@@ -85,7 +103,9 @@ uidNumber: 1004
 gidNumber: 1001
 homeDirectory: /home/htarget
 loginShell: /bin/bash
-description: AS-REP Roastable — DONT_REQ_PREAUTH simulado via description
+title: Field Engineer
+ou: Operations
+employeeType: DONT_REQ_PREAUTH
 
 dn: uid=mlopez,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -100,7 +120,8 @@ uidNumber: 1005
 gidNumber: 1001
 homeDirectory: /home/mlopez
 loginShell: /bin/bash
-description: HR Manager
+title: HR Manager
+ou: HR
 
 # ── Privileged user (Domain Admin) ────────────────────────────────────────────
 
@@ -117,12 +138,14 @@ uidNumber: 500
 gidNumber: 512
 homeDirectory: /home/administrator
 loginShell: /bin/bash
-description: Built-in domain administrator account
+title: System Administrator
+ou: IT
 
-# ── Service Accounts (Kerberoastable via description tag) ────────────────────
-# Note: OpenLDAP no tiene userAccountControl ni servicePrincipalName nativos.
-# Usamos description para marcarlos como kerberoastables en el mock.
-# Las tools de Munin buscan por objectClass y estos atributos en AD real.
+# ── Service Accounts ─────────────────────────────────────────────────────────
+# SPNs encoded in the `title` attribute (real AD stores them in
+# servicePrincipalName). Pattern `<SERVICE>/<HOST>:<PORT>` — the tools search
+# for this pattern to identify kerberoastable accounts, mimicking the real
+# `servicePrincipalName=*` filter.
 
 dn: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -135,7 +158,7 @@ uidNumber: 2001
 gidNumber: 2000
 homeDirectory: /var/lib/backup
 loginShell: /bin/false
-description: KERBEROASTABLE — SPN: MSSQLSvc/DBSERVER01.meli.com:1433
+title: MSSQLSvc/DBSERVER01.meli.com:1433
 
 dn: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -148,7 +171,7 @@ uidNumber: 2002
 gidNumber: 2000
 homeDirectory: /var/lib/mssql
 loginShell: /bin/false
-description: KERBEROASTABLE — SPN: MSSQLSvc/SQL01.meli.com:1433
+title: MSSQLSvc/SQL01.meli.com:1433
 
 dn: uid=svc_http,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -161,7 +184,7 @@ uidNumber: 2003
 gidNumber: 2000
 homeDirectory: /var/www
 loginShell: /bin/false
-description: KERBEROASTABLE — SPN: HTTP/intranet.meli.com
+title: HTTP/intranet.meli.com
 
 dn: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
@@ -174,7 +197,7 @@ uidNumber: 2004
 gidNumber: 2000
 homeDirectory: /var/lib/jenkins
 loginShell: /bin/false
-description: KERBEROASTABLE — SPN: HTTP/jenkins.meli.com:8080
+title: HTTP/jenkins.meli.com:8080
 
 # ── Groups ────────────────────────────────────────────────────────────────────
 
@@ -219,17 +242,17 @@ member: uid=mlopez,ou=users,dc=meli,dc=com
 dn: cn=DC01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: DC01
-description: Primary Domain Controller — Windows Server 2022
+description: Primary Domain Controller
 
 dn: cn=SQL01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: SQL01
-description: SQL Server — Windows Server 2019
+description: Database Server
 
 dn: cn=JENKINS01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: JENKINS01
-description: CI/CD Server — Ubuntu 22.04
+description: CI/CD Build Server
 
 dn: cn=WS01,ou=computers,dc=meli,dc=com
 objectClass: device

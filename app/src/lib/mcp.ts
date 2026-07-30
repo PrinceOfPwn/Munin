@@ -179,7 +179,6 @@ function sleep(ms: number): Promise<void> {
 export class McpClient {
   private baseUrl: string;
   private token: string;
-  private sessionId: string | null = null;
   private cb = new CircuitBreaker(DEFAULTS.cbFailureThreshold, DEFAULTS.cbResetTimeout);
 
   /**
@@ -201,8 +200,7 @@ export class McpClient {
     this.token = config.token || "";
     if (prev !== this.baseUrl) {
       L.info("McpClient reconfigured", { baseUrl: this.baseUrl, hasToken: !!this.token });
-      // Reset circuit and session on URL change — new server, fresh slate.
-      this.sessionId = null;
+      // Reset circuit on URL change — new server, fresh slate.
       this.cb = new CircuitBreaker(DEFAULTS.cbFailureThreshold, DEFAULTS.cbResetTimeout);
       this.inflight.clear();
     }
@@ -212,8 +210,7 @@ export class McpClient {
   get circuitState(): CbState { return this.cb.status; }
 
   private endpoint(): string {
-    const base = (this.baseUrl || "").replace(/\/+$/, "");
-    return `${base}/mcp`;
+    return `${this.baseUrl}/mcp/`;
   }
 
   // ───── Layer 1: raw fetch with timeout ────────────────────────────────────
@@ -237,10 +234,7 @@ export class McpClient {
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-          "ngrok-skip-browser-warning": "1",
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-          ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
         },
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       });
@@ -257,16 +251,9 @@ export class McpClient {
       clearTimeout(timer);
     }
 
-    const sid = res.headers.get("mcp-session-id");
-    if (sid) {
-      this.sessionId = sid;
-    }
-
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       const status = res.status;
-      // Reset session on any HTTP error so future requests re-handshake cleanly
-      this.sessionId = null;
       const kind: ErrorKind =
         status === 401 || status === 403 ? "auth"
         : status === 404               ? "not-found"
@@ -282,17 +269,7 @@ export class McpClient {
 
     let data: any;
     try {
-      const rawText = await res.text();
-      try {
-        data = JSON.parse(rawText);
-      } catch {
-        const dataLine = rawText.split("\n").find((l) => l.startsWith("data: "));
-        if (dataLine) {
-          data = JSON.parse(dataLine.slice(6));
-        } else {
-          throw new Error("No JSON or SSE data line in response");
-        }
-      }
+      data = await res.json();
     } catch (e: any) {
       throw classified(
         `JSON parse failed: ${e?.message}`,
@@ -312,26 +289,6 @@ export class McpClient {
     return data.result as T;
   }
 
-  private initPromise: Promise<any> | null = null;
-
-  async ensureInitialized(): Promise<void> {
-    if (this.sessionId) return;
-    if (!this.initPromise) {
-      this.initPromise = (async () => {
-        try {
-          await this.sendWithRetry("initialize", {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "munin-ui", version: "1.0.0" },
-          }, { retries: 2, timeoutMs: 10000 });
-        } finally {
-          this.initPromise = null;
-        }
-      })();
-    }
-    await this.initPromise;
-  }
-
   // ───── Layer 2: retry with backoff (idempotent calls only) ────────────────
 
   private async sendWithRetry<T>(
@@ -339,9 +296,6 @@ export class McpClient {
     params: any,
     opts: { retries: number; timeoutMs: number }
   ): Promise<T> {
-    if (method !== "initialize") {
-      await this.ensureInitialized();
-    }
     const { retries, timeoutMs } = opts;
     let lastErr: ClassifiedError | undefined;
 
@@ -441,7 +395,6 @@ export class McpClient {
 
     let result: McpToolResult;
     try {
-      await this.ensureInitialized();
       result = await this.fetchOnce<McpToolResult>("tools/call", {
         name,
         arguments: args || {},
