@@ -1,49 +1,18 @@
 from __future__ import annotations
 
 import json
-import os
-import socket
 import sqlite3
-import time
-import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .config import Settings
 from .utils import ensure_parent
 
-PRESENCE_LEASE_SECONDS = 30
-_INSTANCE_ID = (
-    os.environ.get("MUNIN_INSTANCE_ID", "").strip()
-    or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
-)
-
-
-def get_instance_id() -> str:
-    """Return the stable identity shared by an MCP process and its runners."""
-    return _INSTANCE_ID
-
-
-def presence_metadata(
-    pid: int,
-    *,
-    lease_seconds: int = PRESENCE_LEASE_SECONDS,
-    extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build cross-host-safe presence metadata with a renewable lease."""
-    metadata: dict[str, Any] = {
-        "pid": int(pid),
-        "instance_id": get_instance_id(),
-        "lease_expires_at_epoch": time.time() + max(0, lease_seconds),
-    }
-    if extra:
-        metadata.update(extra)
-    return metadata
-
 
 def _utc_now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _utc_now_db() -> str:
@@ -73,43 +42,6 @@ def _normalize_tags(raw: str) -> list[str]:
     return tags
 
 
-def _coerce_int(value: Any, default: int) -> int:
-    """Best-effort int coercion.
-
-    Some MCP clients (and their JSON schemas) send integer-typed parameters as
-    strings. Passing a string to ``min()`` / ``max()`` together with an int raises
-    ``TypeError: '<' not supported between instances of 'int' and 'str'``. This
-    helper accepts int/float/str and always returns an int (or the provided default
-    on failure). Used at every place a caller-supplied ``limit`` reaches a numeric
-    comparison — see query_intel, list_tasks, fetch_messages, episodic_query,
-    semantic_list.
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        # bools are ints in Python — keep them out of range clamping.
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        try:
-            return int(value)
-        except (OverflowError, ValueError):
-            return default
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return default
-        try:
-            return int(s)
-        except ValueError:
-            try:
-                return int(float(s))
-            except ValueError:
-                return default
-    return default
-
-
 @dataclass(frozen=True)
 class SharedTaskDecision:
     success: bool
@@ -136,30 +68,20 @@ class SharedStateStore:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.db_path = settings.shared_state_db
-        # Backend selection happens in `.persistence.open_connection`. Local
-        # file paths ensure the parent directory exists; libsql URLs skip that
-        # step (nothing on disk).
-        if not self.settings.db_url or self.settings.db_url.startswith(("file:", "libsql+file:")):
-            ensure_parent(self.db_path)
+        ensure_parent(self.db_path)
         self._init_db()
 
     # ------------------------------------------------------------------
     # Connection / schema
     # ------------------------------------------------------------------
-    def _connect(self, *, authoritative: bool = False) -> Any:
-        """Open a fresh connection to the configured backend.
-
-        Returns either a ``sqlite3.Connection`` (default) or a libsql proxy that
-        exposes the same subset of the sqlite3 API Munin uses. See
-        ``munin.mcp.persistence`` for the exhaustive contract.
-        """
-        from .persistence import open_connection  # noqa: PLC0415 — lazy to avoid import at module load
-        return open_connection(
-            self.settings.db_url,
-            default_path=self.db_path,
-            auth_token=self.settings.db_auth_token,
-            authoritative=authoritative,
-        )
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -245,7 +167,6 @@ class SharedStateStore:
                     name TEXT NOT NULL UNIQUE,
                     description TEXT NOT NULL DEFAULT '',
                     script_path TEXT NOT NULL,
-                    source_code TEXT NOT NULL DEFAULT '',
                     signature_json TEXT NOT NULL DEFAULT '{}',
                     tags TEXT NOT NULL DEFAULT '[]',
                     created_by_agent TEXT NOT NULL DEFAULT '',
@@ -259,20 +180,10 @@ class SharedStateStore:
                     purpose TEXT NOT NULL DEFAULT '',
                     system_prompt TEXT NOT NULL DEFAULT '',
                     tool_whitelist_json TEXT NOT NULL DEFAULT '[]',
-                    execution_contract_json TEXT NOT NULL DEFAULT '{}',
                     reset_policy TEXT NOT NULL DEFAULT 'on_reset',
                     created_by_agent TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     active INTEGER NOT NULL DEFAULT 1
-                );
-
-                CREATE TABLE IF NOT EXISTS runtime_cache (
-                    namespace TEXT NOT NULL,
-                    cache_key TEXT NOT NULL,
-                    value_json TEXT NOT NULL DEFAULT '{}',
-                    updated_at_epoch REAL NOT NULL,
-                    expires_at_epoch REAL NOT NULL,
-                    PRIMARY KEY(namespace, cache_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS agent_wake_queue (
@@ -283,58 +194,6 @@ class SharedStateStore:
                     enqueued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     claimed_at TEXT NOT NULL DEFAULT '',
                     claimer_pid INTEGER
-                );
-
-                -- Persistent operator conversations. These records live in the
-                -- configured backend (Turso in production), never in runner
-                -- artifacts. The UI owns the conversation id and can therefore
-                -- resume the exact thread after a page reload or server restart.
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL DEFAULT '',
-                    summary TEXT NOT NULL DEFAULT '',
-                    summary_message_id INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    archived_at TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS conversation_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
-                );
-
-                CREATE TABLE IF NOT EXISTS conversation_artifacts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    conversation_id TEXT NOT NULL,
-                    message_id INTEGER NOT NULL,
-                    filename TEXT NOT NULL,
-                    language TEXT NOT NULL DEFAULT 'text',
-                    media_type TEXT NOT NULL DEFAULT 'text/plain',
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-                    FOREIGN KEY(message_id) REFERENCES conversation_messages(id)
-                );
-
-                -- Encrypted provider credentials. API keys never appear in
-                -- metadata, audit rows, browser storage, or normal queries.
-                CREATE TABLE IF NOT EXISTS provider_profiles (
-                    id TEXT PRIMARY KEY,
-                    label TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    base_url TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    key_ciphertext TEXT NOT NULL,
-                    key_fingerprint TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 -- Indexes
@@ -354,43 +213,9 @@ class SharedStateStore:
                 CREATE INDEX IF NOT EXISTS idx_procedural_name ON procedural(name);
                 CREATE INDEX IF NOT EXISTS idx_procedural_active ON procedural(active);
                 CREATE INDEX IF NOT EXISTS idx_generated_graphs_active ON generated_graphs(active);
-                CREATE INDEX IF NOT EXISTS idx_runtime_cache_expiry ON runtime_cache(expires_at_epoch);
                 CREATE INDEX IF NOT EXISTS idx_agent_wake_queue_target ON agent_wake_queue(target_agent, claimed_at);
-                CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(archived_at, updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_conversation_messages_thread ON conversation_messages(conversation_id, id);
-                CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_thread ON conversation_artifacts(conversation_id, message_id);
-                CREATE INDEX IF NOT EXISTS idx_provider_profiles_active ON provider_profiles(active, updated_at DESC);
                 """
             )
-            # Existing Turso installations predate source_code. Keep generated
-            # Python with its registry row so it survives ephemeral runners and
-            # GitHub artifact-quota failures.
-            procedural_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(procedural)").fetchall()
-            }
-            if "source_code" not in procedural_columns:
-                try:
-                    conn.execute("ALTER TABLE procedural ADD COLUMN source_code TEXT NOT NULL DEFAULT ''")
-                except Exception as exc:
-                    # Two ephemeral runners can initialize an existing Turso
-                    # database concurrently. If the other one won this small
-                    # migration race, continue with the now-current schema.
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-            graph_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(generated_graphs)").fetchall()
-            }
-            if "execution_contract_json" not in graph_columns:
-                try:
-                    conn.execute(
-                        "ALTER TABLE generated_graphs "
-                        "ADD COLUMN execution_contract_json TEXT NOT NULL DEFAULT '{}'"
-                    )
-                except Exception as exc:
-                    if "duplicate column" not in str(exc).lower():
-                        raise
 
     # ------------------------------------------------------------------
     # shared_intel (unchanged)
@@ -476,7 +301,7 @@ class SharedStateStore:
             query += " AND status = ?"
             params.append(status.strip())
         query += " ORDER BY timestamp DESC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 50), 500)))
+        params.append(max(1, min(limit, 500)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._intel_row_to_dict(row) for row in rows]
@@ -497,43 +322,8 @@ class SharedStateStore:
         now = _utc_now_db()
         task_key = self._task_key(target_ip, action)
         metadata = _normalize_jsonish(metadata_json)
-        target = target_ip.strip()
-        normalized_action = action.strip()
-        normalized_agent = assigned_agent.strip()
-        lease_until = _lease_until(max(30, lease_seconds))
-
-        def insert_running(conn: Any) -> int | None:
-            inserted = conn.execute(
-                """
-                INSERT INTO active_tasks (
-                    target_ip, action, task_key, assigned_agent, status,
-                    lease_expires_at, metadata, result, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'RUNNING', ?, ?, '{}', ?, ?)
-                ON CONFLICT DO NOTHING
-                RETURNING id
-                """,
-                (
-                    target,
-                    normalized_action,
-                    task_key,
-                    normalized_agent,
-                    lease_until,
-                    json.dumps(metadata, ensure_ascii=True),
-                    now,
-                    now,
-                ),
-            ).fetchone()
-            return int(inserted["id"]) if inserted else None
-
-        with self._connect(authoritative=True) as conn:
-            task_id = insert_running(conn)
-            if task_id is not None:
-                return SharedTaskDecision(
-                    success=True,
-                    message=f"task claimed by {normalized_agent}",
-                    task_id=task_id,
-                )
-
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT id, assigned_agent, lease_expires_at
@@ -547,48 +337,47 @@ class SharedStateStore:
                 lease_expires_at = row["lease_expires_at"] or ""
                 stale = bool(lease_expires_at and lease_expires_at < now)
                 if not stale or not allow_steal_stale:
+                    conn.rollback()
                     return SharedTaskDecision(
                         success=False,
                         message=f"task already running for {task_key} by {row['assigned_agent']}",
                     )
-                stale_row = conn.execute(
+                stolen_task_id = int(row["id"])
+                conn.execute(
                     """
                     UPDATE active_tasks
                     SET status = 'STALE', updated_at = ?, result = ?
-                    WHERE id = ? AND status = 'RUNNING' AND lease_expires_at = ?
-                    RETURNING id
+                    WHERE id = ?
                     """,
                     (
                         now,
                         json.dumps({"reason": "stolen_after_stale_lease"}, ensure_ascii=True),
-                        int(row["id"]),
-                        lease_expires_at,
+                        stolen_task_id,
                     ),
-                ).fetchone()
-                if stale_row:
-                    stolen_task_id = int(stale_row["id"])
-
-            # Either this caller retired the stale lease or the conflicting row
-            # changed between SELECT and CAS. The partial unique index decides
-            # which contender becomes the sole RUNNING owner.
-            task_id = insert_running(conn)
-            if task_id is None:
-                winner = conn.execute(
-                    """
-                    SELECT assigned_agent
-                    FROM active_tasks
-                    WHERE task_key = ? AND status = 'RUNNING'
-                    """,
-                    (task_key,),
-                ).fetchone()
-                winner_name = winner["assigned_agent"] if winner else "another agent"
-                return SharedTaskDecision(
-                    success=False,
-                    message=f"task already running for {task_key} by {winner_name}",
                 )
+            cursor = conn.execute(
+                """
+                INSERT INTO active_tasks (
+                    target_ip, action, task_key, assigned_agent, status,
+                    lease_expires_at, metadata, result, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'RUNNING', ?, ?, '{}', ?, ?)
+                """,
+                (
+                    target_ip.strip(),
+                    action.strip(),
+                    task_key,
+                    assigned_agent.strip(),
+                    _lease_until(max(30, lease_seconds)),
+                    json.dumps(metadata, ensure_ascii=True),
+                    now,
+                    now,
+                ),
+            )
+            task_id = int(cursor.lastrowid)
+            conn.commit()
         return SharedTaskDecision(
             success=True,
-            message=f"task claimed by {normalized_agent}",
+            message=f"task claimed by {assigned_agent.strip()}",
             task_id=task_id,
             stolen_stale_task_id=stolen_task_id,
         )
@@ -649,7 +438,7 @@ class SharedStateStore:
             query += " AND target_ip = ?"
             params.append(target_ip.strip())
         query += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 100), 500)))
+        params.append(max(1, min(limit, 500)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._task_row_to_dict(row) for row in rows]
@@ -694,150 +483,6 @@ class SharedStateStore:
             "last_seen_at": now,
             "metadata": metadata,
         }
-
-    def try_claim_spawn_slot(
-        self,
-        *,
-        agent_name: str,
-        spawner_pid: int,
-        instance_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Atomically decide whether this caller should spawn a runner subprocess.
-
-        Two callers of ``Orchestrator.wake`` for the same agent (near-simultaneous
-        MCP requests) previously both saw "no live runner" and both spawned — now
-        one wins and the other returns ``spawned=False`` with the winner's pid.
-
-        Implementation: read the current lease and then use a single conditional
-        INSERT or UPDATE as an optimistic compare-and-swap. The primary key and
-        the exact previous row values form the CAS guard, so only one host can
-        publish ``status='SPAWNING'``. This avoids holding a remote Hrana
-        transaction open while another Turso client waits for the write lock.
-        Callers upgrade the status to ``RUNNING`` once the process is actually up.
-
-        Returns::
-            {"claimed": bool, "existing_pid": int | None, "reason": str}
-
-        - ``claimed=True``  → this caller should spawn.
-        - ``claimed=False`` → another caller already spawned (see ``existing_pid``).
-        """
-        import os as _os
-
-        now = _utc_now_db()
-        now_epoch = time.time()
-        normalized_name = agent_name.strip()
-        owner_instance = (instance_id or get_instance_id()).strip()
-        with self._connect(authoritative=True) as conn:
-            row = conn.execute(
-                """
-                SELECT agent_name, status, last_seen_at, metadata
-                FROM agent_presence
-                WHERE agent_name = ?
-                """,
-                (normalized_name,),
-            ).fetchone()
-
-            existing_pid: int | None = None
-            occupied_reason = ""
-            # RUNNING, SPAWNING, and a leased IDLE runner count as occupied.
-            # EXITING is our
-            # closing-window state — the runner is about to end and has told
-            # us it's safe to spawn a fresh one to catch pending wakes.
-            # An expired foreign lease or a dead local PID frees the slot.
-            if row and row["status"] in ("RUNNING", "SPAWNING", "IDLE"):
-                try:
-                    meta = json.loads(row["metadata"] or "{}")
-                except json.JSONDecodeError:
-                    meta = {}
-                recorded_pid = meta.get("pid") if isinstance(meta, dict) else None
-                recorded_instance = meta.get("instance_id") if isinstance(meta, dict) else None
-                lease_expires = meta.get("lease_expires_at_epoch") if isinstance(meta, dict) else None
-                try:
-                    lease_is_fresh = float(lease_expires) > now_epoch
-                except (TypeError, ValueError):
-                    lease_is_fresh = False
-
-                # A PID is only meaningful on its owner host. A fresh lease
-                # from another instance is therefore authoritative.
-                if recorded_instance and recorded_instance != owner_instance and lease_is_fresh:
-                    existing_pid = recorded_pid if isinstance(recorded_pid, int) else None
-                    occupied_reason = "foreign_lease_active"
-                elif (
-                    (not recorded_instance or recorded_instance == owner_instance)
-                    and isinstance(recorded_pid, int)
-                    and recorded_pid > 0
-                ):
-                    try:
-                        _os.kill(recorded_pid, 0)
-                        existing_pid = recorded_pid
-                        occupied_reason = "runner_alive"
-                    except (ProcessLookupError, PermissionError, OSError):
-                        existing_pid = None
-
-            if occupied_reason:
-                return {"claimed": False, "existing_pid": existing_pid, "reason": occupied_reason}
-
-            claim_metadata = json.dumps(
-                {
-                    "pid": spawner_pid,
-                    "instance_id": owner_instance,
-                    "lease_expires_at_epoch": now_epoch + PRESENCE_LEASE_SECONDS,
-                    "state": "spawning",
-                },
-                ensure_ascii=True,
-            )
-            if row is None:
-                claimed_row = conn.execute(
-                    """
-                    INSERT INTO agent_presence (
-                        agent_name, role, status, current_task_id, last_seen_at, metadata
-                    )
-                    VALUES (?, '', 'SPAWNING', NULL, ?, ?)
-                    ON CONFLICT(agent_name) DO NOTHING
-                    RETURNING agent_name
-                    """,
-                    (normalized_name, now, claim_metadata),
-                ).fetchone()
-            else:
-                claimed_row = conn.execute(
-                    """
-                    UPDATE agent_presence
-                    SET status = 'SPAWNING', last_seen_at = ?, metadata = ?
-                    WHERE agent_name = ?
-                      AND status = ?
-                      AND last_seen_at = ?
-                      AND metadata = ?
-                    RETURNING agent_name
-                    """,
-                    (
-                        now,
-                        claim_metadata,
-                        normalized_name,
-                        row["status"],
-                        row["last_seen_at"],
-                        row["metadata"],
-                    ),
-                ).fetchone()
-
-            if claimed_row is None:
-                winner = conn.execute(
-                    "SELECT metadata FROM agent_presence WHERE agent_name = ?",
-                    (normalized_name,),
-                ).fetchone()
-                winner_pid: int | None = None
-                if winner:
-                    try:
-                        winner_meta = json.loads(winner["metadata"] or "{}")
-                    except json.JSONDecodeError:
-                        winner_meta = {}
-                    recorded_pid = winner_meta.get("pid") if isinstance(winner_meta, dict) else None
-                    winner_pid = recorded_pid if isinstance(recorded_pid, int) else None
-                return {
-                    "claimed": False,
-                    "existing_pid": winner_pid,
-                    "reason": "slot_claimed_elsewhere",
-                }
-        return {"claimed": True, "existing_pid": None, "reason": "slot_claimed"}
 
     def list_presence(self, *, stale_after_seconds: int = 3600) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -927,61 +572,23 @@ class SharedStateStore:
         if message_type.strip():
             query += " AND message_type = ?"
             params.append(message_type.strip().upper())
-        query += " ORDER BY created_at DESC, id DESC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 50), 500)))
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(limit, 500)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
             matches = [self._message_row_to_dict(row) for row in rows]
             if mark_read and matches:
-                # Only mark NEW messages as READ. Without the status guard we'd
-                # overwrite `read_at` on every re-fetch — losing the original
-                # timestamp of when a message was first seen.
                 now = _utc_now_db()
-                ids = [row["id"] for row in rows if row["status"] == "NEW"]
-                if ids:
-                    placeholders = ",".join("?" for _ in ids)
-                    conn.execute(
-                        f"UPDATE agent_messages SET status='READ', read_at=? "
-                        f"WHERE id IN ({placeholders}) AND status='NEW'",
-                        [now, *ids],
-                    )
-                    newly_read = set(ids)
-                    for item in matches:
-                        if item["id"] in newly_read:
-                            item["status"] = "READ"
-                            item["read_at"] = now
+                ids = [row["id"] for row in rows]
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE agent_messages SET status = 'READ', read_at = ? WHERE id IN ({placeholders})",
+                    [now, *ids],
+                )
+                for item in matches:
+                    item["status"] = "READ"
+                    item["read_at"] = now
         return matches
-
-    def messages_from_sender_since(
-        self,
-        *,
-        sender_agent: str,
-        recipient_agent: str = "munin",
-        since_id: int = 0,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Return messages FROM ``sender_agent`` TO ``recipient_agent`` with id > since_id.
-
-        Ordered by id ASC so incremental stream consumers can concat. Does NOT
-        mutate ``status`` — this is an observational read. Fixes the bug where
-        ``subagent_trace`` used the generic ``fetch_messages(recipient="munin")``
-        top-100 window and lost its own progress messages if other subagents
-        were also chatty.
-        """
-        params: list[Any] = [
-            recipient_agent.strip(),
-            sender_agent.strip(),
-            max(0, _coerce_int(since_id, 0)),
-        ]
-        query = (
-            "SELECT * FROM agent_messages "
-            "WHERE recipient_agent = ? AND sender_agent = ? AND id > ? "
-            "ORDER BY id ASC LIMIT ?"
-        )
-        params.append(max(1, min(_coerce_int(limit, 100), 1000)))
-        with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [self._message_row_to_dict(row) for row in rows]
 
     def ack_message(self, *, message_id: int, recipient_agent: str, status: str) -> dict[str, Any]:
         final_status = status.strip().upper() or "ACKED"
@@ -1033,227 +640,6 @@ class SharedStateStore:
             "by_severity": {row["severity"]: row["total"] for row in by_severity_rows},
         }
 
-    # ------------------------------------------------------------------
-    # persistent conversations (remote-authoritative in the public tools)
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _conversation_id(value: str) -> str:
-        candidate = str(value or "").strip()
-        if not candidate or len(candidate) > 128:
-            raise ValueError("conversation_id must contain 1-128 characters")
-        if not all(char.isalnum() or char in {"-", "_"} for char in candidate):
-            raise ValueError("conversation_id may contain only letters, numbers, '-' and '_'")
-        return candidate
-
-    @staticmethod
-    def _conversation_row_to_dict(row: Any) -> dict[str, Any]:
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "summary": row["summary"],
-            "summary_message_id": int(row["summary_message_id"] or 0),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            "archived_at": row["archived_at"],
-            "message_count": int(row["message_count"] or 0) if "message_count" in row.keys() else 0,
-        }
-
-    @staticmethod
-    def _conversation_message_row_to_dict(row: Any) -> dict[str, Any]:
-        return {
-            "id": int(row["id"]),
-            "conversation_id": row["conversation_id"],
-            "role": row["role"],
-            "content": row["content"],
-            "metadata": _normalize_jsonish(row["metadata_json"] or "{}"),
-            "created_at": row["created_at"],
-        }
-
-    @staticmethod
-    def _conversation_artifact_row_to_dict(row: Any) -> dict[str, Any]:
-        return {
-            "id": int(row["id"]),
-            "conversation_id": row["conversation_id"],
-            "message_id": int(row["message_id"]),
-            "filename": row["filename"],
-            "language": row["language"],
-            "media_type": row["media_type"],
-            "content": row["content"],
-            "created_at": row["created_at"],
-        }
-
-    def conversation_create(self, *, conversation_id: str, title: str = "") -> dict[str, Any]:
-        """Create a durable conversation or return the existing one.
-
-        Idempotence matters because the GUI creates its id before the first
-        network call and may retry after a transient tunnel failure.
-        """
-        conversation_id = self._conversation_id(conversation_id)
-        safe_title = " ".join(str(title or "").split())[:160]
-        now = _utc_now_db()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO conversations (id, title, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO NOTHING
-                """,
-                (conversation_id, safe_title, now, now),
-            )
-            row = conn.execute(
-                """
-                SELECT c.*, COUNT(m.id) AS message_count
-                FROM conversations c
-                LEFT JOIN conversation_messages m ON m.conversation_id = c.id
-                WHERE c.id = ?
-                GROUP BY c.id
-                """,
-                (conversation_id,),
-            ).fetchone()
-        if row is None:  # pragma: no cover - database integrity guard
-            raise RuntimeError("conversation creation did not return a row")
-        return self._conversation_row_to_dict(row)
-
-    def conversation_list(self, *, limit: int = 50, include_archived: bool = False) -> list[dict[str, Any]]:
-        query = (
-            "SELECT c.*, COUNT(m.id) AS message_count "
-            "FROM conversations c "
-            "LEFT JOIN conversation_messages m ON m.conversation_id = c.id "
-        )
-        params: list[Any] = []
-        if not include_archived:
-            query += "WHERE c.archived_at = '' "
-        query += "GROUP BY c.id ORDER BY c.updated_at DESC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 50), 200)))
-        with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [self._conversation_row_to_dict(row) for row in rows]
-
-    def conversation_get(self, *, conversation_id: str, message_limit: int = 500) -> dict[str, Any] | None:
-        conversation_id = self._conversation_id(conversation_id)
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT c.*, COUNT(m.id) AS message_count
-                FROM conversations c
-                LEFT JOIN conversation_messages m ON m.conversation_id = c.id
-                WHERE c.id = ?
-                GROUP BY c.id
-                """,
-                (conversation_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            message_rows = conn.execute(
-                """
-                SELECT * FROM conversation_messages
-                WHERE conversation_id = ?
-                ORDER BY id DESC LIMIT ?
-                """,
-                (conversation_id, max(1, min(_coerce_int(message_limit, 500), 2000))),
-            ).fetchall()
-            artifact_rows = conn.execute(
-                """
-                SELECT * FROM conversation_artifacts
-                WHERE conversation_id = ?
-                ORDER BY id ASC
-                """,
-                (conversation_id,),
-            ).fetchall()
-        messages = [self._conversation_message_row_to_dict(item) for item in reversed(message_rows)]
-        artifacts = [self._conversation_artifact_row_to_dict(item) for item in artifact_rows]
-        return {"conversation": self._conversation_row_to_dict(row), "messages": messages, "artifacts": artifacts}
-
-    def conversation_append_message(
-        self,
-        *,
-        conversation_id: str,
-        role: str,
-        content: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        conversation_id = self._conversation_id(conversation_id)
-        normalized_role = str(role or "").strip().lower()
-        if normalized_role not in {"user", "assistant", "system", "tool"}:
-            raise ValueError("conversation role must be user, assistant, system or tool")
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("conversation content is required")
-        if len(content) > 1_000_000:
-            raise ValueError("conversation content exceeds 1,000,000 characters")
-        now = _utc_now_db()
-        with self._connect() as conn:
-            exists = conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
-            if not exists:
-                raise ValueError("conversation_id does not exist")
-            cursor = conn.execute(
-                """
-                INSERT INTO conversation_messages (conversation_id, role, content, metadata_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (conversation_id, normalized_role, content, json.dumps(metadata or {}, ensure_ascii=True, default=str), now),
-            )
-            message_id = int(cursor.lastrowid)
-            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
-            row = conn.execute("SELECT * FROM conversation_messages WHERE id = ?", (message_id,)).fetchone()
-        if row is None:  # pragma: no cover - database integrity guard
-            raise RuntimeError("conversation message creation did not return a row")
-        return self._conversation_message_row_to_dict(row)
-
-    def conversation_set_summary(self, *, conversation_id: str, summary: str, summary_message_id: int) -> None:
-        conversation_id = self._conversation_id(conversation_id)
-        if len(summary) > 24_000:
-            raise ValueError("conversation summary exceeds 24,000 characters")
-        with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE conversations
-                SET summary = ?, summary_message_id = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (summary, max(0, _coerce_int(summary_message_id, 0)), _utc_now_db(), conversation_id),
-            )
-
-    def conversation_add_artifact(
-        self,
-        *,
-        conversation_id: str,
-        message_id: int,
-        filename: str,
-        language: str,
-        media_type: str,
-        content: str,
-    ) -> dict[str, Any]:
-        conversation_id = self._conversation_id(conversation_id)
-        normalized_message_id = _coerce_int(message_id, 0)
-        if normalized_message_id < 1:
-            raise ValueError("message_id must be positive")
-        if not isinstance(content, str) or not content:
-            raise ValueError("artifact content is required")
-        if len(content) > 1_000_000:
-            raise ValueError("artifact content exceeds 1,000,000 characters")
-        safe_filename = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in filename)[:180]
-        if not safe_filename:
-            raise ValueError("artifact filename is required")
-        with self._connect() as conn:
-            belongs = conn.execute(
-                "SELECT 1 FROM conversation_messages WHERE id = ? AND conversation_id = ?",
-                (normalized_message_id, conversation_id),
-            ).fetchone()
-            if not belongs:
-                raise ValueError("message_id does not belong to conversation_id")
-            cursor = conn.execute(
-                """
-                INSERT INTO conversation_artifacts
-                    (conversation_id, message_id, filename, language, media_type, content)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (conversation_id, normalized_message_id, safe_filename, language[:48] or "text", media_type[:120] or "text/plain", content),
-            )
-            row = conn.execute("SELECT * FROM conversation_artifacts WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
-        if row is None:  # pragma: no cover - database integrity guard
-            raise RuntimeError("conversation artifact creation did not return a row")
-        return self._conversation_artifact_row_to_dict(row)
-
     # ==================================================================
     # Munin extensions
     # ==================================================================
@@ -1291,47 +677,7 @@ class SharedStateStore:
             query += " AND action = ?"
             params.append(action.strip())
         query += " ORDER BY id DESC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 100), 1000)))
-        with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "ts": row["ts"],
-                "agent": row["agent"],
-                "action": row["action"],
-                "input": _normalize_jsonish(row["input_json"] or "{}"),
-                "output": _normalize_jsonish(row["output_json"] or "{}"),
-                "tags": _normalize_jsonish(row["tags"] or "[]"),
-            }
-            for row in rows
-        ]
-
-    def episodic_since(
-        self,
-        *,
-        agent: str = "",
-        since_id: int = 0,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        """Return every episodic event with id > since_id, ordered id ASC.
-
-        This is the incremental-stream counterpart of :meth:`episodic_query`.
-        The old ``episodic_query(limit=N)`` ordered DESC + capped — a stream
-        consumer polling with ``since_id`` in the middle of the history would
-        NEVER see events between since_id and (max_id - N), losing the whole
-        middle of a long-running subagent's execution. This method fixes it.
-
-        Callers pass the largest ``id`` they've seen; they get everything
-        newer, oldest first, so append-only concatenation works.
-        """
-        query = "SELECT * FROM episodic WHERE id > ?"
-        params: list[Any] = [max(0, _coerce_int(since_id, 0))]
-        if agent.strip():
-            query += " AND agent = ?"
-            params.append(agent.strip())
-        query += " ORDER BY id ASC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 200), 2000)))
+        params.append(max(1, min(limit, 1000)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [
@@ -1372,7 +718,7 @@ class SharedStateStore:
             query += " WHERE key LIKE ?"
             params.append(f"{prefix.strip()}%")
         query += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(max(1, min(_coerce_int(limit, 200), 1000)))
+        params.append(max(1, min(limit, 1000)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [
@@ -1387,7 +733,6 @@ class SharedStateStore:
         name: str,
         description: str,
         script_path: str,
-        source_code: str = "",
         signature: dict[str, Any],
         tags: list[str],
         created_by_agent: str,
@@ -1395,12 +740,11 @@ class SharedStateStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO procedural (name, description, script_path, source_code, signature_json, tags, created_by_agent, active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                INSERT INTO procedural (name, description, script_path, signature_json, tags, created_by_agent, active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(name) DO UPDATE SET
                     description = excluded.description,
                     script_path = excluded.script_path,
-                    source_code = CASE WHEN excluded.source_code != '' THEN excluded.source_code ELSE procedural.source_code END,
                     signature_json = excluded.signature_json,
                     tags = excluded.tags,
                     active = 1
@@ -1409,7 +753,6 @@ class SharedStateStore:
                     name.strip(),
                     description.strip(),
                     str(script_path),
-                    source_code,
                     json.dumps(signature, ensure_ascii=True, default=str),
                     json.dumps(tags, ensure_ascii=True),
                     created_by_agent.strip(),
@@ -1417,13 +760,7 @@ class SharedStateStore:
             )
         return {"name": name.strip(), "script_path": str(script_path), "active": True}
 
-    def procedural_list(
-        self,
-        *,
-        tag: str = "",
-        include_inactive: bool = False,
-        include_source: bool = False,
-    ) -> list[dict[str, Any]]:
+    def procedural_list(self, *, tag: str = "", include_inactive: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM procedural"
         conditions: list[str] = []
         params: list[Any] = []
@@ -1437,9 +774,8 @@ class SharedStateStore:
         query += " ORDER BY created_at DESC"
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        records: list[dict[str, Any]] = []
-        for row in rows:
-            record = {
+        return [
+            {
                 "name": row["name"],
                 "description": row["description"],
                 "script_path": row["script_path"],
@@ -1449,10 +785,8 @@ class SharedStateStore:
                 "created_at": row["created_at"],
                 "active": bool(row["active"]),
             }
-            if include_source:
-                record["source_code"] = row["source_code"] or ""
-            records.append(record)
-        return records
+            for row in rows
+        ]
 
     def procedural_get(self, name: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -1463,7 +797,6 @@ class SharedStateStore:
             "name": row["name"],
             "description": row["description"],
             "script_path": row["script_path"],
-            "source_code": row["source_code"] or "",
             "signature": _normalize_jsonish(row["signature_json"] or "{}"),
             "tags": _normalize_jsonish(row["tags"] or "[]"),
             "created_by_agent": row["created_by_agent"],
@@ -1473,10 +806,7 @@ class SharedStateStore:
 
     def procedural_deactivate(self, name: str) -> bool:
         with self._connect() as conn:
-            cursor = conn.execute(
-                "UPDATE procedural SET active = 0 WHERE name = ? AND active = 1",
-                (name.strip(),),
-            )
+            cursor = conn.execute("UPDATE procedural SET active = 0 WHERE name = ?", (name.strip(),))
             return cursor.rowcount > 0
 
     def procedural_purge_inactive(self) -> int:
@@ -1489,142 +819,6 @@ class SharedStateStore:
             cursor = conn.execute("DELETE FROM procedural")
             return int(cursor.rowcount or 0)
 
-    # ---- runtime_cache ----
-    def cache_put(self, namespace: str, key: str, value: Any, *, ttl_seconds: int) -> dict[str, Any]:
-        now = time.time()
-        expires_at = now + max(1, _coerce_int(ttl_seconds, 900))
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO runtime_cache (
-                    namespace, cache_key, value_json, updated_at_epoch, expires_at_epoch
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(namespace, cache_key) DO UPDATE SET
-                    value_json = excluded.value_json,
-                    updated_at_epoch = excluded.updated_at_epoch,
-                    expires_at_epoch = excluded.expires_at_epoch
-                """,
-                (
-                    namespace.strip(),
-                    key.strip(),
-                    json.dumps(value, ensure_ascii=True, default=str),
-                    now,
-                    expires_at,
-                ),
-            )
-        return {"namespace": namespace.strip(), "key": key.strip(), "expires_at_epoch": expires_at}
-
-    def cache_get(self, namespace: str, key: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM runtime_cache WHERE namespace = ? AND cache_key = ?",
-                (namespace.strip(), key.strip()),
-            ).fetchone()
-        if not row:
-            return None
-        now = time.time()
-        expires_at = float(row["expires_at_epoch"])
-        is_stale = expires_at < now
-        if is_stale and not allow_stale:
-            return None
-        return {
-            "namespace": row["namespace"],
-            "key": row["cache_key"],
-            "value": _normalize_jsonish(row["value_json"] or "{}"),
-            "updated_at_epoch": float(row["updated_at_epoch"]),
-            "expires_at_epoch": expires_at,
-            "age_seconds": max(0, int(now - float(row["updated_at_epoch"]))),
-            "is_stale": is_stale,
-        }
-
-    # ---- encrypted BYOK provider profiles ----
-    @staticmethod
-    def _provider_profile_row_to_dict(row: Any, *, include_ciphertext: bool = False) -> dict[str, Any]:
-        value = {
-            "id": row["id"],
-            "label": row["label"],
-            "provider": row["provider"],
-            "base_url": row["base_url"],
-            "model": row["model"],
-            "key_fingerprint": row["key_fingerprint"],
-            "active": bool(row["active"]),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
-        if include_ciphertext:
-            value["key_ciphertext"] = row["key_ciphertext"]
-        return value
-
-    def provider_profile_upsert(
-        self,
-        *,
-        profile_id: str,
-        label: str,
-        provider: str,
-        base_url: str,
-        model: str,
-        key_ciphertext: str,
-        key_fingerprint: str,
-        activate: bool = False,
-    ) -> dict[str, Any]:
-        profile_id = self._conversation_id(profile_id)
-        now = _utc_now_db()
-        with self._connect() as conn:
-            if activate:
-                conn.execute("UPDATE provider_profiles SET active = 0 WHERE active = 1")
-            conn.execute(
-                """
-                INSERT INTO provider_profiles (
-                    id, label, provider, base_url, model, key_ciphertext,
-                    key_fingerprint, active, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    label = excluded.label, provider = excluded.provider,
-                    base_url = excluded.base_url, model = excluded.model,
-                    key_ciphertext = excluded.key_ciphertext,
-                    key_fingerprint = excluded.key_fingerprint,
-                    active = excluded.active, updated_at = excluded.updated_at
-                """,
-                (
-                    profile_id, label.strip()[:120], provider.strip()[:64], base_url.strip()[:500],
-                    model.strip()[:240], key_ciphertext, key_fingerprint[:64], int(activate), now, now,
-                ),
-            )
-            row = conn.execute("SELECT * FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
-        if not row:
-            raise RuntimeError("provider profile write did not return a row")
-        return self._provider_profile_row_to_dict(row)
-
-    def provider_profile_list(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM provider_profiles ORDER BY active DESC, updated_at DESC").fetchall()
-        return [self._provider_profile_row_to_dict(row) for row in rows]
-
-    def provider_profile_get(self, profile_id: str = "", *, active_only: bool = False) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            if profile_id:
-                row = conn.execute("SELECT * FROM provider_profiles WHERE id = ?", (self._conversation_id(profile_id),)).fetchone()
-            elif active_only:
-                row = conn.execute("SELECT * FROM provider_profiles WHERE active = 1 ORDER BY updated_at DESC LIMIT 1").fetchone()
-            else:
-                return None
-        return self._provider_profile_row_to_dict(row, include_ciphertext=True) if row else None
-
-    def provider_profile_activate(self, profile_id: str) -> dict[str, Any] | None:
-        profile_id = self._conversation_id(profile_id)
-        with self._connect() as conn:
-            if not conn.execute("SELECT 1 FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone():
-                return None
-            conn.execute("UPDATE provider_profiles SET active = 0 WHERE active = 1")
-            conn.execute("UPDATE provider_profiles SET active = 1, updated_at = ? WHERE id = ?", (_utc_now_db(), profile_id))
-            row = conn.execute("SELECT * FROM provider_profiles WHERE id = ?", (profile_id,)).fetchone()
-        return self._provider_profile_row_to_dict(row) if row else None
-
-    def provider_profile_delete(self, profile_id: str) -> bool:
-        with self._connect() as conn:
-            cursor = conn.execute("DELETE FROM provider_profiles WHERE id = ?", (self._conversation_id(profile_id),))
-        return bool(cursor.rowcount)
-
     # ---- generated_graphs ----
     def graph_register(
         self,
@@ -1635,20 +829,17 @@ class SharedStateStore:
         tool_whitelist: list[str],
         reset_policy: str,
         created_by_agent: str,
-        execution_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO generated_graphs (
-                    name, purpose, system_prompt, tool_whitelist_json, execution_contract_json,
-                    reset_policy, created_by_agent, active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    name, purpose, system_prompt, tool_whitelist_json, reset_policy, created_by_agent, active
+                ) VALUES (?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(name) DO UPDATE SET
                     purpose = excluded.purpose,
                     system_prompt = excluded.system_prompt,
                     tool_whitelist_json = excluded.tool_whitelist_json,
-                    execution_contract_json = excluded.execution_contract_json,
                     reset_policy = excluded.reset_policy,
                     active = 1
                 """,
@@ -1657,7 +848,6 @@ class SharedStateStore:
                     purpose.strip(),
                     system_prompt,
                     json.dumps(tool_whitelist, ensure_ascii=True),
-                    json.dumps(execution_contract or {}, ensure_ascii=True, default=str),
                     reset_policy.strip() or "on_reset",
                     created_by_agent.strip(),
                 ),
@@ -1677,7 +867,6 @@ class SharedStateStore:
                 "purpose": row["purpose"],
                 "system_prompt": row["system_prompt"],
                 "tool_whitelist": _normalize_jsonish(row["tool_whitelist_json"] or "[]"),
-                "execution_contract": _normalize_jsonish(row["execution_contract_json"] or "{}"),
                 "reset_policy": row["reset_policy"],
                 "created_by_agent": row["created_by_agent"],
                 "created_at": row["created_at"],
@@ -1686,22 +875,9 @@ class SharedStateStore:
             for row in rows
         ]
 
-    def graph_get(self, name: str, *, include_inactive: bool = False) -> dict[str, Any] | None:
-        """Fetch a forged-graph config.
-
-        By default only returns active rows — a graph that was ``graph_drop``ped
-        must not be wake-invocable anymore. Set ``include_inactive=True`` for
-        introspection tools like ``describe_generated_graph`` that legitimately
-        want to show dropped configs.
-        """
+    def graph_get(self, name: str) -> dict[str, Any] | None:
         with self._connect() as conn:
-            if include_inactive:
-                row = conn.execute("SELECT * FROM generated_graphs WHERE name = ?", (name.strip(),)).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM generated_graphs WHERE name = ? AND active = 1",
-                    (name.strip(),),
-                ).fetchone()
+            row = conn.execute("SELECT * FROM generated_graphs WHERE name = ?", (name.strip(),)).fetchone()
         if not row:
             return None
         return {
@@ -1709,7 +885,6 @@ class SharedStateStore:
             "purpose": row["purpose"],
             "system_prompt": row["system_prompt"],
             "tool_whitelist": _normalize_jsonish(row["tool_whitelist_json"] or "[]"),
-            "execution_contract": _normalize_jsonish(row["execution_contract_json"] or "{}"),
             "reset_policy": row["reset_policy"],
             "created_by_agent": row["created_by_agent"],
             "created_at": row["created_at"],
@@ -1738,25 +913,25 @@ class SharedStateStore:
     def claim_wake_item(self, *, target_agent: str, claimer_pid: int) -> dict[str, Any] | None:
         """Atomically claim the highest-priority unclaimed wake item for a given agent."""
         now = _utc_now_db()
-        with self._connect(authoritative=True) as conn:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                UPDATE agent_wake_queue
-                SET claimed_at = ?, claimer_pid = ?
-                WHERE id = (
-                    SELECT id
-                    FROM agent_wake_queue
-                    WHERE target_agent = ? AND claimed_at = ''
-                    ORDER BY priority DESC, id ASC
-                    LIMIT 1
-                )
-                  AND claimed_at = ''
-                RETURNING id, task_json
+                SELECT id, task_json FROM agent_wake_queue
+                WHERE target_agent = ? AND claimed_at = ''
+                ORDER BY priority DESC, id ASC
+                LIMIT 1
                 """,
-                (now, claimer_pid, target_agent.strip()),
+                (target_agent.strip(),),
             ).fetchone()
             if not row:
+                conn.rollback()
                 return None
+            conn.execute(
+                "UPDATE agent_wake_queue SET claimed_at = ?, claimer_pid = ? WHERE id = ?",
+                (now, claimer_pid, row["id"]),
+            )
+            conn.commit()
         return {"id": int(row["id"]), "task": _normalize_jsonish(row["task_json"] or "{}"), "claimed_at": now}
 
     def list_wake_queue(self, *, target_agent: str = "", include_claimed: bool = False) -> list[dict[str, Any]]:

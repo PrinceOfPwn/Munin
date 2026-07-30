@@ -35,8 +35,8 @@ def test_shell_join_quotes_special_chars():
     from munin.mcp.utils import shell_join
 
     result = shell_join(["echo", "hello world; whoami"])
-    quoted = result.replace("'hello world; whoami'", "").replace('"hello world; whoami"', "")
-    assert ";" not in quoted
+    # Must NOT allow the semicolon to inject a second command.
+    assert ";" not in result.replace("'hello world; whoami'", "")
 
 
 def test_nmap_command_splits_additional_args(isolated_workspace):

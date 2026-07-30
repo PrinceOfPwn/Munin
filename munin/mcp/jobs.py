@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .utils import stderr_tail, truncate_text, utc_now_iso
@@ -29,9 +28,6 @@ class JobRecord:
     process_pid: int = 0
     process_handle: Any = None
     cancel_requested: bool = False
-    # Small, operator-safe milestones emitted while a long job is running.
-    # They make polling useful without retaining hidden model reasoning.
-    progress: list[dict[str, Any]] | None = None
 
 
 class JobManager:
@@ -39,21 +35,6 @@ class JobManager:
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="offx-mcp")
         self.records: dict[str, JobRecord] = {}
         self.lock = Lock()
-        self.is_shutdown = False
-
-    def shutdown(self) -> None:
-        """Release worker threads during server/test shutdown.
-
-        A job manager is an execution detail, never the durable source of
-        operation truth. Closing it prevents interpreter hangs after tests and
-        avoids retaining queued work when a server process exits; the durable
-        run dispatcher safely recovers the corresponding Turso lease.
-        """
-        with self.lock:
-            if self.is_shutdown:
-                return
-            self.is_shutdown = True
-        self.executor.shutdown(wait=False, cancel_futures=True)
 
     def _acquire_lock(self, timeout: float = LOCK_TIMEOUT) -> bool:
         return self.lock.acquire(timeout=timeout)
@@ -77,8 +58,6 @@ class JobManager:
         fn: Callable[[JobRecord], dict[str, Any]],
         on_finish: Callable[[JobRecord], None] | None = None,
     ) -> JobRecord:
-        if self.is_shutdown:
-            raise RuntimeError("job manager is shutting down")
         job = JobRecord(
             job_id=uuid4().hex,
             tool=tool,
@@ -86,30 +65,12 @@ class JobManager:
             target=target,
             command_preview=command_preview,
             created_at=utc_now_iso(),
-            progress=[],
         )
         with self.lock:
             self.records[job.job_id] = job
         future = self.executor.submit(self._run_job, job.job_id, fn, on_finish)
         job.future = future
         return job
-
-    def add_progress(self, job_id: str, event: dict[str, Any]) -> None:
-        """Append a bounded execution milestone to a job.
-
-        This intentionally records observable lifecycle events (LLM request,
-        tool start/result), not private chain-of-thought text.
-        """
-        with self.lock:
-            job = self.records.get(job_id)
-            if not job:
-                return
-            if job.progress is None:
-                job.progress = []
-            job.progress.append({"at": utc_now_iso(), **event})
-            # Keep polling payloads bounded even for a pathological ReAct loop.
-            if len(job.progress) > 100:
-                del job.progress[:-100]
 
     def _run_job(
         self,
@@ -202,7 +163,6 @@ class JobManager:
                 "finished_at": job.finished_at,
                 "process_pid": job.process_pid,
                 "cancel_requested": job.cancel_requested,
-                "progress": list(job.progress or []),
                 "result_compact": result_compact,
                 "stderr_tail": result_compact.get("stderr_tail") or stderr_tail(job.error, 10),
             }

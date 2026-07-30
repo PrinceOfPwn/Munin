@@ -1,426 +1,237 @@
-# Enterprise OpenLDAP Mock Directory — Domain: dc=akatsuki,dc=com
-#
-# Production-grade 10/10 Enterprise Directory Tree.
-# Coherent DNs, explicit root node, realistic SSHA password hashes, nested group delegations,
-# structured Kerberoasting SPNs, and AS-REP roastable markers.
+# Munin Mock LDAP — dominio dc=meli,dc=com
+# Contiene: usuarios normales, service accounts Kerberoastables,
+# usuarios AS-REP Roastables, grupos privilegiados y OUs.
+# Cargar con: ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=meli,dc=com" -w itachi -f ldap_mock.ldif
 
-# ── Legacy & Compatibility Containers ─────────────────────────────────────────
+# ── Organizational Units ──────────────────────────────────────────────────────
 
-dn: ou=users,dc=akatsuki,dc=com
+dn: ou=users,dc=meli,dc=com
 objectClass: organizationalUnit
 ou: users
-description: Legacy Domain Users Container
+description: Domain users
 
-dn: ou=groups,dc=akatsuki,dc=com
+dn: ou=groups,dc=meli,dc=com
 objectClass: organizationalUnit
 ou: groups
-description: Domain Security & Delegation Groups
+description: Domain groups
 
-dn: ou=computers,dc=akatsuki,dc=com
+dn: ou=computers,dc=meli,dc=com
 objectClass: organizationalUnit
 ou: computers
-description: Domain Controllers, Servers & Workstations
+description: Domain computers
 
-dn: ou=service-accounts,dc=akatsuki,dc=com
+dn: ou=service-accounts,dc=meli,dc=com
 objectClass: organizationalUnit
 ou: service-accounts
-description: Managed Service Accounts & Automation
+description: Service and machine accounts
 
-# ── Corporate Organizational Units ────────────────────────────────────────────
+# ── Regular users ─────────────────────────────────────────────────────────────
 
-dn: ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: Corp
-description: Akatsuki Enterprise Corporate Structure
-
-dn: ou=Executive,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: Executive
-description: Executive Leadership & Board
-
-dn: ou=Engineering,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: Engineering
-description: Software Development, Cloud Architecture & DevOps
-
-dn: ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: IT-Operations
-description: Systems Administration, Infrastructure & Helpdesk
-
-dn: ou=Finance,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: Finance
-description: Financial Controllers, Treasury & Accounting
-
-dn: ou=HR,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: HR
-description: Human Resources & Talent Management
-
-dn: ou=Security,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: Security
-description: Information Security, SecOps & Compliance
-
-dn: ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
-objectClass: organizationalUnit
-ou: Service-Accounts
-description: Corporate Managed Service Accounts
-
-# ── Departmental Domain Users ─────────────────────────────────────────────────
-
-dn: uid=administrator,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+dn: uid=jdoe,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
-uid: administrator
-cn: Domain Administrator
-sn: Administrator
-givenName: Domain
-displayName: Domain Administrator
-mail: administrator@akatsuki.com
-title: Chief Information Security Officer
-userPassword: {SSHA}WjN4NnBrMm1PZ1lhRlhOWFNEV3N3TWZ2WEE9PQ==
-
-dn: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: jdoe
 cn: John Doe
 sn: Doe
 givenName: John
-displayName: John Doe (Senior Lead)
-mail: jdoe@akatsuki.com
-title: Senior Infrastructure Lead
-telephoneNumber: +1-555-0192
-userPassword: {SSHA}UjZndWpLdkNzM3NlY3VyZVAhc3N3b3JkMTIz
+mail: jdoe@meli.com
+uidNumber: 1001
+gidNumber: 1001
+homeDirectory: /home/jdoe
+loginShell: /bin/bash
+description: Senior Engineer — IT
 
-dn: uid=asmith,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+dn: uid=asmith,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: asmith
 cn: Alice Smith
 sn: Smith
 givenName: Alice
-displayName: Alice Smith (SRE Lead)
-mail: asmith@akatsuki.com
-title: Site Reliability Engineer
-telephoneNumber: +1-555-0144
-userPassword: {SSHA}QWxpY2VTbWl0aFMyMDI2U2VjdXJlU3NoYQ==
+mail: asmith@meli.com
+uidNumber: 1002
+gidNumber: 1001
+homeDirectory: /home/asmith
+loginShell: /bin/bash
+description: DevOps Engineer
 
-dn: uid=rgarcia,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+dn: uid=rgarcia,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: rgarcia
 cn: Roberto Garcia
 sn: Garcia
 givenName: Roberto
-displayName: Roberto Garcia
-mail: rgarcia@akatsuki.com
-title: Principal Software Architect
-telephoneNumber: +1-555-0188
-userPassword: {SSHA}Um9iZXJ0b0dhcmNpYVNlY3JldDk5U3NoYQ==
+mail: rgarcia@meli.com
+uidNumber: 1003
+gidNumber: 1001
+homeDirectory: /home/rgarcia
+loginShell: /bin/bash
+description: Junior Developer
 
-dn: uid=htarget,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+dn: uid=htarget,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: htarget
 cn: Hugo Target
 sn: Target
 givenName: Hugo
-displayName: Hugo Target (Operations)
-mail: htarget@akatsuki.com
-title: Field Operations Specialist
-employeeType: DONT_REQ_PREAUTH
-telephoneNumber: +1-555-0177
-userPassword: {SSHA}SHVnb1RhcmdldE5vUHJlYXV0aFNoYTI1Ng==
+mail: htarget@meli.com
+uidNumber: 1004
+gidNumber: 1001
+homeDirectory: /home/htarget
+loginShell: /bin/bash
+description: AS-REP Roastable — DONT_REQ_PREAUTH simulado via description
 
-dn: uid=ebanks,ou=Finance,ou=Corp,dc=akatsuki,dc=com
+dn: uid=mlopez,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
-uid: ebanks
-cn: Elizabeth Banks
-sn: Banks
-givenName: Elizabeth
-displayName: Elizabeth Banks (Finance Lead)
-mail: ebanks@akatsuki.com
-title: Senior Financial Controller
-employeeType: DONT_REQ_PREAUTH
-telephoneNumber: +1-555-0133
-userPassword: {SSHA}RWxpemFiZXRoQmFua3NGaW5hbmNlMjAyNg==
-
-dn: uid=mlopez,ou=HR,ou=Corp,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: mlopez
 cn: Maria Lopez
 sn: Lopez
 givenName: Maria
-displayName: Maria Lopez
-mail: mlopez@akatsuki.com
-title: HR Business Partner
-telephoneNumber: +1-555-0122
-userPassword: {SSHA}TWFyaWFMb3BlekhrMjAyNlNzaGFIYXNo
+mail: mlopez@meli.com
+uidNumber: 1005
+gidNumber: 1001
+homeDirectory: /home/mlopez
+loginShell: /bin/bash
+description: HR Manager
 
-dn: uid=dchen,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+# ── Privileged user (Domain Admin) ────────────────────────────────────────────
+
+dn: uid=administrator,ou=users,dc=meli,dc=com
 objectClass: inetOrgPerson
-uid: dchen
-cn: David Chen
-sn: Chen
-givenName: David
-displayName: David Chen (Helpdesk)
-mail: dchen@akatsuki.com
-title: IT Helpdesk Analyst Tier 1
-telephoneNumber: +1-555-0155
-userPassword: {SSHA}RGF2aWRDaGVuSGVscGRlc2sxU3NoYQ==
-
-# ── Top-Level User Aliases (Backward-Compatibility) ───────────────────────────
-
-dn: uid=administrator,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: administrator
 cn: Domain Administrator
 sn: Administrator
 givenName: Domain
-displayName: Domain Administrator
-mail: administrator@akatsuki.com
-title: Chief Information Security Officer
-userPassword: {SSHA}WjN4NnBrMm1PZ1lhRlhOWFNEV3N3TWZ2WEE9PQ==
+mail: administrator@meli.com
+uidNumber: 500
+gidNumber: 512
+homeDirectory: /home/administrator
+loginShell: /bin/bash
+description: Built-in domain administrator account
 
-dn: uid=jdoe,ou=users,dc=akatsuki,dc=com
+# ── Service Accounts (Kerberoastable via description tag) ────────────────────
+# Note: OpenLDAP no tiene userAccountControl ni servicePrincipalName nativos.
+# Usamos description para marcarlos como kerberoastables en el mock.
+# Las tools de Munin buscan por objectClass y estos atributos en AD real.
+
+dn: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
-uid: jdoe
-cn: John Doe
-sn: Doe
-givenName: John
-displayName: John Doe (Senior Lead)
-mail: jdoe@akatsuki.com
-title: Senior Infrastructure Lead
-telephoneNumber: +1-555-0192
-userPassword: {SSHA}UjZndWpLdkNzM3NlY3VyZVAhc3N3b3JkMTIz
-
-dn: uid=asmith,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-uid: asmith
-cn: Alice Smith
-sn: Smith
-givenName: Alice
-displayName: Alice Smith (SRE Lead)
-mail: asmith@akatsuki.com
-title: Site Reliability Engineer
-telephoneNumber: +1-555-0144
-userPassword: {SSHA}QWxpY2VTbWl0aFMyMDI2U2VjdXJlU3NoYQ==
-
-dn: uid=rgarcia,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-uid: rgarcia
-cn: Roberto Garcia
-sn: Garcia
-givenName: Roberto
-displayName: Roberto Garcia
-mail: rgarcia@akatsuki.com
-title: Principal Software Architect
-telephoneNumber: +1-555-0188
-userPassword: {SSHA}Um9iZXJ0b0dhcmNpYVNlY3JldDk5U3NoYQ==
-
-dn: uid=htarget,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-uid: htarget
-cn: Hugo Target
-sn: Target
-givenName: Hugo
-displayName: Hugo Target (Operations)
-mail: htarget@akatsuki.com
-title: Field Operations Specialist
-employeeType: DONT_REQ_PREAUTH
-telephoneNumber: +1-555-0177
-userPassword: {SSHA}SHVnb1RhcmdldE5vUHJlYXV0aFNoYTI1Ng==
-
-dn: uid=mlopez,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-uid: mlopez
-cn: Maria Lopez
-sn: Lopez
-givenName: Maria
-displayName: Maria Lopez
-mail: mlopez@akatsuki.com
-title: HR Business Partner
-telephoneNumber: +1-555-0122
-userPassword: {SSHA}TWFyaWFMb3BlekhrMjAyNlNzaGFIYXNo
-
-# ── Service Accounts (Kerberoastable & Managed Automation) ───────────────────
-
-dn: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
+objectClass: posixAccount
 uid: svc_backup
 cn: Backup Service Account
-sn: Service
-displayName: Service - Enterprise Backup
-mail: svc_backup@akatsuki.com
-title: MSSQLSvc/DBSERVER01.akatsuki.com:1433
+sn: svc_backup
+mail: svc_backup@meli.com
+uidNumber: 2001
+gidNumber: 2000
+homeDirectory: /var/lib/backup
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: MSSQLSvc/DBSERVER01.meli.com:1433
 
-dn: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
+dn: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
+objectClass: posixAccount
 uid: svc_mssql
-cn: MSSQL Database Service Account
-sn: Service
-displayName: Service - Production MSSQL
-mail: svc_mssql@akatsuki.com
-title: MSSQLSvc/SQL01.akatsuki.com:1433
+cn: MSSQL Service Account
+sn: svc_mssql
+mail: svc_mssql@meli.com
+uidNumber: 2002
+gidNumber: 2000
+homeDirectory: /var/lib/mssql
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: MSSQLSvc/SQL01.meli.com:1433
 
-dn: uid=svc_oracle,ou=service-accounts,dc=akatsuki,dc=com
+dn: uid=svc_http,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
-uid: svc_oracle
-cn: Oracle ERP Service Account
-sn: Service
-displayName: Service - Oracle ERP DB
-mail: svc_oracle@akatsuki.com
-title: OracleSvc/ORA01.akatsuki.com:1521
-
-dn: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
+objectClass: posixAccount
 uid: svc_http
-cn: Intranet HTTP Service Account
-sn: Service
-displayName: Service - Intranet Portal
-mail: svc_http@akatsuki.com
-title: HTTP/intranet.akatsuki.com
+cn: HTTP Service Account
+sn: svc_http
+mail: svc_http@meli.com
+uidNumber: 2003
+gidNumber: 2000
+homeDirectory: /var/www
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: HTTP/intranet.meli.com
 
-dn: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
+dn: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
 objectClass: inetOrgPerson
+objectClass: posixAccount
 uid: svc_jenkins
-cn: Jenkins CI Automation Account
-sn: Service
-displayName: Service - Jenkins CI/CD
-mail: svc_jenkins@akatsuki.com
-title: HTTP/jenkins.akatsuki.com:8080
+cn: Jenkins CI Service Account
+sn: svc_jenkins
+mail: svc_jenkins@meli.com
+uidNumber: 2004
+gidNumber: 2000
+homeDirectory: /var/lib/jenkins
+loginShell: /bin/false
+description: KERBEROASTABLE — SPN: HTTP/jenkins.meli.com:8080
 
-dn: uid=svc_ansible,ou=service-accounts,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-uid: svc_ansible
-cn: Ansible Automation Worker
-sn: Service
-displayName: Service - Ansible Automation
-mail: svc_ansible@akatsuki.com
-title: HOST/ansible.akatsuki.com
+# ── Groups ────────────────────────────────────────────────────────────────────
 
-# ── Domain Security Groups & Delegation ───────────────────────────────────────
-
-dn: cn=Domain Admins,ou=groups,dc=akatsuki,dc=com
+dn: cn=Domain Admins,ou=groups,dc=meli,dc=com
 objectClass: groupOfNames
 cn: Domain Admins
-description: Domain Full Control Administrative Group
-member: uid=administrator,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=administrator,ou=users,dc=akatsuki,dc=com
-member: uid=jdoe,ou=users,dc=akatsuki,dc=com
+description: Members have full control of the domain
+member: uid=administrator,ou=users,dc=meli,dc=com
+member: uid=jdoe,ou=users,dc=meli,dc=com
 
-dn: cn=Enterprise Admins,ou=groups,dc=akatsuki,dc=com
+dn: cn=IT,ou=groups,dc=meli,dc=com
 objectClass: groupOfNames
-cn: Enterprise Admins
-description: Forest Wide Administrative Group
-member: uid=administrator,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=administrator,ou=users,dc=akatsuki,dc=com
+cn: IT
+description: IT department
+member: uid=jdoe,ou=users,dc=meli,dc=com
+member: uid=asmith,ou=users,dc=meli,dc=com
 
-dn: cn=Server Operators,ou=groups,dc=akatsuki,dc=com
-objectClass: groupOfNames
-cn: Server Operators
-description: Administrative control over domain member servers
-member: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=svc_ansible,ou=service-accounts,dc=akatsuki,dc=com
-
-dn: cn=Backup Operators,ou=groups,dc=akatsuki,dc=com
-objectClass: groupOfNames
-cn: Backup Operators
-description: System Backup & Restore Privileges
-member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
-
-dn: cn=IT-Operations,ou=groups,dc=akatsuki,dc=com
-objectClass: groupOfNames
-cn: IT-Operations
-description: IT Systems Administration Staff
-member: uid=administrator,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=htarget,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-member: uid=dchen,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-
-dn: cn=DevOps,ou=groups,dc=akatsuki,dc=com
-objectClass: groupOfNames
-cn: DevOps
-description: Infrastructure as Code & Deployment Automation
-member: uid=asmith,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
-member: uid=rgarcia,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
-
-dn: cn=Developers,ou=groups,dc=akatsuki,dc=com
+dn: cn=Developers,ou=groups,dc=meli,dc=com
 objectClass: groupOfNames
 cn: Developers
-description: Software Development Engineering Group
-member: uid=rgarcia,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
-member: uid=asmith,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+description: Development team
+member: uid=rgarcia,ou=users,dc=meli,dc=com
+member: uid=asmith,ou=users,dc=meli,dc=com
 
-dn: cn=Service Accounts,ou=groups,dc=akatsuki,dc=com
+dn: cn=Service Accounts,ou=groups,dc=meli,dc=com
 objectClass: groupOfNames
 cn: Service Accounts
-description: Managed Service Accounts Security Group
-member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
-member: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
-member: uid=svc_oracle,ou=service-accounts,dc=akatsuki,dc=com
-member: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
-member: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
-member: uid=svc_ansible,ou=service-accounts,dc=akatsuki,dc=com
+description: Service and automation accounts
+member: uid=svc_backup,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_mssql,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_http,ou=service-accounts,dc=meli,dc=com
+member: uid=svc_jenkins,ou=service-accounts,dc=meli,dc=com
 
-dn: cn=HR,ou=groups,dc=akatsuki,dc=com
+dn: cn=HR,ou=groups,dc=meli,dc=com
 objectClass: groupOfNames
 cn: HR
-description: Human Resources Personnel Group
-member: uid=mlopez,ou=HR,ou=Corp,dc=akatsuki,dc=com
+description: Human Resources
+member: uid=mlopez,ou=users,dc=meli,dc=com
 
-dn: cn=Finance,ou=groups,dc=akatsuki,dc=com
-objectClass: groupOfNames
-cn: Finance
-description: Financial Controllers & Accounting Group
-member: uid=ebanks,ou=Finance,ou=Corp,dc=akatsuki,dc=com
+# ── Computers ─────────────────────────────────────────────────────────────────
 
-# ── Computers & Server Infrastructure ─────────────────────────────────────────
-
-dn: cn=DC01,ou=computers,dc=akatsuki,dc=com
+dn: cn=DC01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: DC01
-description: Primary Active Directory Domain Controller (Windows Server 2022)
-serialNumber: SN-2024-DC01-AK
-owner: uid=administrator,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+description: Primary Domain Controller — Windows Server 2022
 
-dn: cn=DC02,ou=computers,dc=akatsuki,dc=com
-objectClass: device
-cn: DC02
-description: Secondary Domain Controller & DNS Server (Windows Server 2022)
-serialNumber: SN-2024-DC02-AK
-owner: uid=administrator,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-
-dn: cn=SQL01,ou=computers,dc=akatsuki,dc=com
+dn: cn=SQL01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: SQL01
-description: Production Database Server (MSSQL 2022 Enterprise)
-serialNumber: SN-2024-SQL01-AK
-owner: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+description: SQL Server — Windows Server 2019
 
-dn: cn=ORA01,ou=computers,dc=akatsuki,dc=com
-objectClass: device
-cn: ORA01
-description: Enterprise Resource Planning Database Host (Oracle 19c Enterprise)
-serialNumber: SN-2024-ORA01-AK
-owner: uid=ebanks,ou=Finance,ou=Corp,dc=akatsuki,dc=com
-
-dn: cn=JENKINS01,ou=computers,dc=akatsuki,dc=com
+dn: cn=JENKINS01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: JENKINS01
-description: Central CI/CD Automation Build Cluster Master
-serialNumber: SN-2024-JENK01-AK
-owner: uid=asmith,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+description: CI/CD Server — Ubuntu 22.04
 
-dn: cn=FS01,ou=computers,dc=akatsuki,dc=com
-objectClass: device
-cn: FS01
-description: Corporate Distributed File Server & NAS Storage
-serialNumber: SN-2024-FS01-AK
-owner: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
-
-dn: cn=WS01,ou=computers,dc=akatsuki,dc=com
+dn: cn=WS01,ou=computers,dc=meli,dc=com
 objectClass: device
 cn: WS01
-description: Developer Workstation Host (Ubuntu 24.04 LTS)
-serialNumber: SN-2024-WS01-AK
-owner: uid=rgarcia,ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+description: Developer Workstation

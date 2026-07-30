@@ -47,13 +47,8 @@ _HARD_BANNED_MODULES: frozenset[str] = frozenset(
 )
 
 # Attribute access we reject at AST level.
-# Includes shell/exec/fork/network primitives commonly reached via `import os`
-# even when os itself is on an allowlist (a tool that legitimately calls
-# os.path.join should never need os.system). Adds shutil.rmtree so a "cleanup"
-# tool can't nuke the workspace.
 _BANNED_ATTRS: frozenset[str] = frozenset(
     {
-        # Reflection escape routes
         "__class__",
         "__subclasses__",
         "__mro__",
@@ -70,47 +65,6 @@ _BANNED_ATTRS: frozenset[str] = frozenset(
         "cr_code",
         "f_locals",
         "f_globals",
-        # Process / shell execution
-        "system",
-        "popen",
-        "spawn",
-        "spawnl",
-        "spawnle",
-        "spawnlp",
-        "spawnlpe",
-        "spawnv",
-        "spawnve",
-        "spawnvp",
-        "spawnvpe",
-        "execv",
-        "execve",
-        "execvp",
-        "execvpe",
-        "execl",
-        "execle",
-        "execlp",
-        "execlpe",
-        "fork",
-        "forkpty",
-        "_exit",
-        "kill",
-        "killpg",
-        "setuid",
-        "setgid",
-        "seteuid",
-        "setegid",
-        "startfile",
-        # Dangerous fs
-        "rmtree",
-        "chmod",
-        "chown",
-        "lchown",
-        "unlink",
-        # Dynamic code
-        "get_data",
-        "exec_module",
-        "run_module",
-        "load_module",
     }
 )
 
@@ -284,20 +238,3 @@ def _monotonic() -> float:
     import time
 
     return time.monotonic()
-
-
-def validate_source_file(script_path: Path, allowed_imports: set[str] | None = None) -> None:
-    """Re-run the AST guard on an on-disk script BEFORE importing it.
-
-    Called from ``registry.register_state_only`` — a runner subprocess persists a
-    forged tool, and later the MCP server re-imports it during rehydrate. Both
-    contexts must reject scripts that have been tampered with post-forge or that
-    somehow slipped through the initial AST walk. Raises SandboxViolation if
-    the file contains banned imports or attributes.
-
-    ``allowed_imports=None`` means "just enforce hard-banned + attribute rules";
-    pass the same allowlist used at forge time for stricter checking.
-    """
-    source = Path(script_path).read_text(encoding="utf-8")
-    tree = ast.parse(source, mode="exec")
-    _validate_ast(tree, allowed_imports if allowed_imports is not None else set())

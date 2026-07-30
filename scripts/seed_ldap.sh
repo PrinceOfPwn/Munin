@@ -19,13 +19,11 @@ else
   exit 2
 fi
 
-echo "[*] starting OpenLDAP + phpLDAPAdmin..."
+echo "[*] starting OpenLDAP + phpLDAPAdmin (docker compose up -d)..."
 $COMPOSE up -d openldap phpldapadmin
 
 echo "[*] waiting 15s for ldap to boot..."
 sleep 15
 
-bash "$(dirname "$0")/ldap_mock.sh" up
-
-echo "[*] LDAP is ready on ldap://localhost:389 (admin: cn=admin,dc=akatsuki,dc=com / itachi)"
+echo "[*] LDAP is on ldap://localhost:389 (admin: cn=admin,dc=meli,dc=com / itachi)"
 echo "[*] phpLDAPAdmin on http://localhost:8080"

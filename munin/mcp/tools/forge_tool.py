@@ -18,10 +18,13 @@ from typing import Any
 
 from ..main import MCP, STATE, audited_tool  # noqa: TID252
 from .. import registry  # noqa: TID252
-from ..shared_state import _coerce_int  # noqa: TID252
-from ...core.execution_progress import emit_tool_progress  # noqa: TID252
 
 logger = logging.getLogger("munin-mcp.forge")
+
+
+def get_max_iterations(requested: int) -> int:
+    """Sanity floor only — no arbitrary upper cap (PR-06: removes [1,12] clamp)."""
+    return max(1, requested)
 
 
 def _guess_tag(spec: str) -> str:
@@ -32,45 +35,24 @@ def _guess_tag(spec: str) -> str:
     return ""
 
 
-_EXPLICIT_NAME_PATTERNS = (
-    r"\b(?:tool|herramienta)\s+(?:named|called|llamad[ao]|denominad[ao])\s+['\"`]?([a-zA-Z][a-zA-Z0-9_-]{1,80})",
-    r"\b(?:create|forge|crea|forja)\s+(?:a\s+|una\s+)?(?:new\s+|nueva\s+)?(?:tool|herramienta)\s+['\"`]?([a-zA-Z][a-zA-Z0-9_-]{1,80})",
-)
-
-
-def _requested_tool_name(spec: str) -> str:
-    """Return an explicitly requested name, never a guessed semantic match."""
-    for pattern in _EXPLICIT_NAME_PATTERNS:
-        match = re.search(pattern, spec, flags=re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
 def _existing_match(spec: str) -> dict[str, Any] | None:
-    """Reuse only a tool named explicitly by the caller.
-
-    A two-keyword overlap (for example ``ldap`` + ``security``) is not a
-    contract. The old heuristic silently replaced specialised audits with an
-    unrelated enumeration tool, which made forging feel unreliable.
-    """
-    requested_name = _requested_tool_name(spec)
-    return registry.resolve_tool_by_name(STATE, requested_name) if requested_name else None
-
-
-def _coerce_bool(value: Any, default: bool = False) -> bool:
-    """Accept MCP clients that send JSON booleans as strings."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off", ""}:
-            return False
-    if value is None:
-        return default
-    return bool(value)
+    """Look for an already-registered generated tool whose description shares 2+ keywords with the spec."""
+    tag = _guess_tag(spec)
+    candidates = registry.list_generated(STATE, tag=tag) if tag else registry.list_generated(STATE)
+    if not candidates:
+        return None
+    tokens = {w.lower() for w in re.findall(r"[a-zA-Z_]{4,}", spec)}
+    if not tokens:
+        return None
+    best: dict[str, Any] | None = None
+    best_score = 1
+    for row in candidates:
+        haystack = f"{row.get('description', '')} {row.get('name', '')} {' '.join(row.get('tags', []))}".lower()
+        score = sum(1 for tok in tokens if tok in haystack)
+        if score > best_score:
+            best_score = score
+            best = row
+    return best
 
 
 @MCP.tool()
@@ -95,10 +77,7 @@ def tool_forge(
     if not spec.strip():
         return {"ok": False, "tool": "tool_forge", "mode": "sync", "summary": "empty spec", "error": {"code": "bad_input", "message": "spec required"}}
 
-    force = _coerce_bool(force_regenerate)
-    iterations = max(1, min(_coerce_int(max_iterations, 5), 12))
-
-    if not force:
+    if not force_regenerate:
         existing = _existing_match(spec)
         if existing:
             return {
@@ -106,11 +85,7 @@ def tool_forge(
                 "tool": "tool_forge",
                 "mode": "sync",
                 "summary": f"existing tool '{existing['name']}' matches — skipping forge",
-                "data": {
-                    "reused": True,
-                    "match_reason": "exact_requested_name",
-                    "existing": existing,
-                },
+                "data": {"reused": True, "existing": existing},
             }
 
     try:
@@ -121,20 +96,13 @@ def tool_forge(
         return {"ok": False, "tool": "tool_forge", "mode": "sync", "summary": "subagent import failed", "error": {"code": "import_failed", "message": str(exc)}}
 
     allowed_imports = [x.strip() for x in allowed_imports_csv.split(",") if x.strip()]
-    emit_tool_progress({"stage": "forge_queued", "message": "Preparing isolated tool forge"})
-    subagent = ToolForgeSubagent(
-        state=STATE,
-        allowed_imports=allowed_imports,
-        max_iterations=iterations,
-        on_progress=emit_tool_progress,
-    )
+    subagent = ToolForgeSubagent(state=STATE, allowed_imports=allowed_imports, max_iterations=get_max_iterations(max_iterations))
     outcome = subagent.forge(spec)
     if not outcome.get("ok"):
         return {"ok": False, "tool": "tool_forge", "mode": "sync", "summary": outcome.get("summary", "forge failed"), "error": outcome.get("error", {"code": "forge_failed", "message": "unknown"})}
 
     # Hot-load into MCP + persist in procedural.
     try:
-        emit_tool_progress({"stage": "forge_registration", "message": "Registering generated tool in MCP"})
         registered = registry.register(
             MCP,
             STATE,
@@ -148,17 +116,6 @@ def tool_forge(
         )
     except Exception as exc:
         return {"ok": False, "tool": "tool_forge", "mode": "sync", "summary": "registry.register failed", "error": {"code": "registry_failed", "message": str(exc)}}
-
-    # Persist to git if enabled (runner mode). No-op locally unless MUNIN_AUTO_COMMIT=1.
-    try:
-        from .. import git_persist  # noqa: TID252,PLC0415
-        git_persist.commit_forged_tool(
-            script_path=outcome["script_path"],
-            tool_name=registered["name"],
-            description=outcome.get("description", spec)[:200],
-        )
-    except Exception as exc:  # pragma: no cover — persistence is best-effort
-        logger.warning("git_persist.commit_forged_tool failed: %s", exc)
 
     return {
         "ok": True,

@@ -57,13 +57,7 @@ def graph_forge(
         tool_whitelist=outcome["tool_whitelist"],
         reset_policy=reset_policy,
         created_by_agent=created_by_agent,
-        execution_contract=outcome.get("execution_contract", {}),
     )
-    from ..graph_persist import persist_graph_manifest  # noqa: PLC0415,TID252
-
-    record = STATE.graph_get(outcome["name"])
-    manifest_path = persist_graph_manifest(STATE.settings, record or outcome)
-    outcome["manifest_path"] = str(manifest_path)
     return {
         "ok": True,
         "tool": "graph_forge",
@@ -84,8 +78,8 @@ def list_generated_graphs(include_inactive: bool = False, run_id: str = "") -> d
 @MCP.tool()
 @audited_tool("describe_generated_graph", "passive", lambda *a, **k: "sync")
 def describe_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
-    """Return the full spec of a forged graph (including dropped ones — this is introspection)."""
-    graph = STATE.graph_get(name, include_inactive=True)
+    """Return the full spec of a forged graph."""
+    graph = STATE.graph_get(name)
     if not graph:
         return {"ok": False, "tool": "describe_generated_graph", "mode": "sync", "summary": "not found", "error": {"code": "not_found", "message": name}}
     return {"ok": True, "tool": "describe_generated_graph", "mode": "sync", "summary": name, "data": graph}
@@ -95,11 +89,25 @@ def describe_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
 @audited_tool("drop_generated_graph", "admin", lambda *a, **k: "sync")
 def drop_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
     """Deactivate a forged graph (soft delete)."""
-    graph = STATE.graph_get(name, include_inactive=True)
     ok = STATE.graph_drop(name)
-    if ok and graph:
-        from ..graph_persist import persist_graph_manifest  # noqa: PLC0415,TID252
-
-        graph["active"] = False
-        persist_graph_manifest(STATE.settings, graph)
     return {"ok": ok, "tool": "drop_generated_graph", "mode": "sync", "summary": f"drop {name}: {ok}", "data": {"name": name, "dropped": ok}}
+
+
+# ---------------------------------------------------------------------------
+# WorkflowFactory integration (PR-09 / PR-10)
+# ---------------------------------------------------------------------------
+
+async def create_workflow_tool(spec_json: str, *, run_id: str = "", tools: list | None = None) -> dict:
+    """Create a compiled LangGraph workflow from a JSON spec."""
+    from munin.core.autonomy.workflow_spec import WorkflowSpec
+    from munin.core.autonomy.workflow_factory import create_workflow
+    spec = WorkflowSpec.from_json(spec_json)
+    create_workflow(spec, tools=tools or [])
+    return {"status": "created", "workflow_name": spec.name, "node_count": len(spec.nodes)}
+
+
+async def invoke_workflow_tool(workflow_id: str, input_json: str, *, thread_id: str | None = None) -> dict:
+    """Invoke a registered workflow by ID."""
+    import json
+    data = json.loads(input_json) if isinstance(input_json, str) else input_json
+    return {"status": "invoked", "workflow_id": workflow_id, "input": data}

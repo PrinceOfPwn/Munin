@@ -1,666 +1,130 @@
-# Munin Live Session — GitHub Actions runner with Kali offensive toolchain.
-#
-# Runs on ubuntu-latest but executes Munin INSIDE a Kali rolling container.
-# The rolling container is intentionally minimal, so the workflow installs and
-# verifies Munin's offensive binaries before the server is allowed to start.
-#
-# Design decisions:
-#   - Runner OS = ubuntu-latest (only supported by GitHub Actions for now).
-#   - Job container = kalilinux/kali-rolling (offensive toolchain baked in).
-#   - Mock LDAP runs as a SERVICE container so both are on the same job network.
-#   - Poetry runs INSIDE the Kali container (installed on first step).
-#   - Public tunnel via localhost.run / cloudflared → open_tunnel.sh handles fallback.
-#
-# Manual trigger only. Duration configurable per-run (max 55 min — hard capped by
-# GitHub free-tier 6h job limit but we self-cap for safety).
+name: Live session (manual)
 
-name: Munin Live Session
+# Runs a Munin end-to-end session against the LangGraph supervisor and
+# uploads run artifacts. Manual dispatch only — never auto-triggers.
+#
+# Requires repository secrets:
+#   LLM_BASE_URL, LLM_API_KEY, LLM_MODEL
 
 on:
   workflow_dispatch:
     inputs:
-      duration_minutes:
-        description: "Session duration in minutes (max 240 — 4h on paid runners, 55 free)"
+      goal:
+        description: "Goal / prompt to execute"
         required: true
-        default: "60"
-        type: number
-      preflight_policy:
-        description: "OPSEC preflight policy"
-        required: true
-        default: "off"
-        type: choice
-        options:
-          - "off"
-          - "active_only"
-          - "always"
-      munin_max_iterations:
-        description: "MUNIN_MAX_ITERATIONS — leave blank for no cap"
-        required: false
-        default: ""
         type: string
-      persist_state:
-        description: "Roundtrip shared_state.sqlite via artifact (soul + memory + forge state)"
-        required: true
-        default: true
-        type: boolean
-      open_public_tunnel:
-        description: "Expose the authenticated MCP through a temporary public tunnel"
-        required: true
-        default: false
-        type: boolean
-      tunnel_provider:
-        description: "Tunnel provider: auto prefers configured ngrok, then cloudflared, then localhost.run"
-        required: true
-        default: "auto"
-        type: choice
-        options:
-          - "auto"
-          - "ngrok"
-          - "cloudflared"
-          - "localhost-run"
-          - "all"
-      open_web_gui:
-        description: "Launch the Next.js GUI and expose a temporary website"
-        required: true
-        default: true
-        type: boolean
-
-# Required so Munin can commit forged tools + open soul-proposal PRs.
-permissions:
-  actions: read
-  contents: write
-  pull-requests: write
+      max_iterations:
+        description: "Max supervisor iterations"
+        required: false
+        default: "20"
+        type: string
+      timeout_minutes:
+        description: "Total workflow timeout (max 240)"
+        required: false
+        default: "60"
+        type: string
+      preflight_policy:
+        description: "Munin preflight policy (lab/prod/off)"
+        required: false
+        default: "lab"
+        type: string
 
 jobs:
-  munin:
-    name: "Munin session (${{ inputs.duration_minutes }}min · Kali)"
+  live-session:
+    name: Live Munin session
     runs-on: ubuntu-latest
-    # v3: bumped to 4h so an operator can drive a long-running investigation.
-    # The runner still self-caps below to duration_minutes; this is only the
-    # outer safety ceiling.  Free-tier runners are hard-capped at 6h anyway,
-    # so 240min leaves head-room for teardown/artifact upload.
     timeout-minutes: 240
-
-    # We run as root inside the container (Kali's default) so installed
-    # offensive binaries can bind raw sockets when a graph authorizes it.
-    container:
-      image: kalilinux/kali-rolling
-      options: --user root
-
-    # Isolated LDAP + Apache fixtures are exposed only on the job network.
-    services:
-      ldap:
-        image: osixia/openldap:1.5.0
-        env:
-          LDAP_ORGANISATION: "AKATSUKI"
-          LDAP_DOMAIN: "akatsuki.com"
-          LDAP_BASE_DN: "dc=akatsuki,dc=com"
-          LDAP_ADMIN_PASSWORD: "itachi"
-          LDAP_CONFIG_PASSWORD: "itachi"
-          LDAP_TLS: "false"
-        ports:
-          - 389:389
-      apache:
-        image: httpd:2.4.49
+    concurrency:
+      group: live-session
+      cancel-in-progress: false
 
     env:
-      # LLM
-      LLM_BASE_URL:         ${{ secrets.LLM_BASE_URL }}
-      LLM_API_KEY:          ${{ secrets.LLM_API_KEY }}
-      LLM_MODEL:            ${{ secrets.LLM_MODEL }}
-      # MCP
-      MUNIN_MCP_AUTH_TOKEN: ${{ secrets.MUNIN_MCP_AUTH_TOKEN }}
-      # LDAP — the service container is reachable as hostname `ldap` on the job network
-      LDAP_URI:      "ldap://ldap:389"
-      LDAP_BASE_DN:  "dc=akatsuki,dc=com"
-      LDAP_BIND_DN:  "cn=admin,dc=akatsuki,dc=com"
-      LDAP_PASSWORD: "itachi"
-      # OPSEC + timeouts
-      PREFLIGHT_POLICY:     ${{ inputs.preflight_policy }}
-      LLM_TIMEOUT_FLOOR:    "40"
-      LLM_TIMEOUT_CEILING:  "240"
-      LLM_RETRY_ATTEMPTS:   "5"
-      LLM_RETRY_BASE_DELAY: "5"
-      LLM_RETRY_MAX_DELAY:  "60"
-      # Iteration budget — blank string means "no cap" (agent uses HARD_CEILING)
-      MUNIN_MAX_ITERATIONS: ${{ inputs.munin_max_iterations }}
-      MUNIN_LOG_LEVEL:      "INFO"
-      # Persistence knobs — auto-commit forged tools, open PR for soul edits.
-      MUNIN_AUTO_COMMIT:  "1"
-      MUNIN_AUTO_PR:      "1"
-      MUNIN_GIT_USER:     "munin-bot"
-      MUNIN_GIT_EMAIL:    "munin-bot@users.noreply.github.com"
-      MUNIN_GIT_BRANCH:   "munin/session-${{ github.run_id }}"
-      MUNIN_PR_BASE_BRANCH: ${{ github.ref_name }}
-      MUNIN_INSTANCE_ID:  "github-run-${{ github.run_id }}-${{ github.run_attempt }}"
-      GH_TOKEN:           ${{ github.token }}
-      # Storage backend. Leave MUNIN_DB_URL empty to use local SQLite (default,
-      # ephemeral across sessions unless persist_state=true rounds it via
-      # artifact). Set it as a repo secret if you want to point at a Turso /
-      # libsql cloud database for true persistent multi-session state.
-      MUNIN_DB_URL:       ${{ secrets.MUNIN_DB_URL }}
-      MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
-      # Isolated test key when no deployment KEK is configured. It encrypts
-      # only the temporary Production Suite namespace used by this session.
-      MUNIN_MASTER_KEY:   ${{ secrets.MUNIN_MASTER_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' }}
-      MUNIN_ALLOWED_ORIGINS: "http://127.0.0.1:3000"
-      MUNIN_COOKIE_SECURE: "1"
-      MUNIN_PRODUCTION_API_URL: "http://127.0.0.1:8787"
-      MUNIN_PRODUCTION_PROXY_ORIGIN: "http://127.0.0.1:3000"
-      # v3: long-running run stream configuration.
-      # * MAX_SECONDS bounds a single SSE connection lifetime (4h).
-      # * HEARTBEAT_SECONDS keeps the pipe warm through idle proxies.
-      MUNIN_SSE_MAX_SECONDS: "14400"
-      MUNIN_SSE_HEARTBEAT_SECONDS: "20"
-      NGROK_AUTH_TOKEN:   ${{ secrets.NGROK_AUTH_TOKEN }}
-      MUNIN_TUNNEL_PROVIDER: ${{ inputs.tunnel_provider }}
-      # DEBIAN_FRONTEND avoids interactive prompts during apt-get inside Kali
-      DEBIAN_FRONTEND: noninteractive
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      MUNIN_LANGGRAPH_URL: "http://localhost:8123"
+      MUNIN_LANGGRAPH_PORT: "8123"
+      MUNIN_DB_PATH: "data/munin-ci.db"
+      PREFLIGHT_POLICY: ${{ inputs.preflight_policy }}
 
     steps:
-      # fetch-depth: 0 = full history — needed so we can create branches and
-      # push new commits (soul PRs, forged tool commits). token defaults to
-      # the auto GITHUB_TOKEN with the permissions declared at the workflow
-      # level above (contents: write, pull-requests: write).
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: "3.11"
 
-      # Turso persists registry rows, but generated Python/JSON sources still
-      # need to cross ephemeral runner boundaries. Restore the full durable
-      # file set in both SQLite and Turso modes.
-      - name: Restore Munin durable files from last session
-        if: ${{ inputs.persist_state }}
-        id: state_restore
-        continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: live-session.yml
-          workflow_conclusion: ""      # accept success or failure — we want the freshest state
-          name: munin-state
-          path: .
-          if_no_artifact_found: warn
-
-      - name: Show restored state summary
-        if: ${{ inputs.persist_state }}
+      - name: Install Poetry
         run: |
-          if [ -f data/shared_state.sqlite ]; then
-              echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
-          fi
-          restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
-          echo "✓ Restored ${restored_sources} generated source file(s)"
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Install Munin runtime + offensive toolchain
-        run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends \
-              python3 python3-pip python3-venv python3-poetry \
-              ca-certificates curl git pipx ldap-utils nodejs npm \
-              build-essential libldap2-dev libsasl2-dev libssl-dev golang-go \
-              nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec \
-              httpx-toolkit exploitdb eyewitness
-          GH_VERSION="2.96.0"
-          GH_ARCHIVE="gh_${GH_VERSION}_linux_amd64.tar.gz"
-          curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${GH_ARCHIVE}"
-          curl -fsSLO "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt"
-          grep " ${GH_ARCHIVE}$" "gh_${GH_VERSION}_checksums.txt" | sha256sum -c -
-          tar -xzf "${GH_ARCHIVE}" -C /tmp
-          install "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
-          rm -f "${GH_ARCHIVE}" "gh_${GH_VERSION}_checksums.txt"
-          ln -s /usr/bin/httpx-toolkit /usr/local/bin/pd-httpx
-          if command -v eyewitness >/dev/null 2>&1 && ! command -v EyeWitness >/dev/null 2>&1; then
-              ln -s "$(command -v eyewitness)" /usr/local/bin/EyeWitness
-          fi
-          if ! command -v katana >/dev/null 2>&1; then
-              GOBIN=/usr/local/bin go install github.com/projectdiscovery/katana/cmd/katana@latest
-          fi
-          if ! command -v poetry >/dev/null 2>&1; then
-              pipx install poetry
-              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          fi
-          poetry --version
+      - name: Install project
+        run: poetry install --no-interaction
 
-      - name: Verify offensive toolchain is present
+      - name: Generate LangGraph API key
+        id: keygen
         run: |
-          echo "── Required runner binaries ──"
-          missing=0
-          for bin in curl nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec katana pd-httpx searchsploit EyeWitness; do
-              if command -v "$bin" >/dev/null 2>&1; then
-                  printf "  \033[32m✓\033[0m %-14s → %s\n" "$bin" "$(command -v "$bin")"
-              else
-                  printf "  \033[31m✗\033[0m %-14s (required)\n" "$bin"
-                  missing=$((missing + 1))
-              fi
+          KEY=$(poetry run python scripts/langgraph_generate_key.py)
+          echo "::add-mask::$KEY"
+          echo "LANGGRAPH_API_KEY=$KEY" >> $GITHUB_ENV
+
+      - name: Start LangGraph server
+        run: |
+          mkdir -p logs data
+          poetry run langgraph dev --port 8123 > logs/langgraph.log 2>&1 &
+          echo "LANGGRAPH_PID=$!" >> $GITHUB_ENV
+
+      - name: Wait for LangGraph health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8123/ok >/dev/null 2>&1 \
+               || curl -fsS http://localhost:8123/health >/dev/null 2>&1; then
+              echo "LangGraph server is up"
+              exit 0
+            fi
+            sleep 2
           done
-          if [ "$missing" -ne 0 ]; then
-              echo "::error::${missing} required offensive binaries are missing"
-              exit 1
-          fi
-          # Prime nuclei templates so the first tool call doesn't have to.
-          nuclei -silent -ut 2>/dev/null || true
-
-      - name: Install Munin
-        run: |
-          poetry config virtualenvs.in-project true
-          poetry install --no-interaction --no-ansi
-
-      - name: Require online Turso configuration
-        run: |
-          test -n "$MUNIN_DB_URL"
-          test -n "$MUNIN_DB_AUTH_TOKEN"
-          case "$MUNIN_DB_URL" in libsql://*|libsqls://*) ;; *) exit 1 ;; esac
-
-      - name: Verify Turso online persistence
-        run: poetry run python scripts/turso_smoke.py
-
-      - name: Wait for mock LDAP
-        run: |
-          echo "Waiting for LDAP service container..."
-          for i in $(seq 1 30); do
-              if ldapsearch -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
-                  -b "$LDAP_BASE_DN" "(objectClass=*)" dn 2>/dev/null | grep -q "result: 0"; then
-                  echo "LDAP ready after ${i}s"
-                  break
-              fi
-              sleep 1
-          done
-
-      - name: Seed mock LDAP data
-        run: |
-          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
-              -f scripts/ldap_mock.ldif 2>&1 | tail -20 || true
-          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
-              -f scripts/ldap_seed/60-web-lab.ldif
-
-      - name: Wait for isolated Apache fixture
-        run: |
-          for i in $(seq 1 30); do
-              if curl -fsSI http://apache:80/ >/dev/null; then
-                  echo "Apache ready after ${i}s"
-                  exit 0
-              fi
-              sleep 1
-          done
-          echo "::error::Apache fixture did not become ready" >&2
+          echo "LangGraph server failed to start"
+          tail -100 logs/langgraph.log || true
           exit 1
 
-      - name: Start Munin MCP server
+      - name: Heartbeat (background)
         run: |
-          mkdir -p data soul
-          MCP_HOST="127.0.0.1"
-          if [ "${{ inputs.open_public_tunnel }}" = "true" ]; then
-              MCP_HOST="0.0.0.0"
-          fi
-          nohup env PYTHONUNBUFFERED=1 RUNNER_TRACKING_ID="" poetry run munin mcp \
-              --transport streamable-http --host "$MCP_HOST" --port 8890 \
-              </dev/null > /tmp/munin.log 2>&1 &
-          echo $! > /tmp/munin.pid
-          sleep 2
-          if ! kill -0 "$(cat /tmp/munin.pid)" 2>/dev/null; then
-              echo "::error::munin failed to start — dumping log"
-              cat /tmp/munin.log
-              exit 1
-          fi
-
-      - name: Verify Munin MCP is answering
-        run: |
-          python3 - <<'PY'
-          import json, os, sys, time, urllib.error, urllib.request
-
-          url = 'http://localhost:8890/mcp'
-          token = os.environ.get('MUNIN_MCP_AUTH_TOKEN', '')
-          deadline = time.monotonic() + 90
-          session_id = ''
-          last_error = None
-          while time.monotonic() < deadline:
-              req_init = urllib.request.Request(
-                  url,
-                  data=json.dumps({
-                      'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
-                      'params': {
-                          'protocolVersion': '2024-11-05',
-                          'capabilities': {},
-                          'clientInfo': {'name': 'ci-verifier', 'version': '1.0'},
-                      },
-                  }).encode(),
-                  headers={
-                      'Content-Type': 'application/json',
-                      'Accept': 'application/json, text/event-stream',
-                      'Authorization': f'Bearer {token}',
-                  },
-              )
-              try:
-                  with urllib.request.urlopen(req_init, timeout=15) as resp:
-                      session_id = resp.headers.get('mcp-session-id', '')
-                  if session_id:
-                      break
-                  last_error = RuntimeError('no mcp-session-id in initialize response')
-              except (urllib.error.URLError, TimeoutError) as exc:
-                  last_error = exc
-              time.sleep(2)
-          if not session_id:
-              print(f'::error::MCP not ready after 90s: {last_error}', file=sys.stderr)
-              try:
-                  print(open('/tmp/munin.log', encoding='utf-8', errors='replace').read(), file=sys.stderr)
-              except OSError:
-                  pass
-              sys.exit(1)
-          rpc_headers = {
-                  'Content-Type': 'application/json',
-                  'Accept': 'application/json, text/event-stream',
-                  'Authorization': f'Bearer {token}',
-                  'mcp-session-id': session_id,
-          }
-
-          def rpc(request_id, method, params, timeout=30):
-              request = urllib.request.Request(
-                  url,
-                  data=json.dumps({
-                      'jsonrpc': '2.0',
-                      'id': request_id,
-                      'method': method,
-                      'params': params,
-                  }).encode(),
-                  headers=rpc_headers,
-              )
-              with urllib.request.urlopen(request, timeout=timeout) as resp:
-                  lines = resp.read().decode().splitlines()
-              for line in lines:
-                  if line.startswith('data: '):
-                      return json.loads(line[6:])
-              raise RuntimeError(f'no data line in {method} response')
-
-          tool_message = rpc(2, 'tools/list', {})
-          tools = tool_message.get('result', {}).get('tools', [])
-          tool_names = {tool.get('name') for tool in tools}
-          required_tools = {
-              'nmap_scan', 'httpx_probe', 'nuclei_scan', 'feroxbuster_scan',
-              'ffuf_scan', 'katana_crawl', 'hydra_attack', 'sqlmap_scan',
-              'smbmap_scan', 'netexec_scan', 'munin_diagnostics',
-          }
-          missing_tools = sorted(required_tools - tool_names)
-          if missing_tools:
-              print(f'::error::missing MCP tools: {missing_tools}', file=sys.stderr)
-              sys.exit(1)
-          print(f'OK — {len(tools)} tools registered; offensive tool surface complete')
-
-          nmap_message = rpc(
-              3,
-              'tools/call',
-              {
-                  'name': 'nmap_scan',
-                  'arguments': {
-                      'target': 'ldap',
-                      'scan_type': '-sT',
-                      'ports': '389',
-                      'additional_args': '-Pn',
-                      'mode': 'sync',
-                      'timeout': 60,
-                      'run_id': f'ci-nmap-{os.environ.get("GITHUB_RUN_ID", "manual")}',
-                  },
-              },
-              timeout=90,
-          )
-          nmap_rendered = json.dumps(nmap_message, ensure_ascii=False)
-          if (
-              nmap_message.get('error')
-              or nmap_message.get('result', {}).get('isError')
-              or 'missing_dependency' in nmap_rendered
-              or '389/tcp' not in nmap_rendered
-          ):
-              print(f'::error::nmap MCP smoke failed: {nmap_rendered}', file=sys.stderr)
-              sys.exit(1)
-          print('OK — nmap_scan executed through MCP against the authorized LDAP service')
-          PY
-
-      - name: Exercise full MCP lab contract
-        run: poetry run python scripts/ci_live_smoke.py --require-turso
-
-      - name: Start Production Suite API and worker
-        if: ${{ inputs.open_web_gui }}
-        run: |
-          nohup poetry run munin production-api --host 127.0.0.1 --port 8787 \
-            </dev/null > /tmp/munin-production-api.log 2>&1 &
-          echo $! > /tmp/munin-production-api.pid
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
-              break
-            fi
-            if ! kill -0 "$(cat /tmp/munin-production-api.pid)" 2>/dev/null; then
-              echo "::error::Production Suite API exited during startup"
-              cat /tmp/munin-production-api.log
-              exit 1
-            fi
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:8787/health >/dev/null
-          nohup poetry run munin production-worker --poll-seconds 2 \
-            </dev/null > /tmp/munin-production-worker.log 2>&1 &
-          echo $! > /tmp/munin-production-worker.pid
-
-      - name: Build and start Munin web GUI
-        if: ${{ inputs.open_web_gui }}
-        working-directory: app
-        env:
-          NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN: "1"
-          MUNIN_GUI_SERVER_AUTH_PROXY: "1"
-        run: |
-          npm ci --no-audit
-          npm run build
-          nohup env RUNNER_TRACKING_ID="" NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN=1 MUNIN_GUI_SERVER_AUTH_PROXY=1 \
-              npm run start -- --hostname 0.0.0.0 --port 3000 \
-              </dev/null > /tmp/munin-gui.log 2>&1 &
-          echo $! > /tmp/munin-gui.pid
-          for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:3000/ >/dev/null; then
-                  echo "Munin GUI ready after ${i}s"
-                  break
-              fi
-              if ! kill -0 "$(cat /tmp/munin-gui.pid)" 2>/dev/null; then
-                  echo "::error::Munin GUI exited during startup"
-                  cat /tmp/munin-gui.log
-                  exit 1
-              fi
-              sleep 1
-          done
-          curl -fsS http://127.0.0.1:3000/ >/dev/null
-
-      - name: Verify GUI same-origin MCP proxy
-        if: ${{ inputs.open_web_gui }}
-        run: MUNIN_SMOKE_BASE_URL=http://127.0.0.1:3000 poetry run python scripts/ci_live_smoke.py --proxy-only --require-turso
-
-      - name: Open MCP public tunnel
-        if: ${{ inputs.open_public_tunnel }}
-        run: |
-          PROVIDER="${{ inputs.tunnel_provider }}"
-          if [ "$PROVIDER" = "all" ]; then PROVIDER="ngrok"; fi
-          MUNIN_TUNNEL_PROVIDER="$PROVIDER" bash scripts/open_tunnel.sh 8890 MUNIN_PUBLIC_URL /tmp/mcp-tunnel.log
-
-      - name: Open GUI public tunnel(s)
-        if: ${{ inputs.open_web_gui }}
-        run: |
-          PROVIDER="${{ inputs.tunnel_provider }}"
-          if [ "$PROVIDER" != "all" ]; then
-            MUNIN_TUNNEL_PROVIDER="$PROVIDER" bash scripts/open_tunnel.sh 3000 MUNIN_GUI_URL /tmp/gui-tunnel.log
-            exit 0
-          fi
-          for candidate in ngrok cloudflared localhost-run; do
-            suffix=$(echo "$candidate" | tr '[:lower:]-' '[:upper:]_')
-            env_name="MUNIN_GUI_${suffix}_URL"
-            if ! MUNIN_TUNNEL_PROVIDER="$candidate" bash scripts/open_tunnel.sh 3000 "$env_name" "/tmp/gui-${candidate}.log"; then
-              echo "::warning::${candidate} GUI tunnel was unavailable; continuing with the other providers"
-            fi
-          done
-
-      - name: Print connection info
-        if: ${{ inputs.open_public_tunnel || inputs.open_web_gui }}
-        run: |
-          GUI_URL="${MUNIN_GUI_URL:-${MUNIN_GUI_NGROK_URL:-${MUNIN_GUI_CLOUDFLARED_URL:-${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}}}}"
-          MCP_URL="${MUNIN_PUBLIC_URL:-${MUNIN_GUI_URL:-http://localhost:8890}}"
-          echo "GUI URL: ${GUI_URL}"
-          echo "GUI ngrok URL: ${MUNIN_GUI_NGROK_URL:-not requested}"
-          echo "GUI Cloudflare URL: ${MUNIN_GUI_CLOUDFLARED_URL:-not requested}"
-          echo "GUI localhost.run URL: ${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}"
-          echo "MCP URL: ${MCP_URL}"
-          echo "Token: configured as repository secret (not printed)"
-          cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
-          ## Munin — live session
-
-          | | |
-          |---|---|
-          | **Web GUI** | \`${GUI_URL}\` |
-          | **GUI via ngrok** | \`${MUNIN_GUI_NGROK_URL:-not requested}\` |
-          | **GUI via Cloudflare** | \`${MUNIN_GUI_CLOUDFLARED_URL:-not requested}\` |
-          | **GUI via localhost.run** | \`${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}\` |
-          | **MCP URL** | \`${MCP_URL}\` |
-          | **GUI authentication** | Server-side proxy enabled for this temporary session; the browser never receives the token |
-          | **MCP authentication** | Bearer token from the \`MUNIN_MCP_AUTH_TOKEN\` repository secret |
-          | **Duration** | ${{ inputs.duration_minutes }} min |
-          | **Preflight** | \`${{ inputs.preflight_policy }}\` |
-          | **Max iterations** | \`${MUNIN_MAX_ITERATIONS:-unbounded}\` |
-          | **Runner** | \`kalilinux/kali-rolling\` (offensive toolchain installed and verified) |
-
-          Quick test:
-          \`\`\`bash
-          HEADERS=\$(mktemp)
-          curl -sS -D "\${HEADERS}" -o /tmp/munin-init.json -X POST ${MCP_URL}/mcp/ \\
-              -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
-              -H "Content-Type: application/json" \\
-              -H "Accept: application/json, text/event-stream" \\
-              -d '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"munin-smoke","version":"1.0"}}}'
-          SESSION_ID=\$(awk 'tolower(\$1)=="mcp-session-id:" {gsub("\\r","",\$2); print \$2}' "\${HEADERS}")
-          curl -sS -X POST ${MCP_URL}/mcp/ \\
-              -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
-              -H "Content-Type: application/json" \\
-              -H "Accept: application/json, text/event-stream" \\
-              -H "mcp-session-id: \${SESSION_ID}" \\
-              -d '{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}'
-          \`\`\`
-          SUMMARY
-
-      - name: Keep session alive
-        # v3: self-cap at 240 minutes (matches timeout-minutes above).  A
-        # heartbeat is emitted every 5 minutes so GitHub Actions doesn't
-        # mark the job as "no output for 60m" and kill it prematurely.
-        # Long-running: the runner has 4h wall clock.  The Turso store
-        # persists across runner restarts.  If a run needs longer, reconnect
-        # a new tunnel and rehydrate — no data is lost.
-        run: |
-          MINS=${{ inputs.duration_minutes }}
-          if [ "$MINS" -gt 240 ]; then MINS=240; fi
-          END=$(( $(date +%s) + MINS * 60 ))
-          # Background keep-alive so GHA sees output every 5 minutes.
           (
-            while [ "$(date +%s)" -lt "$END" ]; do
-              echo "[munin][keep-alive] $(date -u +%FT%TZ) — $(( (END - $(date +%s)) / 60 ))m remaining"
-              # Also poll the production API health so a silent crash surfaces fast.
-              if ! curl -fsS http://127.0.0.1:8787/health >/dev/null; then
-                echo "::warning::production API health check failed"
-              fi
-              sleep 300
+            while true; do
+              echo "[heartbeat] $(date -u +%FT%TZ)"
+              sleep 60
             done
           ) &
-          KEEPALIVE_PID=$!
-          # Foreground wait — sleep releases when the whole duration elapses.
-          while [ "$(date +%s)" -lt "$END" ]; do
-            sleep 30
-          done
-          kill "$KEEPALIVE_PID" 2>/dev/null || true
+          echo "HEARTBEAT_PID=$!" >> $GITHUB_ENV
 
-      - name: Munin server logs (tail)
+      - name: Run Munin session
+        timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+        run: |
+          set -o pipefail
+          echo "${{ inputs.goal }}" | \
+            poetry run munin run --max-iterations ${{ inputs.max_iterations }} \
+            2>&1 | tee logs/session.log
+
+      - name: Stop heartbeat + LangGraph
         if: always()
         run: |
-          echo "── /tmp/munin.log (tail 100) ──"
-          tail -100 /tmp/munin.log 2>/dev/null || echo "(no log)"
-          echo "── /tmp/munin-gui.log (tail 100) ──"
-          tail -100 /tmp/munin-gui.log 2>/dev/null || echo "(no GUI log)"
-          echo "── /tmp/munin-production-api.log (tail 100) ──"
-          tail -100 /tmp/munin-production-api.log 2>/dev/null || echo "(no production API log)"
-          echo "── /tmp/munin-production-worker.log (tail 100) ──"
-          tail -100 /tmp/munin-production-worker.log 2>/dev/null || echo "(no worker log)"
-          echo "── /tmp/mcp-tunnel.log ──"
-          cat /tmp/mcp-tunnel.log 2>/dev/null || echo "(no MCP tunnel log)"
-          echo "── /tmp/gui-tunnel.log ──"
-          cat /tmp/gui-tunnel.log 2>/dev/null || echo "(no GUI tunnel log)"
-          echo "── production API health snapshot ──"
-          curl -fsS http://127.0.0.1:8787/health 2>&1 || echo "(production API unreachable)"
+          kill $HEARTBEAT_PID 2>/dev/null || true
+          kill $LANGGRAPH_PID 2>/dev/null || true
 
-      # Runners are detached process-group leaders. Stop and await them before
-      # MCP flushes git/Turso and before SQLite artifacts are snapshotted.
-      - name: Stop detached subagents
+      - name: Upload artifacts
         if: always()
-        run: poetry run python -m munin.subagents.process_control --timeout 15
-
-      # Gracefully stop MCP so SQLite flushes WAL and pending git-persist
-      # commits ship. If the process is stuck we SIGKILL after 15s.
-      - name: Stop Munin cleanly
-        if: always()
-        run: |
-          GUI_PID=$(cat /tmp/munin-gui.pid 2>/dev/null || echo "")
-          if [ -n "$GUI_PID" ] && kill -0 "$GUI_PID" 2>/dev/null; then
-              kill -TERM "$GUI_PID" 2>/dev/null || true
-          fi
-          PID=$(cat /tmp/munin.pid 2>/dev/null || echo "")
-          if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-              kill -TERM "$PID"
-              for i in $(seq 1 15); do
-                  kill -0 "$PID" 2>/dev/null || break
-                  sleep 1
-              done
-              kill -KILL "$PID" 2>/dev/null || true
-          fi
-
-      # Force one last git push in case the in-process git_persist worker had
-      # anything queued. Defensive — the worker already runs before SIGTERM,
-      # but a partial batch could still be sitting for a couple seconds.
-      - name: Final git push (forged artifacts)
-        if: always() && env.MUNIN_AUTO_COMMIT == '1'
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          if [ -n "$(git status --porcelain)" ]; then
-              git config user.name  "${MUNIN_GIT_USER}"
-              git config user.email "${MUNIN_GIT_EMAIL}"
-              git add munin/generated/ soul/ data/soul_pending/ 2>/dev/null || true
-              if ! git diff --staged --quiet; then
-                  git commit -m "[munin][session-end] flush pending forge artifacts (${GITHUB_RUN_ID})" || true
-              fi
-          fi
-          git checkout -B "${MUNIN_GIT_BRANCH}" 2>/dev/null || true
-          git push -u origin "${MUNIN_GIT_BRANCH}" || echo "final push failed (non-fatal)"
-
-      # Turso stores rows; this artifact stores the generated Python/JSON
-      # sources those rows reference. In SQLite mode it also carries the DB.
-      - name: Upload Munin durable state and generated sources
-        if: always() && inputs.persist_state
-        # Turso is now authoritative for graphs, memory, and generated Python.
-        # Artifact quota exhaustion must not turn an otherwise-valid session red.
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: munin-state
+          name: munin-live-session-${{ github.run_id }}
           path: |
-            data/shared_state.sqlite
-            data/shared_state.sqlite-wal
-            data/shared_state.sqlite-shm
-            data/soul_pending/
-            data/wake_artifacts/
-            munin/generated/
-          retention-days: 90
+            logs/
+            data/
+            evidence/
+            runs/
+            reports/
+          retention-days: 14
           if-no-files-found: warn
-
-      - name: Upload full logs as artifact
-        # A Turso-only live session must leave no conversation or tool output in
-        # an Actions artifact. GitHub's own job log remains available for the
-        # operator while the run is retained.
-        if: always() && inputs.persist_state
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: munin-session-${{ github.run_id }}
-          path: |
-            /tmp/munin.log
-            /tmp/munin-gui.log
-            /tmp/mcp-tunnel.log
-            /tmp/gui-tunnel.log
-            data/events.jsonl
-          retention-days: 7

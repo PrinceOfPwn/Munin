@@ -83,12 +83,7 @@ class Memory:
         if graphs:
             lines.append("\n## Forged ReAct subagents (invoke via `munin_wake(name, task_json)`)")
             for g in graphs:
-                contract = g.get("execution_contract", {}) or {}
-                contexts = contract.get("context_sources", []) if isinstance(contract, dict) else []
-                lines.append(
-                    f"- `{g['name']}` — {g.get('purpose', '')[:120]}  "
-                    f"tools={g.get('tool_whitelist', [])} evidence_context={contexts}"
-                )
+                lines.append(f"- `{g['name']}` — {g.get('purpose', '')[:120]}  tools={g.get('tool_whitelist', [])}")
         if not lines:
             return "## Toolbox\n(no generated tools or forged graphs yet — you may need to forge some)"
         return "\n".join(lines)

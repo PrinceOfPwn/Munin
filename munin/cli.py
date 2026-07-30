@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import click
-from dotenv import load_dotenv
 
 from .mcp.config import get_settings, redact_settings
 from .mcp.shared_state import SharedStateStore
@@ -22,7 +21,6 @@ logger = logging.getLogger("munin.cli")
 @click.group()
 def cli() -> None:
     """Munin — ReAct offensive-security agent with soul + memory + MCP."""
-    load_dotenv(override=False)
 
 
 # ---------------------------------------------------------------------------
@@ -32,8 +30,11 @@ def cli() -> None:
 @cli.command()
 @click.option("--max-iterations", default=8, show_default=True)
 def run(max_iterations: int) -> None:
-    """Interactive REPL. Each user line is one Munin turn."""
-    from .core.munin_agent import MuninAgent
+    """Interactive REPL. Each user line is one Munin turn (LangGraph supervisor)."""
+    import asyncio
+
+    from .core.runtime_adapter import supervisor_runner
+    from .mcp.tools import munin_tools as _munin_tools
 
     settings = get_settings()
     click.echo(f"Munin online — LLM={settings.llm_model or 'UNCONFIGURED'} base_url={settings.llm_base_url or 'UNCONFIGURED'}")
@@ -42,7 +43,32 @@ def run(max_iterations: int) -> None:
         click.echo("!! LLM_* env variables missing. Populate .env before running.", err=True)
         sys.exit(2)
 
-    agent = MuninAgent(settings)
+    store = SharedStateStore(settings)
+    tools = list(getattr(_munin_tools, "TOOLS", []))
+
+    async def _one_turn(prompt: str) -> str:
+        final_text = ""
+        async for event in supervisor_runner(
+            prompt,
+            run_id=f"cli-{id(prompt)}",
+            conversation_id="cli",
+            tools=tools,
+            store=store,
+            progress_sink=lambda e: None,
+            model=settings.llm_model,
+            system_prompt="",
+            max_iterations=max_iterations,
+        ):
+            if isinstance(event, dict) and event.get("event") == "on_chain_end":
+                data = event.get("data", {})
+                out = data.get("output")
+                if isinstance(out, dict) and "messages" in out and out["messages"]:
+                    last = out["messages"][-1]
+                    content = getattr(last, "content", last if isinstance(last, str) else "")
+                    if content:
+                        final_text = content
+        return final_text
+
     try:
         while True:
             user_line = click.prompt("you", type=str, default="", show_default=False)
@@ -51,8 +77,8 @@ def run(max_iterations: int) -> None:
             if user_line.strip().lower() in {"exit", "quit"}:
                 click.echo("bye.")
                 return
-            result = agent.respond(user_line.strip(), max_iterations=max_iterations)
-            click.echo(f"munin> {result['content']}")
+            reply = asyncio.run(_one_turn(user_line.strip()))
+            click.echo(f"munin> {reply}")
     except (KeyboardInterrupt, EOFError):
         click.echo("\ninterrupted.")
 
@@ -79,49 +105,19 @@ def mcp(transport: str, host: str, port: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# munin production-api
-# ---------------------------------------------------------------------------
-
-@cli.command("production-api")
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--port", default=8787, show_default=True, type=int)
-def production_api(host: str, port: int) -> None:
-    """Start the authenticated Turso-backed operator API."""
-    import uvicorn
-
-    from .production.asgi import app_from_environment
-
-    uvicorn.run(app_from_environment(), host=host, port=port, log_level="info")
-
-
-@cli.command("production-worker")
-@click.option("--poll-seconds", default=2.0, show_default=True, type=float)
-def production_worker(poll_seconds: float) -> None:
-    """Run the Turso-leased worker independently of browser/API lifetimes."""
-    from .production.dispatcher import ProductionDispatcher
-    from .production.store import ProductionStore
-
-    settings = get_settings()
-    if not settings.db_url.startswith(("libsql://", "libsqls://")):
-        raise click.ClickException("production worker requires authoritative MUNIN_DB_URL=libsql://...")
-    store = ProductionStore.for_settings(settings, master_key=ProductionStore.master_key_from_environment())
-    ProductionDispatcher(store, settings, worker_id=f"worker-{os.getpid()}").run_forever(poll_seconds=poll_seconds)
-
-
-# ---------------------------------------------------------------------------
 # munin subagent
 # ---------------------------------------------------------------------------
 
 @cli.command()
 @click.argument("name")
-@click.option("--sleep-after-idle", default=120, show_default=True)
-def subagent(name: str, sleep_after_idle: int) -> None:
-    """Run a subagent locally (equivalent to `python -m munin.subagents.runner <name>`)."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "munin.subagents.runner", name, "--sleep-after-idle", str(sleep_after_idle)],
-        check=False,
+def subagent(name: str) -> None:
+    """Deprecated: subprocess subagents were removed. Use start_async_task via MCP instead."""
+    click.echo(
+        "subagent subprocess mode was removed in v3.5. "
+        "Use the MCP tool `start_async_task` (LangGraph server) to invoke '{}'.".format(name),
+        err=True,
     )
-    sys.exit(proc.returncode)
+    sys.exit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +130,6 @@ def reset() -> None:
     """Reset Munin to its snapshot state (idempotent)."""
     from .core.soul import SoulManager
     from .mcp import registry
-    from .mcp.graph_persist import purge_resettable_graph_manifests
 
     settings = get_settings()
     state = SharedStateStore(settings)
@@ -142,7 +137,6 @@ def reset() -> None:
     # Purge generated tools + graphs.
     purged_tools = registry.purge_all(state)
     purged_graphs = state.graph_purge_on_reset()
-    purged_graph_manifests = purge_resettable_graph_manifests(settings)
 
     # Remove script files under generated/
     gen_dir: Path = settings.generated_tools_dir
@@ -157,7 +151,6 @@ def reset() -> None:
     with state._connect() as conn:  # intentional private access — reset is privileged
         conn.execute("DELETE FROM episodic")
         conn.execute("DELETE FROM semantic")
-        conn.execute("DELETE FROM agent_wake_queue")
 
     # Restore soul.
     soul = SoulManager(settings.munin_soul_path, settings.munin_data_path)
@@ -170,7 +163,6 @@ def reset() -> None:
     click.echo(json.dumps({
         "purged_tools": purged_tools,
         "purged_graphs": purged_graphs,
-        "purged_graph_manifests": purged_graph_manifests,
         "script_files_removed": files_removed,
         "soul": soul_report,
         "pending_cleared": pending_cleared,

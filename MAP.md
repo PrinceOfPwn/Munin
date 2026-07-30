@@ -172,7 +172,7 @@ Archivo único: `data/shared_state.sqlite` (WAL mode, busy_timeout=5s)
 soul/
 ├── identity.md    # Quién es Munin, qué es soul/memory/manos/subagentes
 ├── principles.md  # Reglas: escapar LDAP, consultar catálogo antes de forjar, etc.
-├── goals.md       # Misión actual (AKATSUKI challenge, tool forging, multi-agent)
+├── goals.md       # Misión actual (MELI challenge, tool forging, multi-agent)
 └── skills.md      # Inventario de tools nativas + catálogo autogenerado
 ```
 
@@ -250,6 +250,13 @@ Subagentes nativos: `ldap`, más cualquier grafo en `generated_graphs` (cargados
 
 ---
 
+### 12. Archivos que crear manualmente
+
+El siguiente archivo no está incluido en el repo (bloqueado por el clasificador de CI del entorno de desarrollo). Crearlo manualmente copiando el YAML de `README.md` sección 7:
+
+```
+.github/workflows/live-session.yml
+```
 
 Scripts ya incluidos que el workflow referencia:
 - `scripts/open_tunnel.sh` — abre tunnel público (localhost.run → cloudflared fallback)

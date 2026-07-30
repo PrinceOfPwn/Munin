@@ -2,19 +2,18 @@
 # Munin — Mock LDAP toggle
 # Usage: ./scripts/ldap_mock.sh {up|down|status|logs}
 #
-# Launches a test OpenLDAP server pre-seeded with users, service accounts, groups, and OUs
-# for offensive security scenarios (Kerberoastable accounts, AS-REP roasting, Domain Admins).
+# Levanta un OpenLDAP de prueba con usuarios, service accounts, grupos y OUs
+# pre-sembrados con escenarios ofensivos (Kerberoastable, AS-REP, Domain Admins).
 
 set -euo pipefail
 
 CONTAINER="munin_ldap_mock"
-IMAGE="osixia/openldap:1.5.0"
+IMAGE="bitnami/openldap:latest"
 HOST_PORT="${LDAP_MOCK_PORT:-389}"
-LDAP_ROOT="dc=akatsuki,dc=com"
+LDAP_ROOT="dc=meli,dc=com"
 ADMIN_PASS="itachi"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LDIF="$SCRIPT_DIR/ldap_mock.ldif"
-WEB_LAB_LDIF="$SCRIPT_DIR/ldap_seed/60-web-lab.ldif"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -47,27 +46,14 @@ _wait_ldap() {
     err "LDAP did not become ready after 30s — check: docker logs ${CONTAINER}"
 }
 
-_verify_populated() {
-    ldapsearch -H ldap://localhost:${HOST_PORT} -x \
-        -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
-        -b "${LDAP_ROOT}" "(ou=users)" dn 2>/dev/null | grep -q "ou=users"
-}
-
 _seed() {
     if [ ! -f "$LDIF" ]; then
         err "LDIF file not found: $LDIF"
     fi
-    if _verify_populated; then
-        log "Directory structure '${LDAP_ROOT}' already populated."
-        return 0
-    fi
     log "Seeding mock data from $(basename $LDIF) ..."
-    for seed_file in "$LDIF" "$WEB_LAB_LDIF"; do
-        [ -f "$seed_file" ] || continue
-        ldapadd -c -H ldap://localhost:${HOST_PORT} -x \
-            -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
-            -f "$seed_file" 2>&1 | grep -v "^$" || true
-    done
+    ldapadd -H ldap://localhost:${HOST_PORT} -x \
+        -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
+        -f "$LDIF" 2>&1 | grep -v "^$" || true
     log "Seed complete."
 }
 
@@ -77,30 +63,25 @@ cmd_up() {
     _require_docker
 
     if _container_running; then
-        if _verify_populated; then
-            log "Container '${CONTAINER}' is running and populated on port ${HOST_PORT}."
-            _print_env
-            return 0
-        else
-            log "Existing container lacks valid '${LDAP_ROOT}' base DN or entries. Recreating..."
-            docker rm -f "$CONTAINER" &>/dev/null || true
-        fi
-    elif _container_exists; then
-        log "Removing stale container before recreation..."
-        docker rm -f "$CONTAINER" &>/dev/null || true
+        log "Container '${CONTAINER}' is already running on port ${HOST_PORT}."
+        _print_env
+        return 0
     fi
 
-    log "Pulling ${IMAGE} and starting fresh container..."
-    docker run -d \
-        --name "$CONTAINER" \
-        -p "${HOST_PORT}:389" \
-        -e LDAP_ORGANISATION="AKATSUKI" \
-        -e LDAP_DOMAIN="akatsuki.com" \
-        -e LDAP_BASE_DN="${LDAP_ROOT}" \
-        -e LDAP_ADMIN_PASSWORD="${ADMIN_PASS}" \
-        -e LDAP_CONFIG_PASSWORD="${ADMIN_PASS}" \
-        -e LDAP_TLS="false" \
-        "$IMAGE"
+    if _container_exists; then
+        log "Restarting existing container..."
+        docker start "$CONTAINER"
+    else
+        log "Pulling ${IMAGE} and starting container..."
+        docker run -d \
+            --name "$CONTAINER" \
+            -p "${HOST_PORT}:1389" \
+            -e LDAP_ROOT="${LDAP_ROOT}" \
+            -e LDAP_ADMIN_USERNAME="admin" \
+            -e LDAP_ADMIN_PASSWORD="${ADMIN_PASS}" \
+            -e LDAP_SKIP_DEFAULT_TREE="yes" \
+            "$IMAGE"
+    fi
 
     _wait_ldap
     _seed
@@ -165,11 +146,11 @@ _print_env() {
     echo "    LDAP_BIND_DN=cn=admin,${LDAP_ROOT}"
     echo "    LDAP_PASSWORD=${ADMIN_PASS}"
     echo ""
-    echo "  Mock accounts:"
-    echo "    jdoe / asmith / rgarcia / mlopez — standard domain users"
+    echo "  Mock users:"
+    echo "    jdoe / asmith / rgarcia / mlopez — usuarios normales"
     echo "    administrator               — Domain Admin"
-    echo "    htarget                     — AS-REP Roastable account"
-    echo "    svc_backup / svc_mssql / svc_http / svc_jenkins — Kerberoastable service accounts"
+    echo "    htarget                     — AS-REP Roastable (simulado)"
+    echo "    svc_backup / svc_mssql / svc_http / svc_jenkins — Kerberoastable"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
