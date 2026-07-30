@@ -1,31 +1,28 @@
-# Munin
+<p align="center">
+  <img src="app/public/raven-mark.png" alt="Munin Raven Logo" width="160" />
+</p>
+
+# Munin — Autonomous AI Security & Threat Intelligence Agent
 
 > *What was once seen is never forgotten.*
 
-Munin es una plataforma MCP para investigación y automatización de seguridad en
-entornos **autorizados**. Combina un agente ReAct, herramientas de reconocimiento,
-LDAP, inteligencia pasiva, memoria persistente, subagentes y una interfaz web.
-Su rasgo diferencial es que puede crear herramientas Python y configuraciones de
-subagentes ("grafos") durante una sesión, verificarlas y conservar su estado para
-la siguiente.
+**Munin** es un agente autónomo de ciberseguridad, inteligencia de amenazas y orquestación defensiva/ofensiva basado en **MCP (Model Context Protocol)**. Diseñado para operar en entornos autorizados, Munin combina razonamiento autónomo mediante bucles **ReAct**, memoria semántica y episódica persistente, subagentes especializados, capacidad de **autoforjado dinámico de herramientas (Tool Forging)** y una arquitectura con base de datos **Turso** resiliente multi-runner.
 
-No es un sistema autónomo para atacar objetivos. El operador conserva el control
-de los secretos, el alcance, los comandos de alto impacto y las propuestas de
-cambio de identidad. Úsalo únicamente contra laboratorios y activos para los que
-tengas autorización explícita.
+Munin permite a investigadores y operadores de seguridad automatizar análisis de vulnerabilidades, enumeración Active Directory/OpenLDAP, consultas de inteligencia (NVD, CVE, EPSS, CISA KEV, OSV, Hugin) y ejecución de herramientas de reconocimiento avanzado (Nmap, Nuclei, Ffuf, Feroxbuster), manteniendo siempre trazabilidad en tiempo real a través de su interfaz web moderna (Next.js).
 
-## Qué hay disponible
+---
+
+## ⚡ Capacidades Principales
 
 | Área | Qué aporta |
 | --- | --- |
-| MCP | Servidor FastMCP por HTTP (`/mcp`) con autenticación Bearer. |
-| Agente | `munin_chat` ejecuta un loop ReAct, registra decisiones y puede delegar. |
-| LDAP | Consultas parametrizadas para AD/OpenLDAP, más un mock `dc=meli,dc=com`. |
-| Recon | La sesión de GitHub instala y comprueba nmap, nuclei, ffuf, feroxbuster y otras utilidades. |
-| Inteligencia | Hugin, CVE/NVD/EPSS/CISA/OSV y Tavily opcional. |
-| Memoria | Hechos semánticos, episodios, mensajes, presencia, cola de trabajo e inteligencia compartida. |
-| Evolución | `tool_forge` crea `gen__*`; `graph_forge` crea especialistas ReAct con una lista permitida de tools. |
-| GUI | Chat, explorador de tools, memoria, Soul y trazas incrementales de subagentes. |
+| **MCP Standard Protocol** | Servidor FastMCP asíncrono sobre HTTP (`/mcp`) con autenticación Bearer y soporte de tokens por sesión. |
+| **Agente ReAct Autónomo** | `munin_chat` ejecuta ciclos de razonamiento multi-paso, autodiagnóstico (`munin_self_diagnose`) y delegación autónoma. |
+| **Persistencia Duradera Turso** | Sincronización instantánea de memoria, hechos, estado episódico, identidad (Soul) y herramientas autogeneradas en nube Turso. |
+| **Enumeración LDAP Adaptativa** | Herramientas preparadas para Active Directory y OpenLDAP (`dc=meli,dc=com`), identificando estructuras y grupos. |
+| **Inteligencia de Amenazas** | Integración nativa con Hugin Knowledge Base, motores de enriquecimiento CVE/NVD/EPSS/CISA KEV y Tavily. |
+| **Auto-Evolución (Tool Forging)** | `tool_forge` genera herramientas Python (`gen__*`) al vuelo; `graph_forge` crea subagentes especializados con permisos acotados. |
+| **Terminal de Control Web UI** | Dashboard en Next.js con chat interactivo, explorador de 70+ tools, inspección de Soul/Memoria y traza en tiempo real. |
 
 Consulta el inventario de herramientas en [docs/tools_reference.md](docs/tools_reference.md).
 
