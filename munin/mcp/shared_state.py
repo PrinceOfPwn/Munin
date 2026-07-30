@@ -245,6 +245,7 @@ class SharedStateStore:
                     name TEXT NOT NULL UNIQUE,
                     description TEXT NOT NULL DEFAULT '',
                     script_path TEXT NOT NULL,
+                    source_code TEXT NOT NULL DEFAULT '',
                     signature_json TEXT NOT NULL DEFAULT '{}',
                     tags TEXT NOT NULL DEFAULT '[]',
                     created_by_agent TEXT NOT NULL DEFAULT '',
@@ -304,6 +305,22 @@ class SharedStateStore:
                 CREATE INDEX IF NOT EXISTS idx_agent_wake_queue_target ON agent_wake_queue(target_agent, claimed_at);
                 """
             )
+            # Existing Turso installations predate source_code. Keep generated
+            # Python with its registry row so it survives ephemeral runners and
+            # GitHub artifact-quota failures.
+            procedural_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(procedural)").fetchall()
+            }
+            if "source_code" not in procedural_columns:
+                try:
+                    conn.execute("ALTER TABLE procedural ADD COLUMN source_code TEXT NOT NULL DEFAULT ''")
+                except Exception as exc:
+                    # Two ephemeral runners can initialize an existing Turso
+                    # database concurrently. If the other one won this small
+                    # migration race, continue with the now-current schema.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
 
     # ------------------------------------------------------------------
     # shared_intel (unchanged)
@@ -1079,6 +1096,7 @@ class SharedStateStore:
         name: str,
         description: str,
         script_path: str,
+        source_code: str = "",
         signature: dict[str, Any],
         tags: list[str],
         created_by_agent: str,
@@ -1086,11 +1104,12 @@ class SharedStateStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO procedural (name, description, script_path, signature_json, tags, created_by_agent, active)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                INSERT INTO procedural (name, description, script_path, source_code, signature_json, tags, created_by_agent, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(name) DO UPDATE SET
                     description = excluded.description,
                     script_path = excluded.script_path,
+                    source_code = CASE WHEN excluded.source_code != '' THEN excluded.source_code ELSE procedural.source_code END,
                     signature_json = excluded.signature_json,
                     tags = excluded.tags,
                     active = 1
@@ -1099,6 +1118,7 @@ class SharedStateStore:
                     name.strip(),
                     description.strip(),
                     str(script_path),
+                    source_code,
                     json.dumps(signature, ensure_ascii=True, default=str),
                     json.dumps(tags, ensure_ascii=True),
                     created_by_agent.strip(),
@@ -1106,7 +1126,13 @@ class SharedStateStore:
             )
         return {"name": name.strip(), "script_path": str(script_path), "active": True}
 
-    def procedural_list(self, *, tag: str = "", include_inactive: bool = False) -> list[dict[str, Any]]:
+    def procedural_list(
+        self,
+        *,
+        tag: str = "",
+        include_inactive: bool = False,
+        include_source: bool = False,
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM procedural"
         conditions: list[str] = []
         params: list[Any] = []
@@ -1120,8 +1146,9 @@ class SharedStateStore:
         query += " ORDER BY created_at DESC"
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [
-            {
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            record = {
                 "name": row["name"],
                 "description": row["description"],
                 "script_path": row["script_path"],
@@ -1131,8 +1158,10 @@ class SharedStateStore:
                 "created_at": row["created_at"],
                 "active": bool(row["active"]),
             }
-            for row in rows
-        ]
+            if include_source:
+                record["source_code"] = row["source_code"] or ""
+            records.append(record)
+        return records
 
     def procedural_get(self, name: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -1143,6 +1172,7 @@ class SharedStateStore:
             "name": row["name"],
             "description": row["description"],
             "script_path": row["script_path"],
+            "source_code": row["source_code"] or "",
             "signature": _normalize_jsonish(row["signature_json"] or "{}"),
             "tags": _normalize_jsonish(row["tags"] or "[]"),
             "created_by_agent": row["created_by_agent"],

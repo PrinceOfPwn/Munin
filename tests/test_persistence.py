@@ -29,7 +29,7 @@ class _FakeLibsql:
         return self.native
 
 
-def test_turso_uses_embedded_replica_and_separate_token(tmp_path, monkeypatch):
+def test_turso_uses_direct_autocommit_connection(tmp_path, monkeypatch):
     from munin.mcp import persistence
 
     fake = _FakeLibsql()
@@ -41,20 +41,21 @@ def test_turso_uses_embedded_replica_and_separate_token(tmp_path, monkeypatch):
     )
 
     args, kwargs = fake.calls[0]
-    assert args == (str(tmp_path / "shared_state.libsql"),)
+    assert args == ()
     assert kwargs == {
-        "sync_url": "libsql://munin-example.turso.io",
+        "database": "libsql://munin-example.turso.io",
         "auth_token": "secret-token",
+        "isolation_level": None,
     }
-    assert fake.native.synced is True
+    assert fake.native.synced is False
     conn.commit()
     assert fake.native.committed is True
-    assert fake.native.sync_count == 2
+    assert fake.native.sync_count == 0
     conn.close()
     assert fake.native.closed is True
 
 
-def test_turso_authoritative_connection_skips_local_replica(tmp_path, monkeypatch):
+def test_turso_authoritative_connection_uses_same_direct_contract(tmp_path, monkeypatch):
     from munin.mcp import persistence
 
     fake = _FakeLibsql()

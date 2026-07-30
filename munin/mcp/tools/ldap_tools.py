@@ -590,21 +590,17 @@ def find_domain_admins(base_dn: str = "", group_name: str = "Domain Admins", run
     settings = _get_settings()
     base = base_dn.strip() or settings.ldap_base_dn
     esc_group = escape_filter_chars(group_name)
-    # OR every known "this is a group" objectClass so the filter matches on both AD
-    # (group) and OpenLDAP (groupOfNames / groupOfUniqueNames / posixGroup).
-    filter_str = (
-        f"(&(cn={esc_group})"
-        f"(|(objectClass=group)"
-        f"(objectClass=groupOfNames)"
-        f"(objectClass=groupOfUniqueNames)"
-        f"(objectClass=posixGroup)))"
-    )
     try:
         conn = _connect()
     except LDAPException as exc:
         return _error("find_domain_admins", "ldap_bind_failed", str(exc))
     try:
         # Ask for all possible member attributes — different objectClasses use different names.
+        flavor = _detect_flavor(conn)
+        group_classes = "(objectClass=group)" if flavor == "ad" else (
+            "(|(objectClass=groupOfNames)(objectClass=groupOfUniqueNames)(objectClass=posixGroup))"
+        )
+        filter_str = f"(&(cn={esc_group}){group_classes})"
         group_entries = _search_tolerant(
             conn,
             base_dn=base,
@@ -664,7 +660,6 @@ def dump_domain_structure(base_dn: str = "", size_limit: int = 500, run_id: str 
     """Dump the OU/CN structure of the domain up to size_limit entries. Useful for enumeration and mapping."""
     settings = _get_settings()
     base = base_dn.strip() or settings.ldap_base_dn
-    filter_str = "(|(objectClass=organizationalUnit)(objectClass=container)(objectClass=domain))"
     try:
         size_limit = int(size_limit)
     except (TypeError, ValueError):
@@ -674,6 +669,12 @@ def dump_domain_structure(base_dn: str = "", size_limit: int = 500, run_id: str 
     except LDAPException as exc:
         return _error("dump_domain_structure", "ldap_bind_failed", str(exc))
     try:
+        flavor = _detect_flavor(conn)
+        filter_str = (
+            "(|(objectClass=organizationalUnit)(objectClass=container)(objectClass=domain))"
+            if flavor == "ad"
+            else "(objectClass=organizationalUnit)"
+        )
         entries = _search_tolerant(
             conn,
             base_dn=base,
