@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,39 @@ def safe_slug(parts: Iterable[str]) -> str:
 
 
 # Redact for `repr(settings)` — never spill secrets into logs.
+def _redact_db_url(raw_url: str) -> str:
+    if not raw_url or "://" not in raw_url:
+        return raw_url
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = parsed.hostname or ""
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        netloc = hostname
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        sanitized_query = [
+            (
+                key,
+                "***REDACTED***"
+                if any(marker in key.lower() for marker in ("token", "password", "secret", "api_key", "apikey"))
+                else value,
+            )
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+        return urlunsplit(
+            (
+                parsed.scheme,
+                netloc,
+                parsed.path,
+                urlencode(sanitized_query),
+                "",
+            )
+        )
+    except (TypeError, ValueError):
+        return "***REDACTED_DB_URL***"
+
+
 def redact_settings(settings: Settings) -> Settings:
     return replace(
         settings,
@@ -187,5 +221,6 @@ def redact_settings(settings: Settings) -> Settings:
         nvd_api_key="***REDACTED***" if settings.nvd_api_key else "",
         ldap_password="***REDACTED***" if settings.ldap_password else "",
         mcp_auth_token="***REDACTED***" if settings.mcp_auth_token else "",
+        db_url=_redact_db_url(settings.db_url),
         db_auth_token="***REDACTED***" if settings.db_auth_token else "",
     )

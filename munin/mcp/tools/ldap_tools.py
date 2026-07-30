@@ -127,6 +127,24 @@ def _attrs_for(flavor: str, base: list[str] | None = None) -> list[str]:
     return result
 
 
+def _schema_supported_attributes(conn: Connection, requested: list[str]) -> list[str]:
+    """Keep requested attributes advertised by the connected directory schema."""
+    try:
+        schema = getattr(conn.server, "schema", None)
+        attribute_types = getattr(schema, "attribute_types", None)
+        if attribute_types:
+            supported = {str(key).lower() for key in attribute_types}
+            selected = [attr for attr in requested if attr.lower() in supported]
+            if selected:
+                return selected
+    except Exception:  # pragma: no cover - defensive schema fallback
+        pass
+    # Without readable schema, retain non-AD attributes. This preserves common
+    # OpenLDAP membership fields instead of discarding all of them.
+    ad_only = {attr.lower() for attr in _AD_ONLY_ATTRS}
+    return [attr for attr in requested if attr.lower() not in ad_only]
+
+
 def _search(
     conn: Connection,
     *,
@@ -173,13 +191,17 @@ def _search_tolerant(
     try:
         return _search(conn, base_dn=base_dn, filter_str=filter_str, attributes=attributes, size_limit=size_limit)
     except (LDAPAttributeError, LDAPInvalidFilterError) as exc:
-        # Retry with only universal attrs — the invalid attr was AD-only.
-        logger.info("LDAP search rejected AD attrs (%s); retrying with universal set", exc)
+        retry_attributes = _schema_supported_attributes(conn, attributes)
+        logger.info(
+            "LDAP search rejected attributes (%s); retrying with schema-supported set: %s",
+            exc,
+            retry_attributes,
+        )
         return _search(
             conn,
             base_dn=base_dn,
             filter_str=filter_str,
-            attributes=list(_UNIVERSAL_ATTRS),
+            attributes=retry_attributes,
             size_limit=size_limit,
         )
 
@@ -587,7 +609,10 @@ def find_domain_admins(base_dn: str = "", group_name: str = "Domain Admins", run
             conn,
             base_dn=base,
             filter_str=filter_str,
-            attributes=["member", "uniqueMember", "memberUid", "cn", "distinguishedName"],
+            attributes=_schema_supported_attributes(
+                conn,
+                ["member", "uniqueMember", "memberUid", "cn", "distinguishedName"],
+            ),
         )
     except LDAPException as exc:
         return _error("find_domain_admins", "ldap_search_failed", str(exc))
