@@ -32,8 +32,11 @@ def cli() -> None:
 @cli.command()
 @click.option("--max-iterations", default=8, show_default=True)
 def run(max_iterations: int) -> None:
-    """Interactive REPL. Each user line is one Munin turn."""
-    from .core.munin_agent import MuninAgent
+    """Interactive REPL. Each user line is one Munin turn (LangGraph supervisor)."""
+    import asyncio
+
+    from .core.runtime_adapter import supervisor_runner
+    from .mcp.tools import munin_tools as _munin_tools
 
     settings = get_settings()
     click.echo(f"Munin online — LLM={settings.llm_model or 'UNCONFIGURED'} base_url={settings.llm_base_url or 'UNCONFIGURED'}")
@@ -42,7 +45,32 @@ def run(max_iterations: int) -> None:
         click.echo("!! LLM_* env variables missing. Populate .env before running.", err=True)
         sys.exit(2)
 
-    agent = MuninAgent(settings)
+    store = SharedStateStore(settings)
+    tools = list(getattr(_munin_tools, "TOOLS", []))
+
+    async def _one_turn(prompt: str) -> str:
+        final_text = ""
+        async for event in supervisor_runner(
+            prompt,
+            run_id=f"cli-{id(prompt)}",
+            conversation_id="cli",
+            tools=tools,
+            store=store,
+            progress_sink=lambda e: None,
+            model=settings.llm_model,
+            system_prompt="",
+            max_iterations=max_iterations,
+        ):
+            if isinstance(event, dict) and event.get("event") == "on_chain_end":
+                data = event.get("data", {})
+                out = data.get("output")
+                if isinstance(out, dict) and "messages" in out and out["messages"]:
+                    last = out["messages"][-1]
+                    content = getattr(last, "content", last if isinstance(last, str) else "")
+                    if content:
+                        final_text = content
+        return final_text
+
     try:
         while True:
             user_line = click.prompt("you", type=str, default="", show_default=False)
@@ -51,8 +79,8 @@ def run(max_iterations: int) -> None:
             if user_line.strip().lower() in {"exit", "quit"}:
                 click.echo("bye.")
                 return
-            result = agent.respond(user_line.strip(), max_iterations=max_iterations)
-            click.echo(f"munin> {result['content']}")
+            reply = asyncio.run(_one_turn(user_line.strip()))
+            click.echo(f"munin> {reply}")
     except (KeyboardInterrupt, EOFError):
         click.echo("\ninterrupted.")
 
@@ -114,14 +142,14 @@ def production_worker(poll_seconds: float) -> None:
 
 @cli.command()
 @click.argument("name")
-@click.option("--sleep-after-idle", default=120, show_default=True)
-def subagent(name: str, sleep_after_idle: int) -> None:
-    """Run a subagent locally (equivalent to `python -m munin.subagents.runner <name>`)."""
-    proc = subprocess.run(
-        [sys.executable, "-m", "munin.subagents.runner", name, "--sleep-after-idle", str(sleep_after_idle)],
-        check=False,
+def subagent(name: str) -> None:
+    """Deprecated: subprocess subagents were removed. Use start_async_task via MCP instead."""
+    click.echo(
+        "subagent subprocess mode was removed in v3.5. "
+        "Use the MCP tool `start_async_task` (LangGraph server) to invoke '{}'.".format(name),
+        err=True,
     )
-    sys.exit(proc.returncode)
+    sys.exit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +185,6 @@ def reset() -> None:
     with state._connect() as conn:  # intentional private access — reset is privileged
         conn.execute("DELETE FROM episodic")
         conn.execute("DELETE FROM semantic")
-        conn.execute("DELETE FROM agent_wake_queue")
 
     # Restore soul.
     soul = SoulManager(settings.munin_soul_path, settings.munin_data_path)

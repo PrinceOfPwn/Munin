@@ -527,15 +527,42 @@ def munin_chat(
 
     def execute(progress=None) -> dict[str, Any]:
         try:
-            from ...core.munin_agent import MuninAgent  # noqa: PLC0415
-            agent = MuninAgent(settings)
-            result = agent.respond(
-                message.strip(),
-                max_iterations=iterations,
-                progress=progress,
-                conversation_id=prepared.conversation_id,
-                conversation_history=prepared.history,
-            )
+            import asyncio  # noqa: PLC0415
+            from ...core.runtime_adapter import supervisor_runner  # noqa: PLC0415
+
+            async def _run() -> tuple[str, list, int, str]:
+                content = ""
+                tool_calls: list = []
+                iterations = 0
+                stop_reason = "final_answer"
+                async for event in supervisor_runner(
+                    message.strip(),
+                    run_id=f"munin_chat-{id(message)}",
+                    conversation_id=prepared.conversation_id,
+                    conversation_history=prepared.history,
+                    tools=[t for t in globals().get("TOOLS", [])],
+                    store=conversation_service.store if hasattr(conversation_service, "store") else None,
+                    progress_sink=progress,
+                    model=settings.llm_model,
+                    system_prompt="",
+                    max_iterations=iterations or 40,
+                ):
+                    if isinstance(event, dict):
+                        if event.get("event") == "on_chain_end":
+                            data = event.get("data", {})
+                            out = data.get("output")
+                            if isinstance(out, dict) and out.get("messages"):
+                                last = out["messages"][-1]
+                                c = getattr(last, "content", last if isinstance(last, str) else "")
+                                if c:
+                                    content = c
+                        elif event.get("event") == "tool_calls_log":
+                            tool_calls = event.get("data", {}).get("tool_calls", []) or tool_calls
+                        elif event.get("event") == "iteration":
+                            iterations = event.get("data", {}).get("iteration", iterations)
+                return content, tool_calls, iterations, stop_reason
+
+            content, tool_calls, iterations, stop_reason = asyncio.run(_run())
         except Exception as exc:
             logger.exception("munin_chat: agent error")
             error_message = f"Munin could not complete this turn: {exc}"
@@ -554,14 +581,13 @@ def munin_chat(
                 "summary": "agent error",
                 "error": {"code": "agent_error", "message": str(exc)},
             }
-        content = result.get("content", "")
         try:
             assistant_message, artifacts = conversation_service.complete_turn(
                 conversation_id=prepared.conversation_id,
                 content=content,
-                tool_calls=result.get("tool_calls", []),
-                stop_reason=result.get("stop_reason", "unknown"),
-                iterations=result.get("iterations", 0),
+                tool_calls=tool_calls,
+                stop_reason=stop_reason,
+                iterations=iterations,
             )
         except Exception as exc:
             logger.exception("munin_chat: unable to persist completed turn")
@@ -581,9 +607,9 @@ def munin_chat(
                 "assistant_message_id": assistant_message["id"],
                 "content": content,
                 "artifacts": artifacts,
-                "tool_calls": result.get("tool_calls", []),
-                "iterations": result.get("iterations", 0),
-                "stop_reason": result.get("stop_reason", "unknown"),
+                "tool_calls": tool_calls,
+                "iterations": iterations,
+                "stop_reason": stop_reason,
             },
         }
 

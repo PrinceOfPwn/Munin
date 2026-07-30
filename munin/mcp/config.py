@@ -67,6 +67,16 @@ class Settings:
     # deliberately environment-only and is never returned by an MCP tool.
     byok_master_key: str = ""
 
+    # --- LangGraph server (PR-11) ---
+    #   MUNIN_LANGGRAPH_URL: empty string means LangGraph server not configured
+    munin_langgraph_url: str = ""
+    munin_langgraph_port: int = 8123
+    munin_checkpoint_db: str = "data/langgraph_checkpoints.sqlite"
+
+    # --- Parallel workers (PR-12) ---
+    #   Advisory only — not a hard cap; replaces old MUNIN_MAX_PARALLEL_TOOLS
+    munin_suggested_workers: int = 4
+
     @property
     def runs_root(self) -> Path:
         return self.workspace_root / "runs"
@@ -177,6 +187,14 @@ def get_settings() -> Settings:
         db_url=os.environ.get("MUNIN_DB_URL", "").strip(),
         db_auth_token=os.environ.get("MUNIN_DB_AUTH_TOKEN", "").strip(),
         byok_master_key=os.environ.get("MUNIN_BYOK_MASTER_KEY", ""),
+        # LangGraph server (PR-11)
+        munin_langgraph_url=os.environ.get("MUNIN_LANGGRAPH_URL", "").strip(),
+        munin_langgraph_port=int(os.environ.get("MUNIN_LANGGRAPH_PORT", "8123")),
+        munin_checkpoint_db=os.environ.get(
+            "MUNIN_CHECKPOINT_DB", "data/langgraph_checkpoints.sqlite"
+        ).strip(),
+        # Parallel workers (PR-12)
+        munin_suggested_workers=int(os.environ.get("MUNIN_SUGGESTED_WORKERS", "4")),
     )
     settings.ensure_workspace()
     return settings

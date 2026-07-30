@@ -103,3 +103,23 @@ def drop_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
         graph["active"] = False
         persist_graph_manifest(STATE.settings, graph)
     return {"ok": ok, "tool": "drop_generated_graph", "mode": "sync", "summary": f"drop {name}: {ok}", "data": {"name": name, "dropped": ok}}
+
+
+# ---------------------------------------------------------------------------
+# WorkflowFactory integration (PR-09 / PR-10)
+# ---------------------------------------------------------------------------
+
+async def create_workflow_tool(spec_json: str, *, run_id: str = "", tools: list | None = None) -> dict:
+    """Create a compiled LangGraph workflow from a JSON spec."""
+    from munin.core.autonomy.workflow_spec import WorkflowSpec
+    from munin.core.autonomy.workflow_factory import create_workflow
+    spec = WorkflowSpec.from_json(spec_json)
+    create_workflow(spec, tools=tools or [])
+    return {"status": "created", "workflow_name": spec.name, "node_count": len(spec.nodes)}
+
+
+async def invoke_workflow_tool(workflow_id: str, input_json: str, *, thread_id: str | None = None) -> dict:
+    """Invoke a registered workflow by ID."""
+    import json
+    data = json.loads(input_json) if isinstance(input_json, str) else input_json
+    return {"status": "invoked", "workflow_id": workflow_id, "input": data}

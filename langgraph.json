@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "munin_supervisor": "./munin/core/supervisor.py:supervisor"
+  },
+  "env": ".env"
+}
