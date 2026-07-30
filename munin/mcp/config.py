@@ -34,7 +34,7 @@ class Settings:
 
     # --- LDAP ---
     ldap_uri: str = "ldap://localhost:389"
-    ldap_base_dn: str = "dc=meli,dc=com"
+    ldap_base_dn: str = "dc=akatsuki,dc=com"
     ldap_bind_dn: str = ""
     ldap_password: str = ""
 
@@ -147,7 +147,7 @@ def get_settings() -> Settings:
         hugin_ttl_seconds=int(os.environ.get("HUGIN_TTL_SECONDS", "900")),
         # LDAP
         ldap_uri=os.environ.get("LDAP_URI", "ldap://localhost:389").strip(),
-        ldap_base_dn=os.environ.get("LDAP_BASE_DN", "dc=meli,dc=com").strip(),
+        ldap_base_dn=os.environ.get("LDAP_BASE_DN", "dc=akatsuki,dc=com").strip(),
         ldap_bind_dn=os.environ.get("LDAP_BIND_DN", "").strip(),
         ldap_password=os.environ.get("LDAP_PASSWORD", ""),
         # Policy

@@ -1,6 +1,6 @@
 version: "3.9"
 
-# OpenLDAP + phpLDAPAdmin — target del challenge de MELI Offensive Security.
+# OpenLDAP + phpLDAPAdmin — target del challenge de AKATSUKI Offensive Security.
 # El servicio `munin` es opcional: útil si querés correr todo dentro de docker.
 
 services:
@@ -8,9 +8,9 @@ services:
     image: osixia/openldap:1.5.0
     container_name: munin-openldap
     environment:
-      LDAP_ORGANISATION: "MELI"
-      LDAP_DOMAIN: "meli.com"
-      LDAP_BASE_DN: "dc=meli,dc=com"
+      LDAP_ORGANISATION: "AKATSUKI"
+      LDAP_DOMAIN: "akatsuki.com"
+      LDAP_BASE_DN: "dc=akatsuki,dc=com"
       LDAP_ADMIN_PASSWORD: "itachi"
       LDAP_CONFIG_PASSWORD: "itachi"
       LDAP_TLS: "false"
