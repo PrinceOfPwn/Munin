@@ -28,12 +28,12 @@ export interface McpConfig {
 const DEFAULTS = {
   /** Per-request network timeout (ms). Tool calls that take longer get aborted. */
   requestTimeout: 30_000,
-  /** Max retries for idempotent calls (listTools, ping). callTool never retries. */
-  maxRetries: 3,
+  /** Max retries for idempotent calls (listTools, ping, job status). */
+  maxRetries: 4,
   /** Base backoff (ms). Actual delay = base * 2^attempt + jitter. */
-  backoffBase: 800,
+  backoffBase: 5_000,
   /** Max backoff cap (ms). */
-  backoffMax: 10_000,
+  backoffMax: 60_000,
   /** Circuit opens after this many consecutive failures. */
   cbFailureThreshold: 5,
   /** Circuit stays open for this long before allowing a probe (ms). */
@@ -172,6 +172,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function parseRpcEnvelope(text: string, contentType: string, requestId: string): any {
+  if (contentType.includes("text/event-stream")) {
+    const events = text.split(/\r?\n\r?\n/);
+    for (const event of events) {
+      const payload = event
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!payload) continue;
+      const parsed = JSON.parse(payload);
+      if (parsed?.id === requestId || parsed?.error) return parsed;
+    }
+    throw new Error("SSE response contained no JSON-RPC result");
+  }
+  return JSON.parse(text);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // McpClient
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,7 +197,8 @@ function sleep(ms: number): Promise<void> {
 export class McpClient {
   private baseUrl: string;
   private token: string;
-  private sessionId: string | null = null;
+  private sessionId = "";
+  private initializePromise: Promise<void> | null = null;
   private cb = new CircuitBreaker(DEFAULTS.cbFailureThreshold, DEFAULTS.cbResetTimeout);
 
   /**
@@ -197,14 +216,16 @@ export class McpClient {
 
   setConfig(config: McpConfig) {
     const prev = this.baseUrl;
+    const prevToken = this.token;
     this.baseUrl = (config.baseUrl || "").replace(/\/+$/, "");
     this.token = config.token || "";
-    if (prev !== this.baseUrl) {
+    if (prev !== this.baseUrl || prevToken !== this.token) {
       L.info("McpClient reconfigured", { baseUrl: this.baseUrl, hasToken: !!this.token });
-      // Reset circuit and session on URL change — new server, fresh slate.
-      this.sessionId = null;
+      // URL/token changes imply a different authenticated MCP session.
       this.cb = new CircuitBreaker(DEFAULTS.cbFailureThreshold, DEFAULTS.cbResetTimeout);
       this.inflight.clear();
+      this.sessionId = "";
+      this.initializePromise = null;
     }
   }
 
@@ -212,8 +233,31 @@ export class McpClient {
   get circuitState(): CbState { return this.cb.status; }
 
   private endpoint(): string {
-    const base = (this.baseUrl || "").replace(/\/+$/, "");
-    return `${base}/mcp`;
+    // Next.js normalizes `/mcp/` to `/mcp` in the hosted GUI. Avoid that
+    // redirect: browsers may not retain the bearer header across the proxy's
+    // redirect chain, turning a valid token into a misleading 403.
+    return this.baseUrl.endsWith("/mcp") ? this.baseUrl : `${this.baseUrl}/mcp`;
+  }
+
+  private async ensureSession(timeoutMs: number): Promise<void> {
+    if (this.sessionId) return;
+    if (!this.initializePromise) {
+      this.initializePromise = this.fetchOnce(
+        "initialize",
+        {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "munin-ui", version: "0.1.0" },
+        },
+        Math.min(timeoutMs, DEFAULTS.requestTimeout)
+      ).then(() => undefined).catch((error) => {
+        this.sessionId = "";
+        throw error;
+      }).finally(() => {
+        this.initializePromise = null;
+      });
+    }
+    await this.initializePromise;
   }
 
   // ───── Layer 1: raw fetch with timeout ────────────────────────────────────
@@ -221,12 +265,17 @@ export class McpClient {
   private async fetchOnce<T>(
     method: string,
     params: any,
-    timeoutMs: number
+    timeoutMs: number,
+    allowSessionRecovery = true
   ): Promise<T> {
+    if (method !== "initialize") {
+      await this.ensureSession(timeoutMs);
+    }
     const id = uuid();
     const url = this.endpoint();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const requestSessionId = this.sessionId;
 
     L.debug(`→ ${method}`, { id, timeoutMs, params });
 
@@ -238,9 +287,11 @@ export class McpClient {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json, text/event-stream",
-          "ngrok-skip-browser-warning": "1",
           ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-          ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
+          ...(this.sessionId ? {
+            "mcp-session-id": this.sessionId,
+            "MCP-Protocol-Version": "2024-11-05",
+          } : {}),
         },
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
       });
@@ -257,16 +308,20 @@ export class McpClient {
       clearTimeout(timer);
     }
 
-    const sid = res.headers.get("mcp-session-id");
-    if (sid) {
-      this.sessionId = sid;
-    }
-
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       const status = res.status;
-      // Reset session on any HTTP error so future requests re-handshake cleanly
-      this.sessionId = null;
+      if (
+        status === 404 &&
+        method !== "initialize" &&
+        allowSessionRecovery &&
+        requestSessionId &&
+        this.sessionId === requestSessionId
+      ) {
+        L.info(`MCP session ${requestSessionId} expired; initializing a replacement`);
+        this.sessionId = "";
+        return this.fetchOnce<T>(method, params, timeoutMs, false);
+      }
       const kind: ErrorKind =
         status === 401 || status === 403 ? "auth"
         : status === 404               ? "not-found"
@@ -280,22 +335,21 @@ export class McpClient {
       );
     }
 
+    if (method === "initialize") {
+      const initializedSession = res.headers.get("mcp-session-id") || "";
+      if (!initializedSession) {
+        throw classified("MCP initialize response omitted mcp-session-id", "rpc");
+      }
+      this.sessionId = initializedSession;
+    }
+
     let data: any;
     try {
-      const rawText = await res.text();
-      try {
-        data = JSON.parse(rawText);
-      } catch {
-        const dataLine = rawText.split("\n").find((l) => l.startsWith("data: "));
-        if (dataLine) {
-          data = JSON.parse(dataLine.slice(6));
-        } else {
-          throw new Error("No JSON or SSE data line in response");
-        }
-      }
+      const text = await res.text();
+      data = parseRpcEnvelope(text, res.headers.get("content-type") || "", id);
     } catch (e: any) {
       throw classified(
-        `JSON parse failed: ${e?.message}`,
+        `MCP response parse failed: ${e?.message}`,
         "parse"
       );
     }
@@ -312,26 +366,6 @@ export class McpClient {
     return data.result as T;
   }
 
-  private initPromise: Promise<any> | null = null;
-
-  async ensureInitialized(): Promise<void> {
-    if (this.sessionId) return;
-    if (!this.initPromise) {
-      this.initPromise = (async () => {
-        try {
-          await this.sendWithRetry("initialize", {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "munin-ui", version: "1.0.0" },
-          }, { retries: 2, timeoutMs: 10000 });
-        } finally {
-          this.initPromise = null;
-        }
-      })();
-    }
-    await this.initPromise;
-  }
-
   // ───── Layer 2: retry with backoff (idempotent calls only) ────────────────
 
   private async sendWithRetry<T>(
@@ -339,9 +373,6 @@ export class McpClient {
     params: any,
     opts: { retries: number; timeoutMs: number }
   ): Promise<T> {
-    if (method !== "initialize") {
-      await this.ensureInitialized();
-    }
     const { retries, timeoutMs } = opts;
     let lastErr: ClassifiedError | undefined;
 
@@ -423,33 +454,51 @@ export class McpClient {
   }
 
   /**
-   * Execute a tool. NOT retried — tools may have side effects (nmap, ldap writes, etc.).
-   * Uses a longer timeout since some tools (nmap_scan, nuclei_scan) are slow.
+   * Execute a tool. Mutating tools are never retried: a transient connection
+   * loss must not duplicate a scan, LDAP write, or forge. Read-only status
+   * probes are safe to retry with the standard 5s→60s backoff.
    */
   async callTool(name: string, args: Record<string, any>): Promise<McpToolResult> {
     L.info(`callTool(${name})`, { args });
     const done = L.time(`callTool(${name})`);
 
-    // Tool timeout: 5 min for heavy recon tools, 30s otherwise
-    const heavyTools = /nmap|nuclei|feroxbuster|ffuf|hydra|sqlmap|katana|screenshotter/i;
-    const timeoutMs = heavyTools.test(name) ? 300_000 : DEFAULTS.requestTimeout;
+    // ReAct/forge operations are intentionally long-lived. Their server-side
+    // LLM floor is 40s, so the old 30s UI timeout guaranteed a false failure
+    // before even a slow first token could arrive. Direct calls retain a five
+    // minute budget; the GUI uses munin_chat async mode and polls progress.
+    const longRunningTools = /^(munin_chat|tool_forge|graph_forge|munin_wake)$|nmap|nuclei|feroxbuster|ffuf|hydra|sqlmap|katana|screenshotter/i;
+    const timeoutMs = longRunningTools.test(name) ? 300_000 : DEFAULTS.requestTimeout;
 
     if (!this.cb.canRequest()) {
       done("circuit-open");
       throw classified("Circuit breaker OPEN — tool call rejected", "network");
     }
 
+    const idempotentTools = new Set([
+      "job_status",
+      "list_agent_presence",
+      "list_generated_tools",
+      "list_generated_graphs",
+      "munin_wake_list",
+      "episodic_query",
+      "memory_list",
+    ]);
+    const params = { name, arguments: args || {} };
+    const mayRetry = idempotentTools.has(name);
     let result: McpToolResult;
     try {
-      await this.ensureInitialized();
-      result = await this.fetchOnce<McpToolResult>("tools/call", {
-        name,
-        arguments: args || {},
-      }, timeoutMs);
-      this.cb.onSuccess();
+      result = mayRetry
+        ? await this.sendWithRetry<McpToolResult>("tools/call", params, {
+            retries: DEFAULTS.maxRetries,
+            timeoutMs,
+          })
+        : await this.fetchOnce<McpToolResult>("tools/call", params, timeoutMs);
+      // sendWithRetry already updates the breaker for each attempted status
+      // probe. Direct (possibly mutating) calls reach it only once here.
+      if (!mayRetry) this.cb.onSuccess();
     } catch (e: any) {
       done(`error:${(e as ClassifiedError).kind ?? "unknown"}`);
-      this.cb.onFailure((e as ClassifiedError).kind ?? "unknown");
+      if (!mayRetry) this.cb.onFailure((e as ClassifiedError).kind ?? "unknown");
       L.error(`callTool(${name}) threw`, e, { hint: (e as ClassifiedError).hint });
       throw e;
     }
@@ -557,4 +606,16 @@ export function extractToolResultContent(result: McpToolResult): {
 
   if (json === undefined && text) json = text;
   return { text, json, isError };
+}
+
+/**
+ * Munin tools consistently return an envelope ``{ ok, tool, data }``.  Keep
+ * UI panels from accidentally treating the envelope itself as a list/result.
+ * Older external MCP servers may return data directly, so those remain valid.
+ */
+export function unwrapToolData(json: any): any {
+  if (json && typeof json === "object" && !Array.isArray(json) && "data" in json) {
+    return json.data;
+  }
+  return json;
 }
