@@ -81,10 +81,14 @@ sube el nuevo state + commitea las tools forjadas.
    - **preflight_policy** (`off` en runner es lo normal)
    - **munin_max_iterations** (dejar en blanco = sin cap)
    - **persist_state** (dejar en `true` para roundtrip del SQLite)
+   - **open_web_gui** (`true` por defecto: levanta y publica el frontend Next.js)
+   - **open_public_tunnel** (opcional: publica MCP además de la GUI)
 4. Al finalizar el step "Print connection info" en el Job Summary aparece:
-   - URL pública del tunnel
-   - Bearer token
-5. Enchufá el frontend o Claude Code a esa URL.
+   - **Web GUI**, lista para abrir en el navegador
+   - URL MCP pública si se solicitó; si no, la GUI usa su proxy same-origin
+   - referencia al secret `MUNIN_MCP_AUTH_TOKEN` (su valor no se imprime)
+5. Abrí **Web GUI** y pegá ese token en **Settings**. Para Claude Code, usá la
+   URL MCP pública.
 
 Al terminar la sesión el workflow:
 - Sube `data/shared_state.sqlite` como artifact `munin-state`.
