@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.pytest_temp*
+.env
+data/
+soul_pending/
+*.sqlite
+*.sqlite3
+*.log
+/dist
+/build
+*.egg-info/
