@@ -6,7 +6,7 @@ Munin talks to two very different directory servers:
 
 * Active Directory — uses ``sAMAccountName``, ``objectClass=user`` /
   ``objectClass=group``, ``userAccountControl`` bitfield, ``servicePrincipalName``.
-* OpenLDAP (our mock at ``dc=meli,dc=com``) — uses ``uid``, ``objectClass=inetOrgPerson``
+* OpenLDAP (our mock at ``dc=akatsuki,dc=com``) — uses ``uid``, ``objectClass=inetOrgPerson``
   and ``objectClass=groupOfNames`` / ``posixGroup``. Attributes like
   ``sAMAccountName`` and ``userAccountControl`` DO NOT EXIST in the default schema
   and cause ``invalid attribute type`` errors when included in a filter.
