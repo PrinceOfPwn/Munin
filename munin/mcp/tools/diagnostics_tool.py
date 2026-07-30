@@ -32,8 +32,7 @@ import shutil
 import time
 from typing import Any
 
-from ..main import MCP, STATE, SETTINGS, audited_tool  # noqa: TID252
-from ..opsec import command_exists  # noqa: TID252
+from ..main import MCP, SETTINGS, STATE, audited_tool  # noqa: TID252
 
 logger = logging.getLogger("munin-mcp.diagnostics")
 
@@ -70,13 +69,15 @@ def _probe_db() -> dict[str, Any]:
         counts: dict[str, int] = {}
         for table in ("shared_intel", "active_tasks", "agent_presence", "agent_messages",
                       "episodic", "semantic", "procedural", "generated_graphs", "agent_wake_queue"):
-            row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table}"  # noqa: S608 - fixed allowlist
+            ).fetchone()
             counts[table] = int(row["n"]) if row else 0
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("diagnostics DB close failed: %s", exc)
     from ..persistence import describe_backend  # noqa: PLC0415
     return {
         "ok": True,
@@ -136,8 +137,20 @@ def _probe_ldap(deep: bool) -> dict[str, Any]:
 
 def _probe_recon_binaries() -> dict[str, Any]:
     """Every recon tool checks its binary at call time; the probe just enumerates."""
-    binaries = ["nmap", "nuclei", "feroxbuster", "ffuf", "sqlmap", "hydra",
-                "smbmap", "netexec", "katana", "httpx", "searchsploit", "EyeWitness"]
+    binaries = [
+        "nmap",
+        "nuclei",
+        "feroxbuster",
+        "ffuf",
+        "sqlmap",
+        "hydra",
+        "smbmap",
+        "netexec",
+        "katana",
+        "pd-httpx",
+        "searchsploit",
+        "EyeWitness",
+    ]
     installed: dict[str, str] = {}
     missing: list[str] = []
     for b in binaries:
@@ -185,8 +198,9 @@ def _probe_tavily() -> dict[str, Any]:
 
 def _probe_forge() -> dict[str, Any]:
     """Count forged tools, verify each script still exists and is loadable."""
-    from .. import registry  # noqa: TID252,PLC0415
     from pathlib import Path as _Path  # noqa: PLC0415
+
+    from .. import registry  # noqa: TID252,PLC0415
     rows = registry.list_generated(STATE)
     healthy: list[str] = []
     broken: list[dict[str, Any]] = []
@@ -214,8 +228,8 @@ def _probe_forge() -> dict[str, Any]:
 def _probe_graphs() -> dict[str, Any]:
     """Count forged graphs; verify their tool_whitelist entries exist somewhere."""
     graphs = STATE.graph_list(include_inactive=False)
-    from ..subagents.base import _STATIC_TOOLS, ALL_SUBAGENT_TOOL_NAMES  # noqa: PLC0415,TID252
     from .. import registry  # noqa: TID252,PLC0415
+    from ..subagents.base import _STATIC_TOOLS, ALL_SUBAGENT_TOOL_NAMES  # noqa: PLC0415,TID252
     known_tools = set(_STATIC_TOOLS.keys()) | set(ALL_SUBAGENT_TOOL_NAMES)
     known_gen = {row["name"] for row in registry.list_generated(STATE)}
     known_tools |= known_gen
@@ -236,7 +250,6 @@ def _probe_graphs() -> dict[str, Any]:
 def _probe_wake_queue() -> dict[str, Any]:
     items = STATE.list_wake_queue(target_agent="", include_claimed=True)
     pending = [i for i in items if not i.get("claimed_at")]
-    stale = []  # (we don't track claim age here — leave to a future probe)
     return {
         "ok": True,
         "pending": len(pending),
@@ -299,6 +312,7 @@ def _probe_e2e_forge_wake() -> dict[str, Any]:
     """
     import json as _json  # noqa: PLC0415
     import time as _time  # noqa: PLC0415
+
     from .forge_tool import tool_forge  # noqa: PLC0415
     from .graph_forge_tool import graph_forge  # noqa: PLC0415
     from .munin_tools import munin_wake  # noqa: PLC0415
@@ -357,13 +371,13 @@ def _probe_e2e_forge_wake() -> dict[str, Any]:
     #    successive paranoid runs don't accumulate `gen__echo_text_*` clutter.
     try:
         STATE.graph_drop(graph_name)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("diagnostics probe graph cleanup failed: %s", exc)
     try:
         from .. import registry  # noqa: PLC0415
         registry.deactivate(STATE, tool_name)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("diagnostics probe tool cleanup failed: %s", exc)
 
     if not result_msg:
         return {
