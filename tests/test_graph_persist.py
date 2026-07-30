@@ -58,6 +58,27 @@ def test_reset_purge_removes_only_on_reset_manifests(store):
     assert store.graph_get("persistent") is not None
 
 
+def test_graph_names_with_same_slug_get_distinct_manifests(store):
+    from munin.mcp.graph_persist import persist_graph_manifest, rehydrate_graph_manifests
+
+    first_path = persist_graph_manifest(
+        store.settings,
+        {"name": "audit graph", "purpose": "first"},
+        queue_git=False,
+    )
+    second_path = persist_graph_manifest(
+        store.settings,
+        {"name": "audit-graph", "purpose": "second"},
+        queue_git=False,
+    )
+
+    assert first_path != second_path
+    assert first_path.exists() and second_path.exists()
+    result = rehydrate_graph_manifests(store, store.settings)
+    assert result["loaded"] >= 2
+    assert {row["name"] for row in store.graph_list()} >= {"audit graph", "audit-graph"}
+
+
 def test_runtime_cache_can_serve_stale_entries(store):
     store.cache_put("hugin", "graph", {"nodes": 3}, ttl_seconds=1)
     fresh = store.cache_get("hugin", "graph")

@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from ..mcp import registry
 from ..mcp.config import Settings, get_settings
 from ..mcp.shared_state import SharedStateStore
-from ..mcp import registry
 from ..mcp.tools import (
     diagnostics_tool,
     forge_tool,
@@ -32,11 +32,7 @@ from ..mcp.tools import (
     munin_tools,
     tavily_tool,
 )
-from ..subagents.base import (
-    _signature_to_openai,  # noqa: PLC2701
-    _tool_specs,
-    build_tool_catalog,
-)
+from ..subagents.base import _tool_specs, build_tool_catalog
 from .llm_client import LLMClient
 from .memory import Memory
 from .orchestrator import Orchestrator
@@ -81,10 +77,12 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "tavily_search": tavily_tool.tavily_search,
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
+    "hugin_neighbors": hugin_tool.hugin_neighbors,
     # Munin self-inspection & diagnostics
     "munin_self_diagnose": munin_tools.munin_self_diagnose,
     "munin_diagnostics":   diagnostics_tool.munin_diagnostics,
     "munin_read_source":   munin_tools.munin_read_source,
+    "read_wake_artifact":   munin_tools.read_wake_artifact,
     # Munin tools
     "list_generated_tools": munin_tools.list_generated_tools,
     "describe_generated_tool": munin_tools.describe_generated_tool,
@@ -130,7 +128,7 @@ class MuninAgent:
         for row in self.memory.known_tools():
             try:
                 fn = registry._load_callable(
-                    Path(row["script_path"]),
+                    registry.resolve_script_path(self.settings, row["script_path"]),
                     row["signature"].get("function_name") or row["name"].replace("gen__", ""),
                 )
                 catalog[row["name"]] = fn
@@ -173,8 +171,8 @@ class MuninAgent:
     _HARD_CEILING = 10_000
 
     def respond(self, user_input: str, *, max_iterations: int | None = None) -> dict[str, Any]:
-        import time
         import os
+        import time
 
         if max_iterations is None:
             env_val = os.environ.get("MUNIN_MAX_ITERATIONS", "").strip()

@@ -37,8 +37,8 @@ import queue
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 logger = logging.getLogger("munin-mcp.git_persist")
 
@@ -290,32 +290,29 @@ def _process_batch(batch: list[dict]) -> None:
         logger.warning("git commit failed: %s", exc.stderr.strip() if exc.stderr else exc)
         return
 
-    ok, msg = _push(repo, branch)
-    if ok:
-        logger.info("git_persist: pushed %d files to %s", len(unique_paths), branch)
-        return
-
-    # Push failed even after rebase-retry. Re-enqueue the batch (up to 3 total
-    # tries) so a transient failure doesn't lose the commit. After 3 the
-    # commit stays on disk / in local branch — the workflow's "Final git push"
-    # step is the last line of defense.
     attempts_max = 3
-    total_retries = max((item.get("retry_count", 0) for item in batch), default=0)
-    if total_retries + 1 < attempts_max:
-        logger.warning(
-            "git_persist: push failed on %s (attempt %d/%d) — re-queueing: %s",
-            branch, total_retries + 1, attempts_max, msg,
-        )
-        # Small backoff so we don't hammer a broken remote.
-        time.sleep(min(2 ** total_retries, 8))
-        for item in batch:
-            item["retry_count"] = total_retries + 1
-            _QUEUE.put(item)
-    else:
-        logger.error(
-            "git_persist: push failed on %s after %d attempts — commit stays local: %s",
-            branch, attempts_max, msg,
-        )
+    last_message = ""
+    for attempt in range(1, attempts_max + 1):
+        ok, last_message = _push(repo, branch)
+        if ok:
+            logger.info("git_persist: pushed %d files to %s", len(unique_paths), branch)
+            return
+        if attempt < attempts_max:
+            logger.warning(
+                "git_persist: push failed on %s (attempt %d/%d); retrying the existing commit: %s",
+                branch,
+                attempt,
+                attempts_max,
+                last_message,
+            )
+            time.sleep(min(2 ** (attempt - 1), 8))
+
+    logger.error(
+        "git_persist: push failed on %s after %d attempts — commit stays local: %s",
+        branch,
+        attempts_max,
+        last_message,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

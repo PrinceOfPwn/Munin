@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -34,7 +35,8 @@ def persist_graph_manifest(
         "created_by_agent": str(graph.get("created_by_agent", "munin")),
         "active": bool(graph.get("active", True)),
     }
-    path = settings.generated_graphs_dir / f"{safe_slug([name])}.json"
+    name_digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+    path = settings.generated_graphs_dir / f"{safe_slug([name])}-{name_digest}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(

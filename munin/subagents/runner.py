@@ -14,12 +14,16 @@ import argparse
 import json
 import logging
 import os
-import sys
+import threading
 import time
 from typing import Any
 
 from ..mcp.config import get_settings
-from ..mcp.shared_state import SharedStateStore
+from ..mcp.shared_state import (
+    PRESENCE_LEASE_SECONDS,
+    SharedStateStore,
+    presence_metadata,
+)
 from .base import ReActSubagentBase
 
 logging.basicConfig(level=logging.INFO, format="[munin-runner] %(levelname)s %(message)s")
@@ -199,13 +203,28 @@ def main() -> None:
     rehydrate_graph_manifests(state, settings)
     subagent = _load_subagent(args.name, state)
     pid = os.getpid()
-    state.upsert_presence(agent_name=args.name, role=getattr(subagent, "role", ""), status="RUNNING", current_task_id=None, metadata_json=json.dumps({"pid": pid}, ensure_ascii=True))
+    role = getattr(subagent, "role", "")
+
+    def set_presence(status: str, *, lease_seconds: int = PRESENCE_LEASE_SECONDS) -> None:
+        state.upsert_presence(
+            agent_name=args.name,
+            role=role,
+            status=status,
+            current_task_id=None,
+            metadata_json=json.dumps(
+                presence_metadata(pid, lease_seconds=lease_seconds),
+                ensure_ascii=True,
+            ),
+        )
+
+    set_presence("RUNNING")
     logger.info("subagent %s started pid=%d", args.name, pid)
 
     idle_since: float | None = None
     while True:
         item = state.claim_wake_item(target_agent=args.name, claimer_pid=pid)
         if not item:
+            set_presence("IDLE")
             if idle_since is None:
                 idle_since = time.monotonic()
             elif time.monotonic() - idle_since > args.sleep_after_idle:
@@ -219,13 +238,7 @@ def main() -> None:
                 #   2. Do one last claim attempt to sweep anything enqueued
                 #      during (1) or the previous poll.
                 #   3. Only then break.
-                state.upsert_presence(
-                    agent_name=args.name,
-                    role=getattr(subagent, "role", ""),
-                    status="EXITING",
-                    current_task_id=None,
-                    metadata_json=json.dumps({"pid": pid}, ensure_ascii=True),
-                )
+                set_presence("EXITING")
                 # Small pause so any concurrent `munin_wake` finishes its
                 # presence read before we make our final sweep.
                 time.sleep(0.1)
@@ -237,13 +250,7 @@ def main() -> None:
                 logger.info("subagent %s caught a wake at exit-time — processing it", args.name)
                 idle_since = None
                 # Presence is now EXITING; upgrade back to RUNNING while we work.
-                state.upsert_presence(
-                    agent_name=args.name,
-                    role=getattr(subagent, "role", ""),
-                    status="RUNNING",
-                    current_task_id=None,
-                    metadata_json=json.dumps({"pid": pid}, ensure_ascii=True),
-                )
+                set_presence("RUNNING")
             else:
                 time.sleep(args.poll_interval)
                 continue
@@ -251,10 +258,27 @@ def main() -> None:
         wake_id = item["id"]
         task = item["task"]
         logger.info("subagent %s handling wake %d task=%s", args.name, wake_id, json.dumps(task)[:200])
+        set_presence("RUNNING")
+        heartbeat_stop = threading.Event()
+
+        def heartbeat(stop_event: threading.Event = heartbeat_stop) -> None:
+            while not stop_event.wait(max(1, PRESENCE_LEASE_SECONDS // 3)):
+                set_presence("RUNNING")
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat,
+            name=f"munin-presence-{args.name}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             result = subagent.handle_task(task)
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "summary": "handler crashed", "error": {"code": "handler_crashed", "message": str(exc)}}
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=2)
+            set_presence("IDLE")
         state.episodic_record(
             agent=args.name,
             action="wake_handled",
@@ -282,9 +306,10 @@ def main() -> None:
                 {
                     "ok": result.get("ok"),
                     "summary": result.get("summary", ""),
+                    "wake_id": wake_id,
                     "artifact_path": artifact_ref,
                     "artifact_size_bytes": len(body_full),
-                    "note": "full result too large for inline body; read the artifact file",
+                    "note": f"full result too large; call read_wake_artifact(wake_id={wake_id})",
                 },
                 ensure_ascii=True,
             )
@@ -305,7 +330,7 @@ def main() -> None:
             ),
         )
 
-    state.upsert_presence(agent_name=args.name, role=getattr(subagent, "role", ""), status="IDLE", current_task_id=None, metadata_json="{}")
+    set_presence("IDLE", lease_seconds=0)
 
 
 if __name__ == "__main__":
