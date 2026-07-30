@@ -1,0 +1,45 @@
+version: "3.9"
+
+# OpenLDAP + phpLDAPAdmin — target del challenge de MELI Offensive Security.
+# El servicio `munin` es opcional: útil si querés correr todo dentro de docker.
+
+services:
+  openldap:
+    image: osixia/openldap:1.5.0
+    container_name: munin-openldap
+    environment:
+      LDAP_ORGANISATION: "MELI"
+      LDAP_DOMAIN: "meli.com"
+      LDAP_BASE_DN: "dc=meli,dc=com"
+      LDAP_ADMIN_PASSWORD: "itachi"
+      LDAP_CONFIG_PASSWORD: "itachi"
+      LDAP_TLS: "false"
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - openldap_data:/var/lib/ldap
+      - openldap_config:/etc/ldap/slapd.d
+      - ./scripts/ldap_seed:/container/service/slapd/assets/config/bootstrap/ldif/custom
+    networks:
+      - munin
+
+  phpldapadmin:
+    image: osixia/phpldapadmin:0.9.0
+    container_name: munin-phpldapadmin
+    environment:
+      PHPLDAPADMIN_LDAP_HOSTS: openldap
+      PHPLDAPADMIN_HTTPS: "false"
+    depends_on: [openldap]
+    ports:
+      - "8080:80"
+    networks:
+      - munin
+
+volumes:
+  openldap_data:
+  openldap_config:
+
+networks:
+  munin:
+    driver: bridge

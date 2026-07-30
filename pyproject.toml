@@ -1,0 +1,48 @@
+[tool.poetry]
+name = "munin"
+version = "0.1.0"
+description = "Agente ReAct de offensive-security con memoria persistente, soul editable, forjado dinámico de tools y grafos, y MCP OFFX integrado."
+authors = [""]
+license = "Proprietary"
+readme = "README.md"
+packages = [{ include = "munin" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+mcp = ">=1.0.0"
+requests = ">=2.31.0"
+ldap3 = ">=2.9.1"
+openai = ">=1.40.0"
+langchain = ">=0.3.0"
+langchain-openai = ">=0.2.0"
+langgraph = ">=0.2.40"
+langgraph-codeact = "*"
+pydantic = ">=2.0"
+click = ">=8.1"
+python-dotenv = ">=1.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = "*"
+pytest-cov = "*"
+respx = "*"
+ruff = ">=0.5"
+
+[tool.poetry.scripts]
+munin = "munin.cli:cli"
+
+[build-system]
+requires = ["poetry-core>=1.7.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = ["S101", "S603", "S607", "E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
