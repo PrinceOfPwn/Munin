@@ -71,6 +71,7 @@ def test_turso_authoritative_connection_skips_local_replica(tmp_path, monkeypatc
     assert kwargs == {
         "database": "libsql://munin-example.turso.io",
         "auth_token": "secret-token",
+        "isolation_level": None,
     }
     assert fake.native.sync_count == 0
     conn.commit()
