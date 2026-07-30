@@ -55,8 +55,8 @@ class AuditTrailLogger:
     def __init__(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root
 
-    def tiakatsukine_dir(self, run_id: str) -> Path:
-        return self.workspace_root / "runs" / run_id / "tiakatsukine"
+    def timeline_dir(self, run_id: str) -> Path:
+        return self.workspace_root / "runs" / run_id / "timeline"
 
     def record(
         self,
@@ -97,17 +97,17 @@ class AuditTrailLogger:
         return event
 
     def _append_jsonl(self, run_id: str, event: dict[str, Any]) -> None:
-        path = self.tiakatsukine_dir(run_id) / "events.jsonl"
+        path = self.timeline_dir(run_id) / "events.jsonl"
         ensure_parent(path)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json_dumps(event))
             handle.write("\n")
 
     def _append_markdown(self, run_id: str, event: dict[str, Any]) -> None:
-        path = self.tiakatsukine_dir(run_id) / "tiakatsukine.md"
+        path = self.timeline_dir(run_id) / "timeline.md"
         ensure_parent(path)
         if not path.exists():
-            path.write_text("# Tiakatsukine\n\n", encoding="utf-8")
+            path.write_text("# Timeline\n\n", encoding="utf-8")
         line = (
             f"- `{event['timestamp_start_utc']}` `{event['level']}` `{event['tool']}` "
             f"`{event['mode']}` `{event['status']}` target=`{event['target'] or '-'}` "

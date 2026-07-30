@@ -145,6 +145,30 @@ def _schema_supported_attributes(conn: Connection, requested: list[str]) -> list
     return [attr for attr in requested if attr.lower() not in ad_only]
 
 
+def _resolve_base_dn(conn: Connection, base_dn: str = "") -> str:
+    """Resolve base DN dynamically in priority order:
+    1. Explicit caller parameter `base_dn`
+    2. Environment / Settings configured `settings.ldap_base_dn`
+    3. Auto-discovered Root DSE naming context from the target LDAP / Active Directory server
+    4. Default fallback for local mock labs
+    """
+    if base_dn and base_dn.strip():
+        return base_dn.strip()
+    settings = _get_settings()
+    if settings.ldap_base_dn and settings.ldap_base_dn.strip():
+        return settings.ldap_base_dn.strip()
+    try:
+        info = getattr(conn.server, "info", None)
+        if info:
+            if hasattr(info, "other") and info.other and info.other.get("defaultNamingContext"):
+                return str(info.other["defaultNamingContext"][0])
+            if hasattr(info, "naming_contexts") and info.naming_contexts:
+                return str(info.naming_contexts[0])
+    except Exception:
+        pass
+    return "dc=akatsuki,dc=com"
+
+
 def _search(
     conn: Connection,
     *,
@@ -314,6 +338,7 @@ def get_user_groups(username: str, run_id: str = "") -> dict[str, Any]:
         return _error("get_user_groups", "ldap_bind_failed", str(exc))
 
     try:
+        base = _resolve_base_dn(conn)
         flavor = _detect_flavor(conn)
         # Filter accepts BOTH AD (sAMAccountName) and OpenLDAP (uid, cn). If the
         # server rejects sAMAccountName, `_search_tolerant` retries; but here we
@@ -325,7 +350,7 @@ def get_user_groups(username: str, run_id: str = "") -> dict[str, Any]:
         user_filter = f"(|{''.join(forms)})"
         user_entries = _search_tolerant(
             conn,
-            base_dn=settings.ldap_base_dn,
+            base_dn=base,
             filter_str=user_filter,
             attributes=_attrs_for(flavor, base=["distinguishedName", "memberOf", "cn", "uid"]),
         )
@@ -356,7 +381,7 @@ def get_user_groups(username: str, run_id: str = "") -> dict[str, Any]:
                 )
                 group_entries = _search_tolerant(
                     conn,
-                    base_dn=settings.ldap_base_dn,
+                    base_dn=base,
                     filter_str=group_filter,
                     attributes=["cn", "distinguishedName"],
                 )
@@ -417,6 +442,7 @@ def ldap_search(
     except LDAPException as exc:
         return _error("ldap_search", "ldap_bind_failed", str(exc))
     try:
+        base = _resolve_base_dn(conn, base_dn)
         flavor = _detect_flavor(conn)
         attrs = [a.strip() for a in attributes_csv.split(",") if a.strip()] or _attrs_for(flavor)
         entries = _search_tolerant(conn, base_dn=base, filter_str=filter_str, attributes=attrs, size_limit=size_limit)
@@ -472,6 +498,7 @@ def find_kerberoastable_users(base_dn: str = "", run_id: str = "") -> dict[str, 
         return _error("find_kerberoastable_users", "ldap_bind_failed", str(exc))
 
     try:
+        base = _resolve_base_dn(conn, base_dn)
         flavor = _detect_flavor(conn)
 
         if flavor == "ad":
@@ -532,14 +559,13 @@ def find_asrep_roastable_users(base_dn: str = "", run_id: str = "") -> dict[str,
     LDAP matching rule (bit 0x400000 = DONT_REQ_PREAUTH). On OpenLDAP (no such
     attribute) it falls back to the mock's ``employeeType=DONT_REQ_PREAUTH`` marker.
     """
-    settings = _get_settings()
-    base = base_dn.strip() or settings.ldap_base_dn
     try:
         conn = _connect()
     except LDAPException as exc:
         return _error("find_asrep_roastable_users", "ldap_bind_failed", str(exc))
 
     try:
+        base = _resolve_base_dn(conn, base_dn)
         flavor = _detect_flavor(conn)
 
         if flavor == "ad":
@@ -587,14 +613,13 @@ def find_domain_admins(base_dn: str = "", group_name: str = "Domain Admins", run
     Accepts AD ``objectClass=group`` and OpenLDAP ``groupOfNames`` / ``posixGroup`` /
     ``groupOfUniqueNames`` all in a single OR filter — works everywhere.
     """
-    settings = _get_settings()
-    base = base_dn.strip() or settings.ldap_base_dn
     esc_group = escape_filter_chars(group_name)
     try:
         conn = _connect()
     except LDAPException as exc:
         return _error("find_domain_admins", "ldap_bind_failed", str(exc))
     try:
+        base = _resolve_base_dn(conn, base_dn)
         # Ask for all possible member attributes — different objectClasses use different names.
         flavor = _detect_flavor(conn)
         group_classes = "(objectClass=group)" if flavor == "ad" else (
@@ -658,8 +683,6 @@ def find_domain_admins(base_dn: str = "", group_name: str = "Domain Admins", run
 @audited_tool("dump_domain_structure", "passive", lambda *a, **k: "sync")
 def dump_domain_structure(base_dn: str = "", size_limit: int = 500, run_id: str = "") -> dict[str, Any]:
     """Dump the OU/CN structure of the domain up to size_limit entries. Useful for enumeration and mapping."""
-    settings = _get_settings()
-    base = base_dn.strip() or settings.ldap_base_dn
     try:
         size_limit = int(size_limit)
     except (TypeError, ValueError):
@@ -669,6 +692,7 @@ def dump_domain_structure(base_dn: str = "", size_limit: int = 500, run_id: str 
     except LDAPException as exc:
         return _error("dump_domain_structure", "ldap_bind_failed", str(exc))
     try:
+        base = _resolve_base_dn(conn, base_dn)
         flavor = _detect_flavor(conn)
         filter_str = (
             "(|(objectClass=organizationalUnit)(objectClass=container)(objectClass=domain))"
