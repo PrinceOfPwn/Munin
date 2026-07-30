@@ -109,7 +109,15 @@ def test_stop_reason_repetition_detected(isolated_workspace, scripted_llm_factor
 
     agent.llm = type("CapturingLLM", (), {"chat": staticmethod(capturing_chat), "calls": property(lambda self: llm.calls)})()
 
-    result = agent.respond("loop test", max_iterations=10)
+    # The repetition guard at munin/core/munin_agent.py:565-610 trips in two
+    # stages: WINDOW_SIZE=6 calls fill the window → nudge injected +
+    # `recent_calls.clear()` (iter ~6), then a SECOND WINDOW_SIZE=6 identical
+    # calls after the nudge → `stop_reason = "repetition_detected"` (iter ~12).
+    # Setting `max_iterations=10` under-runs the budget so the for-else fallback
+    # at munin/core/munin_agent.py:611-613 trips first with
+    # `stop_reason = "max_iterations"` instead. Headroom: max_iterations=20 lets
+    # the second trip trigger cleanly (worst-case budget needed is 6+6+1=13).
+    result = agent.respond("loop test", max_iterations=20)
     assert result["stop_reason"] == "repetition_detected"
 
     # Verify the nudge system message appeared exactly once
