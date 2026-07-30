@@ -315,8 +315,10 @@ def open_connection(
     """Return a connection object compatible with the subset of sqlite3 Munin uses.
 
     * Plain paths / ``file:`` URIs → ``sqlite3.Connection`` with WAL + Row factory.
-    * ``libsql://`` URLs → ``_LibsqlConnectionProxy`` wrapping an embedded replica,
-      or a direct autocommit connection when ``authoritative=True``.
+    * ``libsql://`` URLs → a direct, autocommit Turso connection. Munin's
+      persistent state is authoritative online state; using an embedded replica
+      on disposable GitHub runners let the replica's Hrana stream expire during
+      long ReAct jobs and made a successful forge depend on an artifact upload.
 
     Callers can use ``with open_connection(url) as conn: conn.execute(...)`` or
     the connection as a plain object. Cursor rows behave like ``sqlite3.Row``.
@@ -348,35 +350,19 @@ def open_connection(
             "Or unset MUNIN_DB_URL to fall back to local SQLite."
         )
 
-    if "url" in params and authoritative:
-        # Critical cross-host claims must execute directly on Turso's primary
-        # connection. Autocommit is required here: otherwise the driver's first
-        # SELECT opens a read transaction, two contenders both try to upgrade it,
-        # and Hrana eventually expires one blocked stream. Every authoritative
-        # write is a single CAS statement, so it remains atomic in this mode.
+    if "url" in params:
+        # Always use Turso directly. The previous embedded-replica path stored
+        # mutable state on an ephemeral Actions runner and could surface
+        # ``Hrana: stream not found`` after a long-running agent. Autocommit
+        # keeps each database operation short-lived and remote-authoritative.
         native = _libsql.connect(
             database=params["url"],
             auth_token=auth_token or params.get("auth_token") or "",
             isolation_level=None,
         )
         return _LibsqlConnectionProxy(native, sync_on_commit=False)
-
-    if "url" in params:
-        if default_path is None:
-            raise RuntimeError("open_connection: Turso requires default_path for its local replica")
-        replica_path = default_path.with_suffix(".libsql")
-        replica_path.parent.mkdir(parents=True, exist_ok=True)
-        native = _libsql.connect(
-            str(replica_path),
-            sync_url=params["url"],
-            auth_token=auth_token or params.get("auth_token") or None,
-        )
-        try:
-            native.sync()
-        except Exception as exc:  # pragma: no cover - depends on remote availability
-            logger.warning("initial Turso sync failed; continuing from local replica: %s", exc)
-    else:  # libsql+file:
-        native = _libsql.connect(params["path"])
+    # libsql+file:
+    native = _libsql.connect(params["path"])
     # libsql doesn't need journal_mode/synchronous — Turso handles it server-side.
     return _LibsqlConnectionProxy(native)
 
