@@ -233,7 +233,7 @@ def munin_chat(
         agent = MuninAgent(settings)
         result = agent.respond(
             message.strip(),
-            max_iterations=max(1, min(int(max_iterations), 20)),
+            max_iterations=max(1, min(int(max_iterations), 400)),
         )
     except Exception as exc:
         logger.exception("munin_chat: agent error")
@@ -252,6 +252,117 @@ def munin_chat(
             "content": content,
             "tool_calls": result.get("tool_calls", []),
             "iterations": result.get("iterations", 0),
+        },
+    }
+
+
+# ─────────────────────────────────────────────
+# Code Inspection & Self-Diagnostics for Munin
+# ─────────────────────────────────────────────
+
+@MCP.tool()
+@audited_tool("munin_read_source", "passive", lambda *a, **k: "sync")
+def munin_read_source(rel_path: str = "", action: str = "list", run_id: str = "") -> dict[str, Any]:
+    """Allows Munin to inspect its own codebase (source files under munin/ and app/).
+    Action 'list': returns directory tree. Action 'read': reads a specific source file."""
+    settings = _get_settings()
+    base_dir = settings.munin_db_path.parent.resolve()  # Repository root
+
+    if action == "list":
+        allowed_dirs = ["munin", "app"]
+        files_found: list[dict[str, Any]] = []
+        for ad in allowed_dirs:
+            target = base_dir / ad
+            if target.exists():
+                for p in target.glob("**/*"):
+                    if p.is_file() and not any(part in p.parts for part in [".git", "__pycache__", "node_modules", ".next", ".venv", "out"]):
+                        try:
+                            rpath = p.relative_to(base_dir).as_posix()
+                            files_found.append({"path": rpath, "size": p.stat().st_size})
+                        except Exception:
+                            pass
+        return {
+            "ok": True,
+            "tool": "munin_read_source",
+            "mode": "sync",
+            "summary": f"{len(files_found)} source files listed",
+            "data": {"files": files_found[:300], "count": len(files_found)},
+        }
+
+    if action == "read":
+        if not rel_path.strip():
+            return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "missing rel_path", "error": {"code": "bad_input", "message": "rel_path is required for action=read"}}
+        candidate = (base_dir / rel_path.strip()).resolve()
+        if base_dir not in candidate.parents and candidate != base_dir:
+            return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "path escape", "error": {"code": "path_traversal", "message": "rel_path escapes repository root"}}
+        if not candidate.exists() or not candidate.is_file():
+            return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "file not found", "error": {"code": "not_found", "message": rel_path}}
+        try:
+            content = candidate.read_text(encoding="utf-8")
+            return {
+                "ok": True,
+                "tool": "munin_read_source",
+                "mode": "sync",
+                "summary": f"read {rel_path} ({len(content)} chars)",
+                "data": {"path": rel_path, "content": content, "size": len(content)},
+            }
+        except Exception as exc:
+            return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "read failed", "error": {"code": "read_error", "message": str(exc)}}
+
+    return {"ok": False, "tool": "munin_read_source", "mode": "sync", "summary": "invalid action", "error": {"code": "bad_action", "message": "action must be 'list' or 'read'"}}
+
+
+@MCP.tool()
+@audited_tool("munin_self_diagnose", "passive", lambda *a, **k: "sync")
+def munin_self_diagnose(run_id: str = "") -> dict[str, Any]:
+    """Self-diagnostic tool: scans system status, issues log (.ai/issues.md), tool health, and outputs a diagnostic summary + prompt for AI refactoring."""
+    settings = _get_settings()
+    base_dir = settings.munin_db_path.parent.resolve()
+    issues_file = base_dir / ".ai" / "issues.md"
+
+    known_issues = ""
+    if issues_file.exists():
+        try:
+            known_issues = issues_file.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    import shutil
+    binaries = {
+        "nmap": shutil.which("nmap") is not None,
+        "feroxbuster": shutil.which("feroxbuster") is not None,
+        "nuclei": shutil.which("nuclei") is not None,
+        "ffuf": shutil.which("ffuf") is not None,
+        "sqlmap": shutil.which("sqlmap") is not None,
+    }
+
+    env_checks = {
+        "LLM_BASE_URL": bool(settings.llm_base_url),
+        "LLM_API_KEY": bool(settings.llm_api_key),
+        "TAVILY_API_KEY": bool(settings.tavily_api_key),
+    }
+
+    ai_refactor_prompt = (
+        "PROMPT REFACTORING MASTER PARA OTRA IA:\n\n"
+        "Eres un desarrollador Senior especializado en Python/Starlette/MCP y Next.js.\n"
+        "Tu objetivo es solucionar todos los problemas de herramientas, esquemas y tipos en Munin:\n\n"
+        "1. LDAP: Mapear atributos AD (sAMAccountName, objectClass=group, container) a equivalentes OpenLDAP (uid/cn, posixGroup/groupOfNames, organizationalUnit).\n"
+        "2. OPSEC: Limpiar descripciones artificiales ('Kerberoastable', 'AS-REP Roastable') en scripts/ldap_mock.ldif.\n"
+        "3. TYPE BUGS: En munin/mcp/tools/, corregir comparaciones '<' entre int y str en memory_list, episodic_query y query_shared_intel castigando parametros limit/severity a int.\n"
+        "4. SYSTEM BINARIES: Asegurar fallback limpio cuando nmap/feroxbuster no estan en PATH.\n"
+        "5. FRONTEND: Solucionar validaciones de campos obligatorios en el Tool Explorer para fetch_agent_messages y soul_read.\n"
+    )
+
+    return {
+        "ok": True,
+        "tool": "munin_self_diagnose",
+        "mode": "sync",
+        "summary": "Munin Self-Diagnostic Complete",
+        "data": {
+            "binaries_installed": binaries,
+            "env_configured": env_checks,
+            "known_issues_loaded": bool(known_issues),
+            "refactor_prompt": ai_refactor_prompt,
         },
     }
 

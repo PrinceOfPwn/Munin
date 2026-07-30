@@ -76,6 +76,9 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "tavily_search": tavily_tool.tavily_search,
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
+    # Munin self-inspection & diagnostics
+    "munin_self_diagnose": munin_tools.munin_self_diagnose,
+    "munin_read_source": munin_tools.munin_read_source,
     # Munin tools
     "list_generated_tools": munin_tools.list_generated_tools,
     "describe_generated_tool": munin_tools.describe_generated_tool,
