@@ -72,3 +72,13 @@ Muchas de las herramientas de subagente intentan consultar esquemas de Active Di
   - **Advertencia:** `Possible EventEmitter memory leak detected. 11 close listeners added. Use emitter.setMaxListeners() to increase limit`.
 - **Stream Inactivo (`ObjectMultiplex`):**
   - **Advertencia:** `ObjectMultiplex - orphaned data for stream "app-init-liveness"` y `background-liveness`.
+
+---
+
+## 7. Paquetes y Binarios de Reconocimiento / Pentesting Faltantes
+
+- **Herramientas de Escaneo Inoperativas (`nmap`, `feroxbuster`, `nuclei`, `ffuf`, `sqlmap`, etc.):**
+  - **Síntoma:** Herramientas como `nmap_scan`, `feroxbuster_scan` o `cve_enrich` fallan o expiran al no encontrar los paquetes/binarios del sistema operativo instalados en el runner o contenedor.
+  - **Acción / Solución:**
+    - Asegurar la instalación de binarios requeridos (`nmap`, `feroxbuster`, `nuclei`, `ffuf`, `sqlmap`, `httpx`, `katana`) en la receta de instalación del entorno / CI (`live-session.yml` / Dockerfile).
+    - Implementar validaciones en preflight para notificar de forma limpia cuando una herramienta de sistema no está instalada en el `PATH`.
