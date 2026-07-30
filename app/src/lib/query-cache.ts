@@ -145,10 +145,10 @@ function buildSnapshot(client: QueryClient, actorId: string): StoredSnapshot {
   };
 }
 
-/** Hydrate only a snapshot that belongs to the authenticated actor. */
+/** Hydrate only a snapshot that belongs to the authenticated actor marker. */
 export async function hydrateMuninQueryCache(
   client: QueryClient,
-  actorId: string,
+  actorId = currentActorMarker() || "",
 ): Promise<boolean> {
   try {
     if (!actorId) {
@@ -173,18 +173,21 @@ export async function hydrateMuninQueryCache(
   }
 }
 
-/** Persist successful read models for one actor until the subscription is disposed. */
+/** Persist successful read models while an actor marker is active. */
 export function subscribeMuninQueryCache(
   client: QueryClient,
-  actorId: string,
+  fixedActorId?: string,
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let writing = false;
   let dirty = false;
   let disposed = false;
 
+  const activeActor = () => fixedActorId || currentActorMarker();
+
   const flush = async () => {
-    if (disposed || currentActorMarker() !== actorId) return;
+    const actorId = activeActor();
+    if (disposed || !actorId || currentActorMarker() !== actorId) return;
     if (writing) {
       dirty = true;
       return;
@@ -198,7 +201,8 @@ export function subscribeMuninQueryCache(
       // IndexedDB is an optional accelerator; ignore quota/private-mode failures.
     } finally {
       writing = false;
-      if (dirty && !disposed && currentActorMarker() === actorId) {
+      const nextActor = activeActor();
+      if (dirty && !disposed && nextActor && currentActorMarker() === nextActor) {
         dirty = false;
         timer = setTimeout(() => void flush(), 750);
       }
@@ -206,7 +210,8 @@ export function subscribeMuninQueryCache(
   };
 
   const unsubscribe = client.getQueryCache().subscribe(() => {
-    if (disposed || currentActorMarker() !== actorId) return;
+    const actorId = activeActor();
+    if (disposed || !actorId || currentActorMarker() !== actorId) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => void flush(), 750);
   });
