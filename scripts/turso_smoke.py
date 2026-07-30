@@ -30,18 +30,22 @@ def main() -> None:
         "sha": os.environ.get("GITHUB_SHA", "local"),
         "written_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
     }
+    marker_key = (
+        "ci:turso:roundtrip:"
+        f"{marker['run_id']}:{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+    )
     with tempfile.TemporaryDirectory(prefix="munin-turso-smoke-") as temp_dir:
         root = Path(temp_dir)
         writer_settings = replace(settings, munin_data_path=root / "writer")
         reader_settings = replace(settings, munin_data_path=root / "reader")
 
         writer = SharedStateStore(writer_settings)
-        writer.semantic_remember("ci:turso:roundtrip", marker)
-        writer.cache_put("ci", "turso-roundtrip", marker, ttl_seconds=3600)
+        writer.semantic_remember(marker_key, marker)
+        writer.cache_put("ci", marker_key, marker, ttl_seconds=3600)
 
         reader = SharedStateStore(reader_settings)
-        semantic = reader.semantic_recall("ci:turso:roundtrip")
-        cached = reader.cache_get("ci", "turso-roundtrip")
+        semantic = reader.semantic_recall(marker_key)
+        cached = reader.cache_get("ci", marker_key)
 
     if semantic != marker:
         raise RuntimeError(f"Turso semantic roundtrip mismatch: {semantic!r}")
@@ -50,7 +54,7 @@ def main() -> None:
 
     print(
         "Turso online roundtrip OK "
-        f"backend={describe_backend(settings.db_url)} run_id={marker['run_id']}"
+        f"backend={describe_backend(settings.db_url)} marker={marker_key}"
     )
 
 
