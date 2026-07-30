@@ -262,7 +262,8 @@ export class McpClient {
   private async fetchOnce<T>(
     method: string,
     params: any,
-    timeoutMs: number
+    timeoutMs: number,
+    allowSessionRecovery = true
   ): Promise<T> {
     if (method !== "initialize") {
       await this.ensureSession(timeoutMs);
@@ -271,6 +272,7 @@ export class McpClient {
     const url = this.endpoint();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const requestSessionId = this.sessionId;
 
     L.debug(`→ ${method}`, { id, timeoutMs, params });
 
@@ -306,6 +308,17 @@ export class McpClient {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       const status = res.status;
+      if (
+        status === 404 &&
+        method !== "initialize" &&
+        allowSessionRecovery &&
+        requestSessionId &&
+        this.sessionId === requestSessionId
+      ) {
+        L.info(`MCP session ${requestSessionId} expired; initializing a replacement`);
+        this.sessionId = "";
+        return this.fetchOnce<T>(method, params, timeoutMs, false);
+      }
       const kind: ErrorKind =
         status === 401 || status === 403 ? "auth"
         : status === 404               ? "not-found"

@@ -10,9 +10,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .. import registry  # noqa: TID252
 from ..main import MCP, STATE, audited_tool  # noqa: TID252
 from ..shared_state import _coerce_int  # noqa: TID252,PLC2701
-from .. import registry  # noqa: TID252
 
 logger = logging.getLogger("munin-mcp.munin_tools")
 
@@ -54,7 +54,8 @@ def describe_generated_tool(name: str, include_script: bool = False, run_id: str
         return {"ok": False, "tool": "describe_generated_tool", "mode": "sync", "summary": "not found", "error": {"code": "not_found", "message": name}}
     if include_script:
         try:
-            row = {**row, "script": Path(row["script_path"]).read_text(encoding="utf-8")}
+            script_path = registry.resolve_script_path(STATE.settings, row["script_path"])
+            row = {**row, "script": script_path.read_text(encoding="utf-8")}
         except Exception as exc:
             row = {**row, "script_error": str(exc)}
     return {"ok": True, "tool": "describe_generated_tool", "mode": "sync", "summary": row["name"], "data": row}
@@ -74,7 +75,10 @@ def run_generated_tool(name: str, args_json: str = "{}", run_id: str = "") -> di
     except Exception as exc:
         return {"ok": False, "tool": "run_generated_tool", "mode": "sync", "summary": "bad args_json", "error": {"code": "bad_input", "message": str(exc)}}
     try:
-        callable_fn = registry._load_callable(Path(row["script_path"]), row["signature"].get("function_name") or row["name"].replace("gen__", ""))
+        callable_fn = registry._load_callable(
+            registry.resolve_script_path(STATE.settings, row["script_path"]),
+            row["signature"].get("function_name") or row["name"].replace("gen__", ""),
+        )
         result = callable_fn(**args)
     except Exception as exc:
         return {"ok": False, "tool": "run_generated_tool", "mode": "sync", "summary": "exec failed", "error": {"code": "generated_tool_failed", "message": str(exc)}}
@@ -106,6 +110,56 @@ def deactivate_generated_tool(name: str, run_id: str = "") -> dict[str, Any]:
         "mode": "sync",
         "summary": f"deactivated {name}",
         "data": {"name": name, "deactivated": True},
+    }
+
+
+@MCP.tool()
+@audited_tool("read_wake_artifact", "passive", lambda *a, **k: "sync")
+def read_wake_artifact(
+    wake_id: int,
+    offset: int = 0,
+    max_chars: int = 12000,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Read a bounded chunk of a large subagent result by wake id."""
+    normalized_wake_id = _coerce_int(wake_id, -1)
+    normalized_offset = max(0, _coerce_int(offset, 0))
+    normalized_limit = max(1, min(_coerce_int(max_chars, 12000), 50000))
+    if normalized_wake_id < 1:
+        return {
+            "ok": False,
+            "tool": "read_wake_artifact",
+            "mode": "sync",
+            "summary": "invalid wake id",
+            "error": {"code": "bad_input", "message": "wake_id must be a positive integer"},
+        }
+
+    path = _get_settings().munin_data_path / "wake_artifacts" / f"wake_{normalized_wake_id}.json"
+    if not path.is_file():
+        return {
+            "ok": False,
+            "tool": "read_wake_artifact",
+            "mode": "sync",
+            "summary": "artifact not found",
+            "error": {"code": "not_found", "message": f"wake {normalized_wake_id}"},
+        }
+
+    content = path.read_text(encoding="utf-8")
+    chunk = content[normalized_offset:normalized_offset + normalized_limit]
+    next_offset = normalized_offset + len(chunk)
+    return {
+        "ok": True,
+        "tool": "read_wake_artifact",
+        "mode": "sync",
+        "summary": f"read wake {normalized_wake_id} artifact",
+        "data": {
+            "wake_id": normalized_wake_id,
+            "content": chunk,
+            "offset": normalized_offset,
+            "next_offset": next_offset,
+            "eof": next_offset >= len(content),
+            "total_chars": len(content),
+        },
     }
 
 
@@ -173,9 +227,10 @@ def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: 
     import os as _os  # noqa: PLC0415
     if _os.environ.get("MUNIN_AUTO_PR", "").strip() in ("1", "true", "yes", "on"):
         try:
-            from ..git_persist import _repo_root, _run_git, _ensure_git_identity  # noqa: TID252,PLC0415
             import shutil as _shutil  # noqa: PLC0415
             import subprocess as _subprocess  # noqa: PLC0415
+
+            from ..git_persist import _ensure_git_identity, _repo_root, _run_git  # noqa: TID252,PLC0415
             repo = _repo_root()
             if repo is None:
                 pr_info = {"attempted": True, "ok": False, "error": "not_a_git_repo"}
@@ -183,13 +238,19 @@ def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: 
                 pr_info = {"attempted": True, "ok": False, "error": "gh_cli_not_installed"}
             else:
                 branch = f"soul-proposal/{Path(path).stem}-{digest}"
+                base_branch = _os.environ.get("MUNIN_PR_BASE_BRANCH", "main").strip() or "main"
                 import tempfile as _tempfile  # noqa: PLC0415
 
                 # Build the proposal in a disposable worktree. The live process
                 # rereads soul/ on every turn, so its checkout must stay untouched.
                 with _tempfile.TemporaryDirectory(prefix="munin-soul-proposal-") as temporary_dir:
                     worktree = Path(temporary_dir) / "worktree"
-                    _run_git(["worktree", "add", "--detach", str(worktree), "HEAD"], cwd=repo)
+                    _run_git(["check-ref-format", "--branch", base_branch], cwd=repo)
+                    _run_git(["fetch", "origin", base_branch], cwd=repo)
+                    _run_git(
+                        ["worktree", "add", "--detach", str(worktree), f"origin/{base_branch}"],
+                        cwd=repo,
+                    )
                     try:
                         _ensure_git_identity(worktree)
                         _run_git(["checkout", "-B", branch], cwd=worktree)
@@ -214,6 +275,7 @@ def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: 
                         pr = _subprocess.run(
                             ["gh", "pr", "create",
                              "--head", branch,
+                             "--base", base_branch,
                              "--title", f"soul: {path} update",
                              "--body", pr_body,
                              "--label", "soul-proposal"],

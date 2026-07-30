@@ -8,6 +8,7 @@ import os
 import queue
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,55 @@ def test_idle_live_runner_keeps_spawn_slot(store):
     assert claim["reason"] == "runner_alive"
 
 
+def test_foreign_runner_lease_blocks_without_local_pid_probe(store):
+    store.upsert_presence(
+        agent_name="remote_agent",
+        role="test",
+        status="RUNNING",
+        current_task_id=None,
+        metadata_json=json.dumps(
+            {
+                "pid": 4242,
+                "instance_id": "github-run-other",
+                "lease_expires_at_epoch": time.time() + 60,
+            }
+        ),
+    )
+    claim = store.try_claim_spawn_slot(
+        agent_name="remote_agent",
+        spawner_pid=os.getpid(),
+        instance_id="github-run-current",
+    )
+    assert claim == {
+        "claimed": False,
+        "existing_pid": 4242,
+        "reason": "foreign_lease_active",
+    }
+
+
+def test_expired_foreign_runner_lease_releases_slot(store):
+    store.upsert_presence(
+        agent_name="remote_agent",
+        role="test",
+        status="RUNNING",
+        current_task_id=None,
+        metadata_json=json.dumps(
+            {
+                "pid": os.getpid(),
+                "instance_id": "github-run-other",
+                "lease_expires_at_epoch": time.time() - 1,
+            }
+        ),
+    )
+    claim = store.try_claim_spawn_slot(
+        agent_name="remote_agent",
+        spawner_pid=os.getpid(),
+        instance_id="github-run-current",
+    )
+    assert claim["claimed"] is True
+    assert store.list_presence()[0]["metadata"]["instance_id"] == "github-run-current"
+
+
 def test_generated_callable_normalizes_scalar_result(store):
     from munin.mcp.registry import wrap_generated_callable
 
@@ -41,6 +91,30 @@ def test_generated_callable_normalizes_scalar_result(store):
 
     assert result["ok"] is True
     assert result["data"] == {"result": "MUNIN"}
+
+
+def test_generated_tool_paths_are_persisted_portably(store):
+    from munin.mcp import registry
+
+    source = store.settings.generated_tools_dir / "portable_probe.py"
+    source.write_text(
+        "def portable_probe(value: str = 'ok') -> dict:\n"
+        "    return {'value': value}\n",
+        encoding="utf-8",
+    )
+    registry.register_state_only(
+        store,
+        slug="portable_probe",
+        description="portable",
+        script_path=source,
+        function_name="portable_probe",
+        signature={"function_name": "portable_probe"},
+    )
+
+    row = store.procedural_get("gen__portable_probe")
+    assert row is not None
+    assert row["script_path"] == "munin/generated/portable_probe.py"
+    assert registry.resolve_script_path(store.settings, row["script_path"]) == source.resolve()
 
 
 def test_deactivated_tool_is_detached_and_cannot_resolve(store):
@@ -124,6 +198,58 @@ def test_git_flush_waits_for_dequeued_inflight_task(monkeypatch):
     pending.task_done()
     waiter.join(timeout=0.5)
     assert finished.is_set()
+
+
+def test_git_push_retry_reuses_existing_commit(monkeypatch, tmp_path):
+    from munin.mcp import git_persist
+
+    git_calls: list[list[str]] = []
+    pushes = iter([(False, "offline"), (False, "offline"), (True, "ok")])
+
+    def fake_git(args, **kwargs):
+        git_calls.append(args)
+        return SimpleNamespace(returncode=1 if args[:3] == ["diff", "--staged", "--quiet"] else 0)
+
+    monkeypatch.setattr(git_persist, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(git_persist, "_ensure_git_identity", lambda repo: None)
+    monkeypatch.setattr(git_persist, "_current_branch_or_create", lambda repo: "munin/session-test")
+    monkeypatch.setattr(git_persist, "_run_git", fake_git)
+    monkeypatch.setattr(git_persist, "_push", lambda repo, branch: next(pushes))
+    monkeypatch.setattr(git_persist.time, "sleep", lambda seconds: None)
+
+    git_persist._process_batch(
+        [{"paths": ["munin/generated/probe.py"], "message": "forge probe", "kind": "tool"}]
+    )
+
+    assert sum(call[0] == "commit" for call in git_calls) == 1
+    assert sum(call[0] == "add" for call in git_calls) == 1
+
+
+def test_wake_artifact_reader_is_bounded_and_pathless(store, monkeypatch):
+    from munin.mcp.tools import munin_tools
+
+    monkeypatch.setattr(munin_tools, "STATE", store)
+    monkeypatch.setattr(munin_tools, "_get_settings", lambda: store.settings)
+    artifact_dir = store.settings.munin_data_path / "wake_artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "wake_7.json").write_text("abcdefghij", encoding="utf-8")
+
+    first = munin_tools.read_wake_artifact(7, max_chars=4)
+    second = munin_tools.read_wake_artifact(7, offset=first["data"]["next_offset"], max_chars=10)
+
+    assert first["data"]["content"] == "abcd"
+    assert first["data"]["eof"] is False
+    assert second["data"]["content"] == "efghij"
+    assert second["data"]["eof"] is True
+    assert munin_tools.read_wake_artifact(-1)["error"]["code"] == "bad_input"
+
+
+def test_hugin_neighbors_is_available_to_main_and_subagents():
+    from munin.core.munin_agent import _NATIVE_TOOLS
+    from munin.subagents.base import _STATIC_TOOLS
+
+    assert "hugin_neighbors" in _NATIVE_TOOLS
+    assert "hugin_neighbors" in _STATIC_TOOLS
 
 
 def test_cors_preflight_bypasses_bearer_and_exposes_session_header():
