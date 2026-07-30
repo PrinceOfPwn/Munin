@@ -98,6 +98,66 @@ def test_cross_host_claims_request_authoritative_connections(store, monkeypatch)
     assert authoritative_flags.count(True) == 2
 
 
+def test_atomic_claims_choose_exactly_one_winner(store):
+    def race(callables):
+        barrier = threading.Barrier(len(callables))
+        results: queue.Queue[object] = queue.Queue()
+
+        def contender(callback):
+            barrier.wait()
+            results.put(callback())
+
+        threads = [threading.Thread(target=contender, args=(callback,)) for callback in callables]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+        return [results.get_nowait() for _ in threads]
+
+    spawn_claims = race(
+        [
+            lambda: store.try_claim_spawn_slot(
+                agent_name="atomic-agent",
+                spawner_pid=os.getpid(),
+                instance_id="instance-a",
+            ),
+            lambda: store.try_claim_spawn_slot(
+                agent_name="atomic-agent",
+                spawner_pid=os.getpid(),
+                instance_id="instance-b",
+            ),
+        ]
+    )
+    assert sum(bool(claim["claimed"]) for claim in spawn_claims) == 1
+
+    task_claims = race(
+        [
+            lambda agent=agent: store.claim_task(
+                target_ip="127.0.0.1",
+                action="atomic-task",
+                assigned_agent=agent,
+                lease_seconds=60,
+                metadata_json="{}",
+                allow_steal_stale=False,
+            )
+            for agent in ("instance-a", "instance-b")
+        ]
+    )
+    assert sum(bool(claim.success) for claim in task_claims) == 1
+
+    wake_id = store.enqueue_wake(target_agent="atomic-agent", task={"work": True})
+    wake_claims = race(
+        [
+            lambda pid=pid: store.claim_wake_item(target_agent="atomic-agent", claimer_pid=pid)
+            for pid in (1001, 1002)
+        ]
+    )
+    claimed_wakes = [claim for claim in wake_claims if claim is not None]
+    assert len(claimed_wakes) == 1
+    assert claimed_wakes[0]["id"] == wake_id
+
+
 def test_generated_callable_normalizes_scalar_result(store):
     from munin.mcp.registry import wrap_generated_callable
 
