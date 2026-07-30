@@ -43,6 +43,11 @@ on:
         required: true
         default: true
         type: boolean
+      open_public_tunnel:
+        description: "Expose the authenticated MCP through a temporary public tunnel"
+        required: true
+        default: false
+        type: boolean
 
 # Required so Munin can commit forged tools + open soul-proposal PRs.
 permissions:
@@ -203,9 +208,12 @@ jobs:
       - name: Start Munin MCP server
         run: |
           mkdir -p data soul
-          # Bind 0.0.0.0 so tunnel can reach it
+          MCP_HOST="127.0.0.1"
+          if [ "${{ inputs.open_public_tunnel }}" = "true" ]; then
+              MCP_HOST="0.0.0.0"
+          fi
           nohup env PYTHONUNBUFFERED=1 RUNNER_TRACKING_ID="" poetry run munin mcp \
-              --transport streamable-http --host 0.0.0.0 --port 8890 \
+              --transport streamable-http --host "$MCP_HOST" --port 8890 \
               </dev/null > /tmp/munin.log 2>&1 &
           echo $! > /tmp/munin.pid
           sleep 2
@@ -279,9 +287,11 @@ jobs:
           PY
 
       - name: Open public tunnel
+        if: ${{ inputs.open_public_tunnel }}
         run: bash scripts/open_tunnel.sh 8890
 
       - name: Print connection info
+        if: ${{ inputs.open_public_tunnel }}
         run: |
           URL="${MUNIN_PUBLIC_URL:-http://localhost:8890}"
           TOKEN="${MUNIN_MCP_AUTH_TOKEN}"
