@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { uuid } from "@/lib/utils";
-import { getMcpClient, extractToolResultContent } from "@/lib/mcp";
+import { getMcpClient, extractToolResultContent, unwrapToolData } from "@/lib/mcp";
 import { log } from "@/lib/logger";
 import type {
   ViewKey,
@@ -61,25 +61,36 @@ interface MuninState {
   updateToolCall: (messageId: string, callId: string, patch: Partial<ToolCall>) => void;
 }
 
-const DEFAULT_URL = typeof window !== "undefined" ? window.location.origin : "http://localhost:8890";
-const DEFAULT_TOKEN = "munin2024";
+const LOCAL_MCP_URL = "http://localhost:8890";
+const DEFAULT_TOKEN = "";
 const L = log.store;
 
+function defaultMcpUrl(): string {
+  if (
+    typeof window !== "undefined" &&
+    process.env.NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN === "1"
+  ) {
+    return window.location.origin;
+  }
+  return LOCAL_MCP_URL;
+}
+
 function loadStoredConfig(): { url: string; token: string } {
-  if (typeof window === "undefined") return { url: DEFAULT_URL, token: DEFAULT_TOKEN };
+  const fallbackUrl = defaultMcpUrl();
+  if (typeof window === "undefined") return { url: fallbackUrl, token: DEFAULT_TOKEN };
   try {
     const raw = window.localStorage.getItem("munin.config");
     if (raw) {
       const parsed = JSON.parse(raw);
-      const url = parsed.url || DEFAULT_URL;
+      const url = parsed.url || fallbackUrl;
       L.info("Config loaded from localStorage", { url, hasToken: !!parsed.token });
       return { url, token: parsed.token || DEFAULT_TOKEN };
     }
   } catch (e) {
     L.warn("Failed to load config from localStorage — using defaults", e);
   }
-  L.info("No stored config — using defaults", { url: DEFAULT_URL });
-  return { url: DEFAULT_URL, token: DEFAULT_TOKEN };
+  L.info("No stored config — using defaults", { url: fallbackUrl });
+  return { url: fallbackUrl, token: DEFAULT_TOKEN };
 }
 
 function saveStoredConfig(url: string, token: string) {
@@ -104,7 +115,7 @@ const initialLive: LiveState = {
 };
 
 export const useMuninStore = create<MuninState>((set, get) => ({
-  mcpUrl: DEFAULT_URL,
+  mcpUrl: LOCAL_MCP_URL,
   mcpToken: DEFAULT_TOKEN,
   settingsOpen: false,
   view: "chat",
@@ -244,9 +255,11 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("list_agent_presence", {})
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          if (Array.isArray(json)) next.presence = json;
-          else if (json && Array.isArray(json.presence)) next.presence = json.presence;
-          else if (json && Array.isArray(json.agents)) next.presence = json.agents;
+          const data = unwrapToolData(json);
+          if (Array.isArray(data)) next.presence = data;
+          else if (data && Array.isArray(data.presence)) next.presence = data.presence;
+          else if (data && Array.isArray(data.agents)) next.presence = data.agents;
+          else if (data && Array.isArray(data.matches)) next.presence = data.matches;
           else next.presence = [];
           log.poll.debug(`list_agent_presence → ${next.presence?.length ?? 0} agents`);
         })
@@ -260,8 +273,9 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("list_generated_tools", {})
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          if (Array.isArray(json)) next.forgedToolCount = json.length;
-          else if (json && Array.isArray(json.tools)) next.forgedToolCount = json.tools.length;
+          const data = unwrapToolData(json);
+          if (Array.isArray(data)) next.forgedToolCount = data.length;
+          else if (data && Array.isArray(data.tools)) next.forgedToolCount = data.tools.length;
           else next.forgedToolCount = 0;
           log.poll.debug(`list_generated_tools → ${next.forgedToolCount}`);
         })
@@ -275,12 +289,13 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("munin_wake_list", {})
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          const arr = Array.isArray(json)
-            ? json
-            : json && Array.isArray(json.items)
-            ? json.items
-            : json && Array.isArray(json.queue)
-            ? json.queue
+          const data = unwrapToolData(json);
+          const arr = Array.isArray(data)
+            ? data
+            : data && Array.isArray(data.items)
+            ? data.items
+            : data && Array.isArray(data.queue)
+            ? data.queue
             : [];
           next.wakePendingCount = arr.filter(
             (x: WakeItem) => !x.status || /pending|queued|waiting/i.test(String(x.status))
@@ -297,10 +312,11 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         .callTool("episodic_query", { limit: 1 })
         .then((r) => {
           const { json } = extractToolResultContent(r);
-          if (Array.isArray(json) && json.length > 0) next.lastEpisodic = json[0];
-          else if (json && Array.isArray(json.events) && json.events.length > 0)
-            next.lastEpisodic = json.events[0];
-          else if (json && !Array.isArray(json)) next.lastEpisodic = json;
+          const data = unwrapToolData(json);
+          if (Array.isArray(data) && data.length > 0) next.lastEpisodic = data[0];
+          else if (data && Array.isArray(data.events) && data.events.length > 0)
+            next.lastEpisodic = data.events[0];
+          else if (data && !Array.isArray(data)) next.lastEpisodic = data;
           else next.lastEpisodic = null;
           log.poll.debug("episodic_query →", next.lastEpisodic ? "1 event" : "empty");
         })
@@ -389,10 +405,14 @@ export const useMuninStore = create<MuninState>((set, get) => ({
     );
 
     if (chatTool) {
+      if (chatTool.name === "munin_chat") {
+        await runMuninChatJob(assistantId, text, set, get);
+        return;
+      }
       await runToolCallInline(
         assistantId,
         chatTool.name,
-        { message: text, prompt: text, input: text, text },
+        { message: text },
         set,
         get
       );
@@ -454,10 +474,11 @@ function parseSlashCommand(input: string): {
   const stripped = input.replace(/^\//, "");
   const parts = stripped.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
   if (parts.length === 0) return { name: "", args: {} };
-  const name = parts[0] || "";
+  const name = parts[0] ?? "";
   const args: Record<string, any> = {};
   for (let i = 1; i < parts.length; i++) {
     const p = parts[i];
+    if (!p) continue;
     const eq = p.indexOf("=");
     if (eq === -1) {
       // positional — try to fill by index later; skip for now
@@ -470,6 +491,105 @@ function parseSlashCommand(input: string): {
     }
   }
   return { name, args };
+}
+
+/**
+ * Start a ReAct conversation as a server-side job and render its observable
+ * lifecycle as it happens. We deliberately expose execution events (model
+ * request/tool start/tool result), not private model chain-of-thought.
+ */
+async function runMuninChatJob(
+  assistantId: string,
+  message: string,
+  set: (fn: (s: MuninState) => Partial<MuninState>) => void,
+  get: () => MuninState
+) {
+  const callId = uuid();
+  const startTime = Date.now();
+  get().appendToolCallToMessage(assistantId, {
+    id: callId,
+    name: "munin_chat",
+    arguments: { message },
+    status: "running",
+    startTime,
+    result: { status: "starting", progress: [] },
+  });
+
+  const client = getMcpClient({ baseUrl: get().mcpUrl, token: get().mcpToken });
+  try {
+    const started = await client.callTool("munin_chat", { message, mode: "async" });
+    const { json, text, isError } = extractToolResultContent(started);
+    if (isError) throw new Error(text || "Munin rejected the conversation");
+    const jobId = json?.data?.job_id || json?.job_id;
+    if (!jobId) throw new Error("Munin did not return a conversation job ID");
+
+    const deadline = Date.now() + 12 * 60_000;
+    while (Date.now() < deadline) {
+      await sleep(1_500);
+      const statusResponse = await client.callTool("job_status", { job_id: jobId, include_result: true });
+      const { json: statusJson, text: statusText, isError: statusError } = extractToolResultContent(statusResponse);
+      if (statusError) throw new Error(statusText || "Unable to read Munin conversation status");
+      const data = statusJson?.data || statusJson;
+      const progress = Array.isArray(data?.progress) ? data.progress : [];
+      get().updateToolCall(assistantId, callId, {
+        result: { job_id: jobId, status: data?.status || "running", progress },
+      });
+
+      if (data?.status === "queued" || data?.status === "running") continue;
+
+      const result = data?.result;
+      const failed = data?.status !== "succeeded" || !result?.ok;
+      if (failed) {
+        throw new Error(result?.error?.message || data?.stderr_tail || `Conversation ${data?.status || "failed"}`);
+      }
+
+      const output = result?.data || {};
+      const finishTime = Date.now();
+      get().updateToolCall(assistantId, callId, {
+        status: "success",
+        endTime: finishTime,
+        result: { job_id: jobId, ...output, progress },
+      });
+      for (const tool of output.tool_calls || []) {
+        get().appendToolCallToMessage(assistantId, {
+          id: uuid(),
+          name: tool.name || "unknown_tool",
+          arguments: tool.arguments || {},
+          status: tool.ok === false ? "error" : "success",
+          startTime: finishTime - (tool.elapsed_ms || 0),
+          endTime: finishTime,
+          result: tool.result,
+          error: tool.error,
+        });
+      }
+      set((s) => ({
+        messages: s.messages.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: output.content || "(no response)", thinking: false }
+            : m
+        ),
+      }));
+      return;
+    }
+    throw new Error("Conversation is still running after 12 minutes; it continues on the server.");
+  } catch (e: any) {
+    get().updateToolCall(assistantId, callId, {
+      status: "error",
+      endTime: Date.now(),
+      error: { code: "conversation_error", message: e?.message || String(e) },
+    });
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === assistantId
+          ? { ...m, content: `**Error** calling \`munin_chat\`: ${e?.message || String(e)}`, thinking: false }
+          : m
+      ),
+    }));
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function coerce(v: string): any {

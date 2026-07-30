@@ -112,6 +112,17 @@ def tool_forge(
     except Exception as exc:
         return {"ok": False, "tool": "tool_forge", "mode": "sync", "summary": "registry.register failed", "error": {"code": "registry_failed", "message": str(exc)}}
 
+    # Persist to git if enabled (runner mode). No-op locally unless MUNIN_AUTO_COMMIT=1.
+    try:
+        from .. import git_persist  # noqa: TID252,PLC0415
+        git_persist.commit_forged_tool(
+            script_path=outcome["script_path"],
+            tool_name=registered["name"],
+            description=outcome.get("description", spec)[:200],
+        )
+    except Exception as exc:  # pragma: no cover — persistence is best-effort
+        logger.warning("git_persist.commit_forged_tool failed: %s", exc)
+
     return {
         "ok": True,
         "tool": "tool_forge",

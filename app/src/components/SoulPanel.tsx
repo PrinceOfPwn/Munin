@@ -8,7 +8,7 @@ import { FileText, Pencil, X, Loader2, AlertTriangle } from "lucide-react";
 import EmptyState from "./EmptyState";
 import Drawer from "./Drawer";
 import { useMuninStore } from "@/store/muninStore";
-import { getMcpClient, extractToolResultContent } from "@/lib/mcp";
+import { getMcpClient, extractToolResultContent, unwrapToolData } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
 
 export default function SoulPanel() {
@@ -28,13 +28,14 @@ export default function SoulPanel() {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("soul_list", {});
       const { json, text } = extractToolResultContent(r);
+      const data = unwrapToolData(json);
       let arr: string[] = [];
-      if (Array.isArray(json)) {
-        arr = json.map((x: any) => (typeof x === "string" ? x : x.name || x.path || String(x)));
-      } else if (json && Array.isArray(json.files)) {
-        arr = json.files.map((x: any) => (typeof x === "string" ? x : x.name || x.path || String(x)));
-      } else if (json && Array.isArray(json.items)) {
-        arr = json.items.map((x: any) => (typeof x === "string" ? x : x.name || x.path || String(x)));
+      if (Array.isArray(data)) {
+        arr = data.map((x: any) => (typeof x === "string" ? x : x.name || x.path || String(x)));
+      } else if (data && Array.isArray(data.files)) {
+        arr = data.files.map((x: any) => (typeof x === "string" ? x : x.name || x.path || String(x)));
+      } else if (data && Array.isArray(data.items)) {
+        arr = data.items.map((x: any) => (typeof x === "string" ? x : x.name || x.path || String(x)));
       } else if (text) {
         arr = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
       }
@@ -53,9 +54,10 @@ export default function SoulPanel() {
     setContent("");
     try {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
-      const r = await client.callTool("soul_read", { name });
-      const { text } = extractToolResultContent(r);
-      setContent(text || "");
+      const r = await client.callTool("soul_read", { path: name });
+      const { json, text } = extractToolResultContent(r);
+      const data = unwrapToolData(json);
+      setContent(data?.content || text || "");
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -206,9 +208,9 @@ function SoulEditor({
     try {
       const client = getMcpClient({ baseUrl: mcpUrl, token: mcpToken });
       const r = await client.callTool("soul_propose_edit", {
-        name,
-        content: draft,
-        summary: summary || undefined,
+        path: name,
+        new_content: draft,
+        rationale: summary || undefined,
       });
       const { text, isError } = extractToolResultContent(r);
       if (isError) {
