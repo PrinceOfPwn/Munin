@@ -1,8 +1,8 @@
 # Munin Live Session — GitHub Actions runner with Kali offensive toolchain.
 #
-# Runs on ubuntu-latest but executes Munin INSIDE a Kali rolling container. Ubuntu
-# alone lacks nmap, nuclei, feroxbuster, ffuf, sqlmap, hydra, etc. — Kali ships
-# them out of the box, which means Munin's recon/scan tools actually work.
+# Runs on ubuntu-latest but executes Munin INSIDE a Kali rolling container.
+# The rolling container is intentionally minimal, so the workflow installs and
+# verifies Munin's offensive binaries before the server is allowed to start.
 #
 # Design decisions:
 #   - Runner OS = ubuntu-latest (only supported by GitHub Actions for now).
@@ -60,10 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
-    # Kali gives us nmap, nuclei, feroxbuster, ffuf, sqlmap, hydra, smbmap,
-    # netexec, katana, exploitdb / searchsploit — all in $PATH out of the box.
-    # We run everything as root inside the container (Kali's default) so the
-    # offensive binaries can bind raw sockets, etc.
+    # We run as root inside the container (Kali's default) so installed
+    # offensive binaries can bind raw sockets when a graph authorizes it.
     container:
       image: kalilinux/kali-rolling
       options: --user root
@@ -151,15 +149,22 @@ jobs:
               echo "· No previous state artifact — Munin starts fresh."
           fi
 
-      # Kali images ship offensive tools but not Python-dev-friendly. Install
-      # Python 3, Poetry, ldap-utils, and a few build helpers.
-      - name: Install Python + build essentials
+      - name: Install Munin runtime + offensive toolchain
         run: |
           apt-get update -qq
           apt-get install -y --no-install-recommends \
               python3 python3-pip python3-venv python3-poetry \
               ca-certificates curl git pipx ldap-utils \
-              build-essential libldap2-dev libsasl2-dev libssl-dev
+              build-essential libldap2-dev libsasl2-dev libssl-dev golang-go \
+              nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec \
+              httpx-toolkit exploitdb eyewitness
+          ln -s /usr/bin/httpx-toolkit /usr/local/bin/pd-httpx
+          if command -v eyewitness >/dev/null 2>&1 && ! command -v EyeWitness >/dev/null 2>&1; then
+              ln -s "$(command -v eyewitness)" /usr/local/bin/EyeWitness
+          fi
+          if ! command -v katana >/dev/null 2>&1; then
+              GOBIN=/usr/local/bin go install github.com/projectdiscovery/katana/cmd/katana@latest
+          fi
           if ! command -v poetry >/dev/null 2>&1; then
               pipx install poetry
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -168,14 +173,20 @@ jobs:
 
       - name: Verify offensive toolchain is present
         run: |
-          echo "── Binary preflight (should all be present on Kali) ──"
-          for bin in nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec katana searchsploit; do
+          echo "── Required runner binaries ──"
+          missing=0
+          for bin in curl nmap nuclei feroxbuster ffuf sqlmap hydra smbmap netexec katana pd-httpx searchsploit EyeWitness; do
               if command -v "$bin" >/dev/null 2>&1; then
                   printf "  \033[32m✓\033[0m %-14s → %s\n" "$bin" "$(command -v "$bin")"
               else
-                  printf "  \033[33m✗\033[0m %-14s (missing — that tool will return structured missing_dependency)\n" "$bin"
+                  printf "  \033[31m✗\033[0m %-14s (required)\n" "$bin"
+                  missing=$((missing + 1))
               fi
           done
+          if [ "$missing" -ne 0 ]; then
+              echo "::error::${missing} required offensive binaries are missing"
+              exit 1
+          fi
           # Prime nuclei templates so the first tool call doesn't have to.
           nuclei -silent -ut 2>/dev/null || true
 
@@ -266,24 +277,72 @@ jobs:
               except OSError:
                   pass
               sys.exit(1)
-          req_list = urllib.request.Request(
-              url,
-              data=json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}}).encode(),
-              headers={
+          rpc_headers = {
                   'Content-Type': 'application/json',
                   'Accept': 'application/json, text/event-stream',
                   'Authorization': f'Bearer {token}',
                   'mcp-session-id': session_id,
-              },
-          )
-          with urllib.request.urlopen(req_list, timeout=15) as resp:
-              for line in resp.read().decode().splitlines():
+          }
+
+          def rpc(request_id, method, params, timeout=30):
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps({
+                      'jsonrpc': '2.0',
+                      'id': request_id,
+                      'method': method,
+                      'params': params,
+                  }).encode(),
+                  headers=rpc_headers,
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as resp:
+                  lines = resp.read().decode().splitlines()
+              for line in lines:
                   if line.startswith('data: '):
-                      tools = json.loads(line[6:]).get('result', {}).get('tools', [])
-                      print(f'OK — {len(tools)} tools registered')
-                      break
-              else:
-                  print('::error::no data: line in tools/list response', file=sys.stderr); sys.exit(1)
+                      return json.loads(line[6:])
+              raise RuntimeError(f'no data line in {method} response')
+
+          tool_message = rpc(2, 'tools/list', {})
+          tools = tool_message.get('result', {}).get('tools', [])
+          tool_names = {tool.get('name') for tool in tools}
+          required_tools = {
+              'nmap_scan', 'httpx_probe', 'nuclei_scan', 'feroxbuster_scan',
+              'ffuf_scan', 'katana_crawl', 'hydra_attack', 'sqlmap_scan',
+              'smbmap_scan', 'netexec_scan', 'munin_diagnostics',
+          }
+          missing_tools = sorted(required_tools - tool_names)
+          if missing_tools:
+              print(f'::error::missing MCP tools: {missing_tools}', file=sys.stderr)
+              sys.exit(1)
+          print(f'OK — {len(tools)} tools registered; offensive tool surface complete')
+
+          nmap_message = rpc(
+              3,
+              'tools/call',
+              {
+                  'name': 'nmap_scan',
+                  'arguments': {
+                      'target': 'ldap',
+                      'scan_type': '-sT',
+                      'ports': '389',
+                      'additional_args': '-Pn',
+                      'mode': 'sync',
+                      'timeout': 60,
+                      'run_id': f'ci-nmap-{os.environ.get("GITHUB_RUN_ID", "manual")}',
+                  },
+              },
+              timeout=90,
+          )
+          nmap_rendered = json.dumps(nmap_message, ensure_ascii=False)
+          if (
+              nmap_message.get('error')
+              or nmap_message.get('result', {}).get('isError')
+              or 'missing_dependency' in nmap_rendered
+              or '389/tcp' not in nmap_rendered
+          ):
+              print(f'::error::nmap MCP smoke failed: {nmap_rendered}', file=sys.stderr)
+              sys.exit(1)
+          print('OK — nmap_scan executed through MCP against the authorized LDAP service')
           PY
 
       - name: Open public tunnel
@@ -294,25 +353,24 @@ jobs:
         if: ${{ inputs.open_public_tunnel }}
         run: |
           URL="${MUNIN_PUBLIC_URL:-http://localhost:8890}"
-          TOKEN="${MUNIN_MCP_AUTH_TOKEN}"
           echo "URL: ${URL}"
-          echo "Token: ${TOKEN}"
+          echo "Token: configured as repository secret (not printed)"
           cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
           ## Munin — live session
 
           | | |
           |---|---|
           | **URL** | \`${URL}\` |
-          | **Token** | \`${TOKEN}\` |
+          | **Authentication** | Bearer token from the \`MUNIN_MCP_AUTH_TOKEN\` repository secret |
           | **Duration** | ${{ inputs.duration_minutes }} min |
           | **Preflight** | \`${{ inputs.preflight_policy }}\` |
           | **Max iterations** | \`${MUNIN_MAX_ITERATIONS:-unbounded}\` |
-          | **Runner** | \`kalilinux/kali-rolling\` (offensive toolchain preinstalled) |
+          | **Runner** | \`kalilinux/kali-rolling\` (offensive toolchain installed and verified) |
 
           Quick test:
           \`\`\`bash
           curl -X POST ${URL}/mcp/ \\
-              -H "Authorization: Bearer ${TOKEN}" \\
+              -H "Authorization: Bearer <MUNIN_MCP_AUTH_TOKEN>" \\
               -H "Content-Type: application/json" \\
               -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'
           \`\`\`
