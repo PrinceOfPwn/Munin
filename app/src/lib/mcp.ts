@@ -265,6 +265,8 @@ export class McpClient {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       const status = res.status;
+      // Reset session on any HTTP error so future requests re-handshake cleanly
+      this.sessionId = null;
       const kind: ErrorKind =
         status === 401 || status === 403 ? "auth"
         : status === 404               ? "not-found"
