@@ -1,7 +1,7 @@
 # PR-01 — Parity baseline (characterization tests, no production change)
 
 - **Head**: `raven-mind/migration-issue9/pr-01-parity-baseline`
-- **Base**: `raven-mind/migration-issue9`
+- **Base**: `raven-mind/issue9` (renamed from `raven-mind/migration-issue9` to allow nested-ref heads `raven-mind/migration-issue9/pr-NN-*` — git rejects a ref being both a leaf and a directory prefix in the same path)
 - **Open architectural questions**: None — Stage 0 verification complete (pytest-asyncio `asyncio_mode=auto` contract confirmed against pyproject.toml; existing `tests/conftest.py` reuses `isolated_workspace` + `store` fixtures; existing `tests/test_human_in_loop.py` shows the `_CapturingLLM` deterministic-LLM pattern to extend).
 
 ---
