@@ -43,9 +43,16 @@ Muchas de las herramientas de subagente intentan consultar esquemas de Active Di
 
 ## 4. Errores Internos en Herramientas MCP
 
-- **`memory_list` Type Error:**
-  - **Error:** `memory_list failed: '<' not supported between instances of 'int' and 'str'`.
-  - **Causa:** Intento de ordenamiento (`sort` / `<`) comparando enteros y strings en las claves o metadatos de la memoria semántica/episódica.
+- **`memory_list`, `episodic_query` y `query_shared_intel` Type Error (`int` vs `str`):**
+  - **Error:** `'<' not supported between instances of 'int' and 'str'`.
+  - **Síntoma:** Ocurre al llamar `memory_list`, o al pasar filtros no por defecto en `episodic_query` (ej: `action="FAILED"`, `limit="20"`) y `query_shared_intel` (ej: `severity="HIGH"`, `limit="20"`).
+  - **Causa:** Comparación directa (`<` / `sort`) entre enteros y strings al filtrar o listar registros.
+
+- **Herramientas MCP Faltantes o No Registradas:**
+  - **`shared_state_overview`:** Referenciada en `skills.md` pero no está registrada en el servidor MCP ni exportada como herramienta.
+
+- **Herramientas de Reconocimiento Externo sin Configuración:**
+  - **`tavily_search`:** Falla con `TAVILY_API_KEY empty` / `TAVILY_API_KEY not configured`.
 
 - **Integración de Hugin (Passive Intel Provider):**
   - **`hugin_search`:** Timeout en la conexión HTTPS (`Read timed out (read timeout=20)`).
