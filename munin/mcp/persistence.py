@@ -13,7 +13,7 @@ This module lets you swap the backing store with a single environment variable
 
   * unset / empty  →  local file at ``$MUNIN_DATA_PATH/shared_state.sqlite``
   * ``file:/path`` →  local file at that path
-  * ``libsql://<host>`` + auth token    →  Turso embedded replica
+  * ``libsql://<host>`` + auth token    →  direct Turso connection
   * ``libsql+file:/path``               →  local libsql database (rarely useful)
 
 Public API mirrors the subset of ``sqlite3`` we actually use:
