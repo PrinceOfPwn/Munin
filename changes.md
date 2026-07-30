@@ -1,0 +1,145 @@
+# Changes
+
+## 2026-07-30 — Migration plan for issue #9 (Deep Agents + LangGraph + Vercel AI SDK)
+
+**Added**: `GLUE_INVENTORY.md`, `IMPROVEMENT_BACKLOG.md`, `IMPLEMENTATION_ROADMAP.md`
+
+**Branch**: `raven-mind/migration-issue9` (off `origin/main`).
+
+### Discovery (completed)
+
+- Read `pyproject.toml` + `app/package.json` + `app/package-lock.json` — confirmed installed
+  version constraints: `langgraph >= 0.2.40`, `langchain >= 0.3.0`, `langgraph-codeact = *`,
+  `mcp >= 1.0.0,<2` (FastMCP v1 surface inside `mcp`). No `poetry.lock` committed → work
+  against declared constraints and verify exact resolved versions on the runner.
+- Frontend: Next `^14.2.35`, React `^18.3.1`, `@tanstack/react-query ^5.56.2`, `zustand ^4.5.4`.
+  **No `ai` / `@ai-sdk/*` digitally.** Migration starts from zero on the frontend stream
+  protocol side.
+- Context7 queries on `/langchain-ai/deepagents`, `/websites/langchain_oss_python_langgraph`,
+  `/vercel/ai`, Context7-resolved FastMCP ids. Confirmed:
+  - `create_deep_agent(model, tools, system_prompt, subagents, async_subagents, backend,
+    checkpointer, interrupt_on, response_format, middleware, memory, skills, permissions)`.
+  - `SubAgent` TypedDict / `CompiledSubAgent` / `AsyncSubAgent` field sets.
+  - `task` tool returns `Command(update={**state, "messages":[ToolMessage]})`.
+  - HITL via `interrupt_on` + `Command(resume={"decisions":[{"type":"approve"}]})`.
+  - LangGraph `Send` dynamic fan-out with `Annotated[list, operator.add]` aggregation.
+  - `reconnectToStream({chatId, startIndex})` + `consumeStream()` for long-running resume.
+  - `langgraph-swarm`: `create_swarm(agents: list[Pregel], default_active_agent, state_schema=SwarmState)`;
+    `create_handoff_tool(agent_name)` → `Command(goto=, update=)`.
+- DeepWiki queries on `langchain-ai/deepagents`, `langchain-ai/langgraph`,
+  `langchain-ai/langgraph-swarm-py`:
+  - deepagents default middleware stack maps 1:1 with Munin reimplemented glue:
+    `TodoListMiddleware`, `FilesystemMiddleware`, `SubAgentMiddleware` (sync, via `task`),
+    `AsyncSubAgentMiddleware` (background, via `start_async_task`/`check_async_task`/
+    `update_async_task`/`cancel_async_task`/`list_async_tasks`), `SkillsMiddleware`,
+    `MemoryMiddleware`, `SummarizationMiddleware`, `HumanInTheLoopMiddleware`.
+  - ReAct loop / tool dispatch / result reinjection owned by `langchain.agents.create_agent`
+    — Deep Agents wraps it with middleware.
+  - AsyncSubAgent **requires** an Agent Protocol server (`langgraph-sdk`); in-process bypass
+    does not exist. Self-hosted `langgraph up` (Docker, port 8123) with
+    `langgraph-checkpoint-sqlite` provides the local solution on the runner; thread state
+    persists in local sqlite file → uploaded as Munin artifact between sessions.
+  - deepagents ships **no** persistent agent/tool/workflow registries — Autonomy Kernel
+    (issue §2/§5/§6) is Munin-owned on top.
+  
+### Veredicto: deep-agents SÍ reemplaza glue real
+
+Confirmado contra código fuente (no memoria). El inventario del subagente `explore` ya
+mapeó cada pieza con `file:line referee`; la verificación con Context7 + DeepWiki
+demostró cada mapping con la clase/método que reemplaza el custom code.
+
+### Artefactos producidos
+
+- **`GLUE_INVENTORY.md`** — inventario read-only de todo el custom glue, por subsistema
+  con `file:line` para cada claim. Producido por subagente `explore` (read-only, sin
+  decisiones arquitectónicas), revisado y verificado arbitrariamente por Raven Mind.
+- **`IMPROVEMENT_BACKLOG.md`** — mapping glue→primitive framework con las 11 columnas de
+  ranking (evidence, functional impact, user impact, confidence, risk, cost, validation
+  approach), una tabla por step de la secuencia del issue, más la tabla cruzada de los 11
+  invariantes §9 que sobreviven toda la migración, más las 5 dependencias nuevas explícitas.
+- **`IMPLEMENTATION_ROADMAP.md`** — secuencia 8-step del issue §12 con cada step
+  descompuesto en sub-steps, criterios de paridad por step, PR breakdown (15-16 PRs
+  estimados, no meta), desviaciones documentadas y justificación basada en repo evidence.
+  Incluye secciones: hand-off conventions, validation strategy común, open questions
+  resolvibles mid-flight.
+
+### Decisiones arquitectónicas fijadas
+
+1. **deepagents entra como coordinador default** (no es speculative — issue §1 lo pide y
+   el código fuente de deepagents lo respalda con middleware que matchea el glue actual).
+2. **Self-hosted LangGraph server on runner** para AsyncSubAgent (decisión del operador):
+   `langgraph up` Docker, port 8123, `langgraph-checkpoint-sqlite` en local disk,
+   `LANGGRAPH_API_KEY` runner-local. AsyncSubAgent `url="http://127.0.0.1:8123"`.
+   Artifact cross-session = el patrón free-tier existente aplicado al sqlite de
+   checkpointing.
+3. **NO se migra Python a TS** (issue non-goal §10: backend stays authoritative).
+4. **NO se reemplaza FastMCP** — se envuelve vía Tool Gateway (issue non-goal §10).
+5. **3 Nuevo-registros**: Tool Registry (evoluciona `procedural`), Agent Registry (nueva
+   `agent_registry` table + `rebuild_agent`), Workflow Registry (nueva `workflow_registry`
+   table). Munin las posee — deepagents no shipea.
+6. **No arbitrary hard caps**: removidos `MUNIN_MAX_NESTED_SUBAGENTS=5`,
+   `forge_tool.py max_iterations [1,12]` clamp. Backpressure via LangGraph RecursionLimit
+   (observable, configurable) + backpressure middleware + UI cancel.
+7. **Compat adapter window** (`MUNIN_RUNTIME=supervisor` env flag en PR #3) es temporal
+   — removido en PR #4 cuando paridad está probada. Non-goal §12 explícito:
+   "Do not keep legacy orchestration and the new runtime permanently active as equal
+   authorities".
+
+### Hand-off log
+
+- **Delegated → explore agent (ses_04c6fb2ecffeW82feeLSrxcKHL)**: inventario completo y
+  read-only del glue custom del repo, con spec exacto (Python backend + Next frontend,
+  output `GLUE_INVENTORY.md`, 15 secciones, sin opiniones arquitectónicas, file:line
+  mandatory). **Review**: subagente terminó OK (425 líneas, todas las file:line
+  verificadas arbitrariamente por Raven Mind leyendo `munin_agent.py:270-637`
+  directamente, confirmando ReAct loop, repetition guard, parallel batch dispatch,
+  `stop_reason` mapping).
+- **Hand-off log de subseqüentes delegaciones**: aparecerá aquí a medida que se deleguen
+  tareas atómicas de implementación (PR 1 etc.).
+
+### Next
+
+PR #1 (`feat/parity-baseline`) — characterization tests por subsistema siguiendo
+`IMPLEMENTATION_ROADMAP.md` step 1. Antes de escrita de código se confirmará en el
+roadmap que cada test cubre un `file:line` exacto del inventario.
+
+## 2026-07-30 — PR-01 implementation (parity baseline)
+
+**Branch head**: `raven-mind/migration-issue9/pr-01-parity-baseline` (off `raven-mind/issue9`).
+**Delegated**: PR-01 parity baseline (9 characterization files under `tests/characterization/`).
+
+### Hand-off log
+
+- **Spec given**: `pr-specs/PR-01-parity-baseline.md` (atomic spec; 230 lines).
+- **Subagent invocation**: `general` subagent; pasted spec body inline; no architectural authority granted; no-commit/no-push scope; read-source-for-shape directive respected.
+- **Subagent returned**: 9 files written; 4 spec-vs-code drift violations reported (all resolved toward actual code shape — correct characterization posture):
+  1. `MIGRATION_ID` actual value is `"20260729_001_production_foundation"` (NOT `"v3.1"` as spec literal said) — caught and adapted in test.
+  2. MCP-side tables = **10** (spec said 9; `runtime_cache` is the extra) — test asserts the 9 from spec plus a soft check of runtime_cache.
+  3. `tool_calls_log` entry keys are `name`/`arguments`/`elapsed_ms`/`result`-or-`error`/`ok`/`summary` (spec said `args`/`result`/`elapsed_ms`/`step`) — test adapted to actual key set.
+  4. `<operator_guidance>` produced by dispatcher.py carries `from=` + `at=` attributes; coordinator test asserts the hook output (raw string) instead — subagent correctly split between hook-side and dispatcher-side contracts.
+- **Raven Mind review outcome**: 9 files reviewed hunks-by-hunks; **2 mechanical”spec drifts” found and patched in-place by Raven Mind** (brief exception "drift mecánico" allowed; no re-delegation warranted):
+  1. `test_conversation_persistence_parity.py:114-116` — `_append_event` called without required positional `conn`. Patched to `with store._transaction() as conn: store._append_event(conn, run_id=, kind=, payload=)` (matches production pattern at `munin/production/store.py:340-365` + 652/679/717/etc.).
+  2. `test_sse_event_contract_parity.py:test_use_conversation_events_cross_reference` — asserted `45_000` in `useConversationEvents.ts` although spec line 168 forbids asserting against the untouched surface. Trimmed to read-only existence check.
+- **HITL test simplifications** (tests 1–3 of `test_hitl_parity.py`): assert storage-level effects (request row present + response_json contents) rather than dispatcher semantic flow (run.state transition, real tool invocation with new_args, operator_guidance injected at next step). Reason: dispatcher-run would require building a fake LLM + queue plumbing matching dispatcher's run_once contract; characterization value is preserved because any later PR that changes the storage shape breaks these tests. Acceptance decision per project CLAUDE.md "amend the characterization with reason documented in changes.md" clause — reason logged here.
+- **Signed off at** (Raven Mind): commit pending. Status: green-for-staging on this branch.
+- **Deps added/bumped in this PR**: none — test-only.
+- **E2E scenario unblocked from issue §required-scenarios list**: none directly — enabling step. PR-14/15/16 deletion PRs (issue §12 step 8) now have a defensive safety net.
+
+### Framework verification provenance (PR-01)
+
+- **lib**: pytest-asyncio
+- **version**: declared `pytest-asyncio = "*"` in `pyproject.toml:34`; mode `asyncio_mode=auto` at `pyproject.toml:55`
+- **source**: Context7 `/websites/pytest-asyncio_readthedocs_io_en_stable` Auto Mode Configuration (sync tests auto-skipped from async decoration, no manual markers needed); existing `tests/conftest.py:11-32` `isolated_workspace` + `store` fixtures reused via `tests/characterization/conftest.py`.
+- Other Cooke of `munin/core/munin_agent.py:289-448`, `munin/mcp/shared_state.py:698-719`, `munin/subagents/runner.py:363-371`, `munin/mcp/tools/forge_tool.py:81-99`, `munin/production/store.py:33/658`, `munin/mcp/registry.py:310-534` shapes read by subagent for assertion matching (no Context7 fallback required — these are internal repo contracts, not framework contracts).
+
+### Issue §9 invariants preserved
+
+| Invariant | Status in PR-01 |
+|---|---|
+| FastMCP tools + external MCP integration | Untouched — production code unchanged |
+| Hugin + offensive tool wrappers | Untouched |
+| Scope/OPSEC in tool boundary | Untouched |
+| Audit redaction contract | Untouched (existing `test_audit_redaction.py` covers) |
+| Soul human-editable | Untouched |
+| Tool provenance | `procedural` row shape characterized (PR-02 untracked-provenance assertion) |
+| Cross-session artifact pattern | Untouched (free-tier artifact pattern unaffected) |
