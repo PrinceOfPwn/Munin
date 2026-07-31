@@ -18,11 +18,13 @@ const DOTTED_KIND_MAP: Record<string, BackendEnvelope["kind"]> = {
   "agent.reasoning": "reasoning",
   "tool.intent": "tool_intent",
   "tool.started": "tool_started",
+  "tool.running": "tool_started",
   "tool.result": "tool_result",
   "tool.completed": "tool_completed",
   "tool.failed": "tool_failed",
   "subagent.started": "subagent_started",
   "subagent.state": "subagent_state",
+  "subagent.queued": "subagent_started",
   "human.request": "human_request",
   "human.resolved": "human_resolved",
   "run.state": "run_state",
@@ -30,11 +32,33 @@ const DOTTED_KIND_MAP: Record<string, BackendEnvelope["kind"]> = {
 
 function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
   if (typeof raw !== "object" || !raw) return null;
-  const event = raw as { kind?: string; payload?: Record<string, unknown> };
+  const event = raw as { kind?: string; payload?: Record<string, unknown>; [key: string]: unknown };
   if (!event.kind || typeof event.kind !== "string") return null;
 
-  const resolvedKind = DOTTED_KIND_MAP[event.kind] ?? event.kind;
-  const normalized: BackendEnvelope = { kind: resolvedKind as BackendEnvelope["kind"] };
+  let resolvedKind = DOTTED_KIND_MAP[event.kind];
+  if (!resolvedKind) {
+    if (event.kind.startsWith("reasoning.")) {
+      resolvedKind = "reasoning";
+    } else if (event.kind.startsWith("human_request.")) {
+      resolvedKind = "human_request";
+    } else if (event.kind.startsWith("run.")) {
+      resolvedKind = "run_state";
+    } else {
+      resolvedKind = event.kind as BackendEnvelope["kind"];
+    }
+  }
+
+  const normalized: BackendEnvelope = { kind: resolvedKind };
+
+  const topLevelFields = ["run_id", "sequence", "text", "tool_name", "tool_call_id", "input",
+    "output", "error", "subagent_id", "name", "state", "request_id", "args", "resolution",
+    "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds"];
+
+  for (const field of topLevelFields) {
+    if (field in event && event[field] !== undefined) {
+      (normalized as Record<string, unknown>)[field] = event[field];
+    }
+  }
 
   if (event.payload && typeof event.payload === "object") {
     Object.assign(normalized, event.payload);

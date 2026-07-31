@@ -63,7 +63,19 @@ def extension_describe(slug: str, run_id: str = "") -> dict[str, Any]:
 
 
 def extension_open_pr(slug: str, operator_approved: bool = False, run_id: str = "") -> dict[str, Any]:
-    """Open a PR for a validated proposal only after explicit human approval."""
+    """Open a PR for a validated proposal only after explicit human approval.
+
+    SECURITY: This tool is excluded from the autonomous subagent catalog.
+    Supervisor-only; requires server-verified HITL approval, not agent-supplied flag.
+    """
+    if operator_approved is not True or not isinstance(operator_approved, bool):
+        return {
+            "ok": False,
+            "tool": "extension_open_pr",
+            "mode": "sync",
+            "summary": "operator approval required (server-verified HITL, not agent flag)",
+            "error": {"code": "approval_required", "message": "This operation requires explicit human approval through the HITL workflow"},
+        }
     result = _forge().open_pr(slug, operator_approved=operator_approved)
     return {
         "ok": result.ok,

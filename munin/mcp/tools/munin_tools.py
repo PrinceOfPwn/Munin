@@ -535,7 +535,6 @@ def munin_chat(
 
                 llm_model = LLMClient(settings).make_langchain()
             except Exception as exc:
-                logger.error("munin_chat: LLMClient initialization failed", exc_info=True)
                 raise RuntimeError(f"Failed to initialize configured model: {exc}") from exc
 
             async def _run() -> tuple[str, list, int, str]:

@@ -9,6 +9,7 @@ format consumed by the SSE/BFF layer.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Callable
 
@@ -32,6 +33,21 @@ def _tool_request_parts(request: Any) -> tuple[str, dict, str]:
     return str(name), dict(args), str(call_id)
 
 
+def _deep_redact(value: Any) -> Any:
+    """Recursively redact secrets, parsing JSON strings first."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return json.dumps(redact_secrets(parsed))
+        except (json.JSONDecodeError, TypeError):
+            return redact_secrets(value)
+    if isinstance(value, dict):
+        return {k: _deep_redact(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_deep_redact(item) for item in value]
+    return redact_secrets(value)
+
+
 class ProgressEmitMiddleware(AgentMiddleware):
     """Wrap every tool call with progress emission (non-blocking, best-effort)."""
 
@@ -53,7 +69,7 @@ class ProgressEmitMiddleware(AgentMiddleware):
                 "run_id": self.run_id,
                 "tool_name": name,
                 "tool_call_id": call_id,
-                "input": redact_secrets(args),
+                "input": _deep_redact(args),
             }
         )
         return call_id
@@ -69,13 +85,14 @@ class ProgressEmitMiddleware(AgentMiddleware):
                 }
             )
             return
-        output = result if isinstance(result, str) else repr(result)[:4000]
+        redacted_result = _deep_redact(result)
+        output = redacted_result if isinstance(redacted_result, str) else repr(redacted_result)[:4000]
         self._emit(
             {
                 "kind": "tool_result",
                 "run_id": self.run_id,
                 "tool_call_id": call_id,
-                "output": redact_secrets(output),
+                "output": output,
             }
         )
 

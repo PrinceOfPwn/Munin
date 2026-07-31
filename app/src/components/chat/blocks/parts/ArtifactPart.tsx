@@ -49,13 +49,10 @@ function mimeLabel(mimeType: string): string {
 function isSafeUri(uri: string): boolean {
   if (!uri) return false;
 
-  if (uri.startsWith("/") || uri.startsWith("./") || uri.startsWith("../")) {
-    return true;
-  }
+  const safeProtocols = ["http:", "https:", "data:", "blob:"];
 
   try {
-    const url = new URL(uri);
-    const safeProtocols = ["http:", "https:", "data:", "blob:"];
+    const url = new URL(uri, "https://safe.example");
     return safeProtocols.includes(url.protocol);
   } catch {
     return false;

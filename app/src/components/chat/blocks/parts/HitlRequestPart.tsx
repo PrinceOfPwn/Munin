@@ -40,21 +40,26 @@ export function HitlRequestPart({
   onReject,
 }: HitlRequestPartProps) {
   const [rejectReason, setRejectReason] = useState("");
-  const [showRejectInput, setShowRejectInput] = useState(false);
+  const [showRejectInput, setShowRejectInput] = useState<string | null>(null);
 
   const resolved = Boolean(resolution);
-  const approveChoice = choices.find((c) => c === "approve") ?? choices[0] ?? "approve";
-  const rejectChoice = choices.find((c) => c === "deny" || c === "reject") ?? "deny";
+  const effectiveChoices = choices.length > 0 ? choices : ["approve", "deny"];
 
-  function handleApprove() {
+  function handleChoiceClick(choice: string) {
     if (resolved) return;
-    onApprove(requestId, approveChoice, nonce);
+    const isApproval = choice === "approve" || choice === "allow" || choice === "accept";
+    if (isApproval) {
+      onApprove(requestId, choice, nonce);
+    } else {
+      setShowRejectInput(choice);
+    }
   }
 
-  function handleRejectSubmit() {
+  function handleRejectSubmit(choice: string) {
     if (resolved) return;
-    onReject(requestId, rejectChoice, nonce, rejectReason);
-    setShowRejectInput(false);
+    onReject(requestId, choice, nonce, rejectReason);
+    setShowRejectInput(null);
+    setRejectReason("");
   }
 
   return (
@@ -103,24 +108,23 @@ export function HitlRequestPart({
       {!resolved && (
         <div className="mt-2 flex flex-col gap-2">
           <div className="flex gap-2">
-            <button
-              onClick={handleApprove}
-              className={cn(
-                "rounded px-3 py-1 text-xs font-semibold transition-colors",
-                "bg-success text-white hover:bg-success/80"
-              )}
-            >
-              Approve
-            </button>
-            <button
-              onClick={() => setShowRejectInput((v) => !v)}
-              className={cn(
-                "rounded px-3 py-1 text-xs font-semibold transition-colors",
-                "bg-danger text-white hover:bg-danger/80"
-              )}
-            >
-              Reject
-            </button>
+            {effectiveChoices.map((choice) => {
+              const isApproval = choice === "approve" || choice === "allow" || choice === "accept";
+              return (
+                <button
+                  key={choice}
+                  onClick={() => handleChoiceClick(choice)}
+                  className={cn(
+                    "rounded px-3 py-1 text-xs font-semibold transition-colors capitalize",
+                    isApproval
+                      ? "bg-success text-white hover:bg-success/80"
+                      : "bg-danger text-white hover:bg-danger/80"
+                  )}
+                >
+                  {choice}
+                </button>
+              );
+            })}
           </div>
 
           {showRejectInput && (
@@ -135,11 +139,11 @@ export function HitlRequestPart({
                   "focus:outline-none focus:ring-1 focus:ring-accent"
                 )}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleRejectSubmit();
+                  if (e.key === "Enter") handleRejectSubmit(showRejectInput);
                 }}
               />
               <button
-                onClick={handleRejectSubmit}
+                onClick={() => handleRejectSubmit(showRejectInput)}
                 className="rounded bg-danger px-3 py-1 text-xs font-semibold text-white hover:bg-danger/80"
               >
                 Confirm

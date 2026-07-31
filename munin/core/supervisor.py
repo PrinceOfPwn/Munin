@@ -170,16 +170,13 @@ def build_munin_supervisor(
         tools_provider=lambda: gateway_tools(state, include_generated=include_generated),
     )
 
-    if "shared" not in _CHECKPOINTER_CACHE:
-        _CHECKPOINTER_CACHE["shared"] = make_checkpointer()
-
     return build_supervisor(
         tools=gateway_tools(state, include_generated=include_generated),
         model=model,
         system_prompt=compose_munin_prompt(soul_prompt=soul_prompt),
         middleware=middleware,
         meta_tools=kernel.meta_tools(),
-        checkpointer=_CHECKPOINTER_CACHE["shared"],
+        checkpointer=make_checkpointer(),
     )
 
 

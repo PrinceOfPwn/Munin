@@ -72,14 +72,27 @@ class AgentRegistry:
 
     def _validate_dependencies(self, spec: SubagentSpec, dependencies: list[str] | None = None) -> None:
         """Validate that all tool/agent dependencies are active."""
+        missing_tools = []
+
         if self._state is None:
+            if dependencies:
+                for dep in dependencies:
+                    if dep.startswith("agent_"):
+                        try:
+                            self._definition_row(dep, None)
+                        except KeyError:
+                            missing_tools.append(dep)
+            for tool_name in spec.tools:
+                if not tool_name.startswith("gen__"):
+                    missing_tools.append(f"{tool_name} (cannot verify without SharedStateStore)")
+            if missing_tools:
+                raise ValueError(f"Missing or inactive dependencies: {', '.join(missing_tools)}")
             return
 
         from ..tool_gateway import catalog_names  # noqa: PLC0415
 
         available_tools = catalog_names(self._state, include_generated=True)
 
-        missing_tools = []
         for tool_name in spec.tools:
             if tool_name not in available_tools:
                 missing_tools.append(tool_name)

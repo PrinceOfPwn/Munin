@@ -161,8 +161,6 @@ class ToolFactory:
                     "validation": validation,
                 }
 
-        staging_path.replace(script_path)
-
         # 3. Persist with provenance (procedural table is the Tool Registry).
         signature = {
             "function_name": fn_name,
@@ -176,16 +174,27 @@ class ToolFactory:
             },
         }
         tool_tags = ["tool-factory", f"run:{self._run_id or 'unknown'}", *(tags or [])]
-        registry.register_state_only(
-            self._state,
-            slug=slug,
-            description=description or f"Tool-factory tool {tool_name}",
-            script_path=script_path,
-            function_name=fn_name,
-            signature=signature,
-            tags=tool_tags,
-            created_by_agent=self._agent_id,
-        )
+        try:
+            registry.register_state_only(
+                self._state,
+                slug=slug,
+                description=description or f"Tool-factory tool {tool_name}",
+                script_path=script_path,
+                function_name=fn_name,
+                signature=signature,
+                tags=tool_tags,
+                created_by_agent=self._agent_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            staging_path.unlink(missing_ok=True)
+            return {
+                "ok": False,
+                "tool": tool_name,
+                "error": f"registration failed: {exc}",
+                "validation": validation,
+            }
+
+        staging_path.replace(script_path)
 
         # 4. Load live handle for same-run invocation.
         fn = registry._load_callable(script_path.resolve(), fn_name)

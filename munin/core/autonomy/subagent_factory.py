@@ -60,7 +60,12 @@ class SubagentFactory:
 
         if isinstance(agent, dict):
             if "description" in agent and "purpose" not in agent:
-                pass
+                raise NotImplementedError(
+                    f"Agent dict with runtime_type='persisted_subagent_dict' cannot be invoked directly. "
+                    f"This declarative shape is meant to be passed to Deep Agents' native SubAgent construction. "
+                    f"Either use a different runtime_type (deep_agent, compiled_langgraph) or handle this dict "
+                    f"through the appropriate Deep Agents API."
+                )
             else:
                 agent = self.create_subagent(SubagentSpec.model_validate(agent))
         payload = {"messages": [HumanMessage(content=task)]}

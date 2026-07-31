@@ -509,6 +509,17 @@ SUBAGENT_TOOL_REGISTRY: list[dict[str, Any]] = [
             {"name": "munin_wake_list",  "desc": "List pending / claimed wake items in the queue"},
         ],
     },
+    {
+        "category": "forge",
+        "label": "Runtime tool and graph generation",
+        "tools": [
+            {"name": "tool_forge",                "desc": "Generate and validate a new runtime tool from natural language"},
+            {"name": "graph_forge",               "desc": "Compile a multi-node LangGraph workflow as a callable subagent"},
+            {"name": "list_generated_graphs",     "desc": "List all registered workflow graphs"},
+            {"name": "describe_generated_graph",  "desc": "Inspect a registered workflow graph definition"},
+            {"name": "drop_generated_graph",      "desc": "Deprecate a registered workflow graph"},
+        ],
+    },
 ]
 
 # Flat set of all valid subagent tool names (for whitelist validation)

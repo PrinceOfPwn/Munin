@@ -33,6 +33,11 @@ class WorkerState(TypedDict):
     aggregate: Annotated[list, operator.add]
 
 
+class WorkerUpdate(TypedDict):
+    """Partial state update returned by worker nodes."""
+    aggregate: list
+
+
 def fanout(target_node: str, items: list[Any]) -> list:
     """
     Create Send objects for each item in items, routing to target_node.
@@ -76,7 +81,7 @@ def make_worker_node(tool_fn):
 
     Returns a LangGraph-compatible node function.
     """
-    async def worker_node(state: WorkerState) -> WorkerState:
+    async def worker_node(state: WorkerState) -> WorkerUpdate:
         try:
             import inspect
             if inspect.iscoroutinefunction(tool_fn):
