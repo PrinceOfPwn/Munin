@@ -269,6 +269,8 @@ class MuninAgent:
         *,
         max_iterations: int | None = None,
         progress: Callable[[dict[str, Any]], None] | None = None,
+        conversation_id: str = "",
+        conversation_history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         import os
         import time
@@ -283,11 +285,19 @@ class MuninAgent:
             else:
                 max_iterations = self._HARD_CEILING  # effectively "no limit"
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": user_input.strip()},
-        ]
-        self.memory.log_step(agent="munin", action="user_input", input_data={"text": user_input}, tags=["dialog"])
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
+        for prior in conversation_history or []:
+            role = str(prior.get("role", "")).strip()
+            content = str(prior.get("content", "")).strip()
+            if role in {"system", "user", "assistant"} and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": user_input.strip()})
+        self.memory.log_step(
+            agent="munin",
+            action="user_input",
+            input_data={"text": user_input, "conversation_id": conversation_id},
+            tags=["dialog", f"conversation:{conversation_id}"] if conversation_id else ["dialog"],
+        )
         final_content = ""
         tool_calls_log: list[dict[str, Any]] = []
         stop_reason = "unknown"

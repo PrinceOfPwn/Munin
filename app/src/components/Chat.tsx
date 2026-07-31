@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { ArrowDown, Send, Terminal } from "lucide-react";
+import { ArrowDown, Database, FileDown, MessageSquarePlus, Send, Terminal } from "lucide-react";
 import Raven from "./Raven";
 import ToolCallCard from "./ToolCallCard";
 import ArtifactActions, { artifactKindFromLanguage } from "./ArtifactActions";
@@ -18,6 +18,10 @@ export default function Chat() {
   const setChatInput = useMuninStore((s) => s.setChatInput);
   const sendChatMessage = useMuninStore((s) => s.sendChatMessage);
   const connected = useMuninStore((s) => s.live.mcpConnected);
+  const conversations = useMuninStore((s) => s.conversations);
+  const activeConversationId = useMuninStore((s) => s.activeConversationId);
+  const newConversation = useMuninStore((s) => s.newConversation);
+  const activeConversation = conversations.find((item) => item.id === activeConversationId);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
@@ -56,6 +60,23 @@ export default function Chat() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex items-center justify-between gap-3 border-b border-border bg-surface/30 px-4 py-2.5">
+        <div className="min-w-0">
+          <div className="truncate font-mono text-sm text-body">
+            {activeConversation?.title || "New conversation"}
+          </div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[10px] font-mono text-muted">
+            <Database size={11} className="text-success" />
+            Turso-backed history and files
+          </div>
+        </div>
+        <button
+          onClick={newConversation}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded border border-accent/40 px-2 py-1.5 text-[10px] font-mono uppercase tracking-wider text-accent hover:bg-accent/10"
+        >
+          <MessageSquarePlus size={13} /> New
+        </button>
+      </div>
       {/* Message stream */}
       <div
         ref={scrollRef}
@@ -180,6 +201,31 @@ function MessageBubble({ message }: { message: import("@/types/mcp").ChatMessage
               {message.toolCalls.map((tc) => (
                 <ToolCallCard key={tc.id} call={tc} />
               ))}
+            </div>
+          )}
+
+          {message.artifacts && message.artifacts.length > 0 && (
+            <div className="mt-3 rounded border border-accent/30 bg-accent/5 p-2">
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider text-accent">
+                <FileDown size={12} /> Files from this response
+              </div>
+              <div className="space-y-1.5">
+                {message.artifacts.map((artifact) => (
+                  <div
+                    key={artifact.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-bg/40 px-2 py-1.5"
+                  >
+                    <span className="max-w-[26ch] truncate font-mono text-xs text-body">
+                      {artifact.filename}
+                    </span>
+                    <ArtifactActions
+                      content={artifact.content}
+                      language={artifact.language}
+                      filename={artifact.filename}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

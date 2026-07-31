@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ...core.conversations import ConversationService
 from .. import registry  # noqa: TID252
 from ..main import JOBS, MCP, STATE, audited_tool  # noqa: TID252
 from ..shared_state import _coerce_int  # noqa: TID252,PLC2701
@@ -21,6 +22,22 @@ def _get_settings() -> Any:
     from ..config import get_settings  # noqa: TID252 - re-read env each call so tests can monkeypatch
 
     return get_settings()
+
+
+def _conversation_backend_error(settings: Any) -> dict[str, Any] | None:
+    """Conversation history is intentionally remote-only.
+
+    A local SQLite fallback would make a GUI look stateful during a runner's
+    lifetime and then silently lose the operator's work. Reject it explicitly
+    instead: durable conversations require the configured Turso/libsql URL.
+    """
+    url = str(getattr(settings, "db_url", "") or "").strip().lower()
+    if url.startswith(("libsql://", "libsqls://")):
+        return None
+    return {
+        "code": "turso_required",
+        "message": "Persistent conversations require MUNIN_DB_URL to point to Turso (libsql:// or libsqls://); local SQLite and runner artifacts are disabled for chat history.",
+    }
 
 
 def _safe_soul_path(path_str: str) -> Path:
@@ -386,11 +403,75 @@ def list_subagent_tools(category: str = "", run_id: str = "") -> dict[str, Any]:
 # ─────────────────────────────────────────────
 
 @MCP.tool()
+@audited_tool("conversation_list", "passive", lambda *a, **k: "sync")
+def conversation_list(limit: int = 50, include_archived: bool = False, run_id: str = "") -> dict[str, Any]:
+    """List durable operator conversations stored exclusively in Turso."""
+    settings = _get_settings()
+    error = _conversation_backend_error(settings)
+    if error:
+        return {"ok": False, "tool": "conversation_list", "mode": "sync", "summary": "Turso required", "error": error}
+    rows = STATE.conversation_list(limit=_coerce_int(limit, 50), include_archived=bool(include_archived))
+    return {
+        "ok": True,
+        "tool": "conversation_list",
+        "mode": "sync",
+        "summary": f"{len(rows)} conversations",
+        "data": {"conversations": rows, "count": len(rows)},
+    }
+
+
+@MCP.tool()
+@audited_tool("conversation_get", "passive", lambda *a, **k: "sync")
+def conversation_get(conversation_id: str, message_limit: int = 500, run_id: str = "") -> dict[str, Any]:
+    """Load a persistent conversation and its downloadable artifacts from Turso."""
+    settings = _get_settings()
+    error = _conversation_backend_error(settings)
+    if error:
+        return {"ok": False, "tool": "conversation_get", "mode": "sync", "summary": "Turso required", "error": error}
+    try:
+        record = STATE.conversation_get(
+            conversation_id=conversation_id,
+            message_limit=_coerce_int(message_limit, 500),
+        )
+    except ValueError as exc:
+        return {"ok": False, "tool": "conversation_get", "mode": "sync", "summary": "invalid conversation id", "error": {"code": "bad_input", "message": str(exc)}}
+    if record is None:
+        return {"ok": False, "tool": "conversation_get", "mode": "sync", "summary": "conversation not found", "error": {"code": "not_found", "message": conversation_id}}
+    return {
+        "ok": True,
+        "tool": "conversation_get",
+        "mode": "sync",
+        "summary": record["conversation"]["title"] or conversation_id,
+        "data": record,
+    }
+
+
+@MCP.tool()
+@audited_tool("conversation_create", "passive", lambda *a, **k: "sync")
+def conversation_create(conversation_id: str = "", title: str = "", run_id: str = "") -> dict[str, Any]:
+    """Create a durable Turso conversation. Existing ids are idempotent."""
+    settings = _get_settings()
+    error = _conversation_backend_error(settings)
+    if error:
+        return {"ok": False, "tool": "conversation_create", "mode": "sync", "summary": "Turso required", "error": error}
+    service = ConversationService(STATE)
+    try:
+        conversation = STATE.conversation_create(
+            conversation_id=conversation_id.strip() or service.new_id(),
+            title=title,
+        )
+    except ValueError as exc:
+        return {"ok": False, "tool": "conversation_create", "mode": "sync", "summary": "invalid conversation id", "error": {"code": "bad_input", "message": str(exc)}}
+    return {"ok": True, "tool": "conversation_create", "mode": "sync", "summary": conversation["title"] or "New conversation", "data": {"conversation": conversation}}
+
+
+@MCP.tool()
 @audited_tool("munin_chat", "passive", lambda *a, **k: str(k.get("mode", "sync")))
 def munin_chat(
     message: str,
     max_iterations: int = 40,
     mode: str = "sync",
+    conversation_id: str = "",
     run_id: str = "",
 ) -> dict[str, Any]:
     """Full conversational ReAct interface. Send natural language — Munin reasons,
@@ -407,6 +488,13 @@ def munin_chat(
             "error": {"code": "bad_input", "message": "message is required"},
         }
     settings = _get_settings()
+    backend_error = _conversation_backend_error(settings)
+    if backend_error:
+        return {
+            "ok": False, "tool": "munin_chat", "mode": "sync",
+            "summary": "Turso required for persistent chat",
+            "error": backend_error,
+        }
     if not settings.llm_base_url or not settings.llm_api_key or not settings.llm_model:
         return {
             "ok": False, "tool": "munin_chat", "mode": "sync",
@@ -424,27 +512,75 @@ def munin_chat(
         }
 
     iterations = max(1, min(_coerce_int(max_iterations, 40), 400))
+    conversation_service = ConversationService(STATE)
+    try:
+        prepared = conversation_service.prepare_turn(
+            conversation_id=conversation_id,
+            user_message=message.strip(),
+        )
+    except ValueError as exc:
+        return {
+            "ok": False, "tool": "munin_chat", "mode": "sync",
+            "summary": "invalid conversation",
+            "error": {"code": "bad_input", "message": str(exc)},
+        }
 
     def execute(progress=None) -> dict[str, Any]:
         try:
             from ...core.munin_agent import MuninAgent  # noqa: PLC0415
             agent = MuninAgent(settings)
-            result = agent.respond(message.strip(), max_iterations=iterations, progress=progress)
+            result = agent.respond(
+                message.strip(),
+                max_iterations=iterations,
+                progress=progress,
+                conversation_id=prepared.conversation_id,
+                conversation_history=prepared.history,
+            )
         except Exception as exc:
             logger.exception("munin_chat: agent error")
+            error_message = f"Munin could not complete this turn: {exc}"
+            try:
+                conversation_service.complete_turn(
+                    conversation_id=prepared.conversation_id,
+                    content=error_message,
+                    tool_calls=[],
+                    stop_reason="agent_error",
+                    iterations=0,
+                )
+            except Exception:
+                logger.exception("munin_chat: unable to persist failed turn")
             return {
                 "ok": False, "tool": "munin_chat", "mode": "sync",
                 "summary": "agent error",
                 "error": {"code": "agent_error", "message": str(exc)},
             }
         content = result.get("content", "")
+        try:
+            assistant_message, artifacts = conversation_service.complete_turn(
+                conversation_id=prepared.conversation_id,
+                content=content,
+                tool_calls=result.get("tool_calls", []),
+                stop_reason=result.get("stop_reason", "unknown"),
+                iterations=result.get("iterations", 0),
+            )
+        except Exception as exc:
+            logger.exception("munin_chat: unable to persist completed turn")
+            return {
+                "ok": False, "tool": "munin_chat", "mode": "sync",
+                "summary": "conversation persistence error",
+                "error": {"code": "conversation_persistence_error", "message": str(exc)},
+            }
         return {
             "ok": True,
             "tool": "munin_chat",
             "mode": "sync",
             "summary": content[:120] if content else "(no response)",
             "data": {
+                "conversation_id": prepared.conversation_id,
+                "user_message_id": prepared.user_message_id,
+                "assistant_message_id": assistant_message["id"],
                 "content": content,
+                "artifacts": artifacts,
                 "tool_calls": result.get("tool_calls", []),
                 "iterations": result.get("iterations", 0),
                 "stop_reason": result.get("stop_reason", "unknown"),
@@ -468,7 +604,12 @@ def munin_chat(
             "mode": "async",
             "job_id": job.job_id,
             "summary": "Munin conversation started",
-            "data": {"job_id": job.job_id, "status": job.status},
+            "data": {
+                "job_id": job.job_id,
+                "status": job.status,
+                "conversation_id": prepared.conversation_id,
+                "user_message_id": prepared.user_message_id,
+            },
         }
 
     return execute()
