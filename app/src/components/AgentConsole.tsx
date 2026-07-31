@@ -62,6 +62,8 @@ interface HitlData {
   requestId: string;
   toolName: string;
   args: Record<string, unknown>;
+  nonce?: string;
+  choices?: string[];
   resolved: boolean;
   resolution?: "approved" | "rejected";
 }
@@ -306,6 +308,8 @@ function PartRenderer({
         requestId={d.requestId}
         toolName={d.toolName}
         args={d.args ?? {}}
+        nonce={d.nonce}
+        choices={d.choices}
         resolution={d.resolution}
         onApprove={hitlApprove}
         onReject={hitlReject}
@@ -354,11 +358,11 @@ function PartRenderer({
 // ---------------------------------------------------------------------------
 
 function MessagePartList({ message }: { message: UIMessage }) {
-  const hitlApprove: HitlRequestPartProps["onApprove"] = (id) => {
-    void approveHitlRequest(id);
+  const hitlApprove: HitlRequestPartProps["onApprove"] = (id, choice, nonce) => {
+    void approveHitlRequest(id, choice, nonce);
   };
-  const hitlReject: HitlRequestPartProps["onReject"] = (id, reason) => {
-    void rejectHitlRequest(id, reason);
+  const hitlReject: HitlRequestPartProps["onReject"] = (id, choice, nonce, reason) => {
+    void rejectHitlRequest(id, choice, nonce, reason);
   };
 
   return (

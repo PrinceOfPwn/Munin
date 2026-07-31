@@ -140,6 +140,7 @@ class AutonomyKernel:
         builder = StateGraph(WorkerState)
         builder.add_node("start", lambda s: {})
         builder.add_node("tool_worker", make_worker_node(_invoke_tool))
+        builder.set_entry_point("start")
         builder.add_conditional_edges("start", lambda s: fanout("tool_worker", s["items"]))
         builder.add_edge("tool_worker", END)
         graph = builder.compile()

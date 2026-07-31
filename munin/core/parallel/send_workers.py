@@ -88,10 +88,7 @@ def make_worker_node(tool_fn):
             outcome = {"index": state["worker_index"], "result": None, "error": str(exc)}
 
         return {
-            "aggregate": [outcome],  # operator.add accumulates these
-            "worker_index": state["worker_index"],
-            "task_args": state["task_args"],
-            "messages": state.get("messages", []),
+            "aggregate": [outcome],
         }
 
     return worker_node

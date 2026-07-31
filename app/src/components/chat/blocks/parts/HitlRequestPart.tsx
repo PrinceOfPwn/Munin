@@ -11,9 +11,11 @@ export interface HitlRequestPartProps {
   requestId: string;
   toolName: string;
   args: Record<string, unknown>;
+  nonce?: string;
+  choices?: string[];
   resolution?: "approved" | "rejected";
-  onApprove: (requestId: string) => void;
-  onReject: (requestId: string, reason: string) => void;
+  onApprove: (requestId: string, choice: string, nonce: string) => void;
+  onReject: (requestId: string, choice: string, nonce: string, reason: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -31,6 +33,8 @@ export function HitlRequestPart({
   requestId,
   toolName,
   args,
+  nonce = "",
+  choices = [],
   resolution,
   onApprove,
   onReject,
@@ -39,15 +43,17 @@ export function HitlRequestPart({
   const [showRejectInput, setShowRejectInput] = useState(false);
 
   const resolved = Boolean(resolution);
+  const approveChoice = choices.find((c) => c === "approve") ?? choices[0] ?? "approve";
+  const rejectChoice = choices.find((c) => c === "deny" || c === "reject") ?? "deny";
 
   function handleApprove() {
     if (resolved) return;
-    onApprove(requestId);
+    onApprove(requestId, approveChoice, nonce);
   }
 
   function handleRejectSubmit() {
     if (resolved) return;
-    onReject(requestId, rejectReason);
+    onReject(requestId, rejectChoice, nonce, rejectReason);
     setShowRejectInput(false);
   }
 

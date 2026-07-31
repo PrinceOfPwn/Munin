@@ -37,6 +37,8 @@ export interface BackendEnvelope {
   request_id?: string;
   args?: Record<string, unknown>;
   resolution?: "approved" | "rejected";
+  nonce?: string;
+  choices?: string[];
   artifact_id?: string;
   mime_type?: string;
   uri?: string;
@@ -126,7 +128,14 @@ export function createTranslator(runId: string): {
         return [{
           type: "data-hitl-request",
           id: `hitl-${envelope.request_id}`,
-          data: { requestId: envelope.request_id, toolName: envelope.tool_name ?? "unknown", args: envelope.args ?? {}, resolved: false },
+          data: {
+            requestId: envelope.request_id,
+            toolName: envelope.tool_name ?? "unknown",
+            args: envelope.args ?? {},
+            nonce: envelope.nonce ?? "",
+            choices: envelope.choices ?? [],
+            resolved: false,
+          },
         }];
 
       case "human_resolved":

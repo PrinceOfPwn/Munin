@@ -59,7 +59,10 @@ class SubagentFactory:
         from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
         if isinstance(agent, dict):
-            agent = self.create_subagent(SubagentSpec.model_validate(agent))
+            if "description" in agent and "purpose" not in agent:
+                pass
+            else:
+                agent = self.create_subagent(SubagentSpec.model_validate(agent))
         payload = {"messages": [HumanMessage(content=task)]}
         if hasattr(agent, "ainvoke"):
             result = await agent.ainvoke(payload, config=config or {})
@@ -118,81 +121,23 @@ class SubagentFactory:
         )
 
     def _make_async_langgraph(self, spec: SubagentSpec) -> Any:
-        url = os.environ.get("MUNIN_LANGGRAPH_URL", "")
-        if not url:
-            raise NotImplementedError(
-                "async_langgraph requires MUNIN_LANGGRAPH_URL "
-                "(start the LangGraph server: scripts/langgraph_start.sh)"
-            )
-        from langgraph_sdk import get_client  # noqa: PLC0415
-
-        client = get_client(url=url)
-        model = self._resolve_model(spec)
-
-        class AsyncSubAgentProxy:
-            """Preview async-subagent adapter (launch/wait through Agent Protocol)."""
-
-            def __init__(self, spec: SubagentSpec, client: Any):
-                self.name = spec.name
-                self._spec = spec
-                self._client = client
-
-            async def ainvoke(self, state: dict, config: dict | None = None) -> dict:
-                thread = await self._client.threads.create()
-                return await self._client.runs.wait(
-                    thread["thread_id"],
-                    assistant_id="munin_supervisor",
-                    input=state,
-                )
-
-            def invoke(self, state: dict, config: dict | None = None) -> dict:
-                from .tool_factory import run_maybe_async  # noqa: PLC0415
-
-                async def _call() -> dict:
-                    return await self.ainvoke(state, config=config)
-
-                return run_maybe_async(_call, {})
-
-        return AsyncSubAgentProxy(spec, client)
+        raise NotImplementedError(
+            f"async_langgraph runtime for spec {spec.name!r} requires deploying "
+            "a graph that respects the spec's prompt, model, and tool restrictions. "
+            "Use deep_agent or compiled_langgraph instead."
+        )
 
     def _make_swarm_member(self, spec: SubagentSpec) -> Any:
-        try:
-            from munin.core.coordination.handoff_tools import (  # noqa: PLC0415
-                make_handoff_tools_for_agents,
-            )
-
-            handoff_tools = make_handoff_tools_for_agents(
-                [t for t in spec.tools if not t.startswith("gen__")]
-            )
-        except ImportError:
-            handoff_tools = []
-
-        all_tools = self._filter_tools(spec.tools) + handoff_tools
-        model = self._resolve_model(spec)
-
-        try:
-            from deepagents import create_deep_agent  # noqa: PLC0415
-
-            return create_deep_agent(
-                name=spec.name,
-                model=model,
-                tools=all_tools,
-                system_prompt=spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
-            )
-        except ImportError:
-            from langchain.agents import create_agent  # noqa: PLC0415
-
-            return create_agent(
-                model=model,
-                tools=all_tools,
-                system_prompt=spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
-                name=spec.name,
-            )
+        raise NotImplementedError(
+            f"swarm_member runtime for spec {spec.name!r} requires composing multiple "
+            "specialists via munin.core.coordination.swarm.build_swarm. Individual agents "
+            "cannot form a swarm - use deep_agent or compiled_langgraph instead."
+        )
 
     # ------------------------------------------------------------------
 
     def _filter_tools(self, tool_names: list[str]) -> list[Any]:
         if not tool_names:
-            return list(self._tools)
+            return []
         name_set = set(tool_names)
         return [t for t in self._tools if getattr(t, "name", None) in name_set]

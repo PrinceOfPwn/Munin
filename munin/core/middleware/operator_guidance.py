@@ -36,13 +36,12 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
     # -- guidance drain ---------------------------------------------------
 
     def _drain_sync(self) -> list[dict]:
-        drain = getattr(self.store, "drain_guidance", None)
-        if drain is None:
+        consume = getattr(self.store, "consume_pending_guidance", None)
+        if consume is None:
             return []
         try:
-            result = drain(self.run_id)
+            result = consume(run_id=self.run_id)
             if inspect.isawaitable(result):
-                # Sync hook cannot await; skip rather than corrupt the loop.
                 return []
             return list(result or [])
         except Exception:  # noqa: BLE001
@@ -50,11 +49,11 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
             return []
 
     async def _drain_async(self) -> list[dict]:
-        drain = getattr(self.store, "drain_guidance", None)
-        if drain is None:
+        consume = getattr(self.store, "consume_pending_guidance", None)
+        if consume is None:
             return []
         try:
-            result = drain(self.run_id)
+            result = consume(run_id=self.run_id)
             if inspect.isawaitable(result):
                 result = await result
             return list(result or [])
@@ -68,7 +67,7 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
             return None
         injected = [
             HumanMessage(
-                content=f"[Operator guidance]: {item.get('text', item)}",
+                content=f"[Operator guidance]: {item.get('body', item)}",
                 name="operator",
             )
             for item in items

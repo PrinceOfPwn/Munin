@@ -11,7 +11,7 @@ from munin.core.middleware.operator_guidance import OperatorGuidanceMiddleware
 async def test_no_guidance_returns_none():
     """Empty guidance queue → no state update (framework contract: None)."""
     store = MagicMock()
-    store.drain_guidance = AsyncMock(return_value=[])
+    store.consume_pending_guidance = AsyncMock(return_value=[])
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=store)
 
     assert await middleware.abefore_model({"messages": []}, runtime=None) is None
@@ -20,7 +20,7 @@ async def test_no_guidance_returns_none():
 @pytest.mark.asyncio
 async def test_guidance_injected_as_human_message():
     store = MagicMock()
-    store.drain_guidance = AsyncMock(return_value=[{"text": "check port 80"}])
+    store.consume_pending_guidance = AsyncMock(return_value=[{"body": "check port 80"}])
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=store)
 
     update = await middleware.abefore_model({"messages": []}, runtime=None)
@@ -34,9 +34,9 @@ async def test_guidance_injected_as_human_message():
 @pytest.mark.asyncio
 async def test_multiple_guidance_injected_in_order():
     store = MagicMock()
-    store.drain_guidance = AsyncMock(return_value=[
-        {"text": "first guidance"},
-        {"text": "second guidance"},
+    store.consume_pending_guidance = AsyncMock(return_value=[
+        {"body": "first guidance"},
+        {"body": "second guidance"},
     ])
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=store)
 
@@ -47,7 +47,7 @@ async def test_multiple_guidance_injected_in_order():
     assert "second guidance" in messages[1].content
 
 
-def test_store_without_drain_method_is_noop():
-    """SharedStateStore (no drain_guidance) → middleware silently skips."""
+def test_store_without_consume_method_is_noop():
+    """SharedStateStore (no consume_pending_guidance) → middleware silently skips."""
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=object())
     assert middleware.before_model({"messages": []}, runtime=None) is None

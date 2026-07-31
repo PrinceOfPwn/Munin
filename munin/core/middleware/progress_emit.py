@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from ...mcp.audit import redact_secrets  # noqa: TID252
+
 logger = logging.getLogger(__name__)
 
 try:  # LangChain 1.x middleware surface
@@ -51,7 +53,7 @@ class ProgressEmitMiddleware(AgentMiddleware):
                 "run_id": self.run_id,
                 "tool_name": name,
                 "tool_call_id": call_id,
-                "input": args,
+                "input": redact_secrets(args),
             }
         )
         return call_id
@@ -63,16 +65,17 @@ class ProgressEmitMiddleware(AgentMiddleware):
                     "kind": "tool_failed",
                     "run_id": self.run_id,
                     "tool_call_id": call_id,
-                    "error": f"{type(error).__name__}: {error}",
+                    "error": redact_secrets(f"{type(error).__name__}: {error}"),
                 }
             )
             return
+        output = result if isinstance(result, str) else repr(result)[:4000]
         self._emit(
             {
                 "kind": "tool_result",
                 "run_id": self.run_id,
                 "tool_call_id": call_id,
-                "output": result if isinstance(result, str) else repr(result)[:4000],
+                "output": redact_secrets(output),
             }
         )
 

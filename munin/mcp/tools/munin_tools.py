@@ -530,13 +530,13 @@ def munin_chat(
             import asyncio  # noqa: PLC0415
             from ...core.runtime_adapter import supervisor_runner  # noqa: PLC0415
 
-            llm_model = None
             try:
                 from ...core.llm_client import LLMClient  # noqa: PLC0415
 
                 llm_model = LLMClient(settings).make_langchain()
-            except Exception:
-                logger.warning("munin_chat: LangChain model unavailable; framework will resolve", exc_info=True)
+            except Exception as exc:
+                logger.error("munin_chat: LLMClient initialization failed", exc_info=True)
+                raise RuntimeError(f"Failed to initialize configured model: {exc}") from exc
 
             async def _run() -> tuple[str, list, int, str]:
                 content = ""

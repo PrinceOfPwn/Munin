@@ -45,6 +45,23 @@ function mimeLabel(mimeType: string): string {
   return map[mimeType] ?? mimeType.split("/")[1]?.toUpperCase() ?? "FILE";
 }
 
+/** Validate URI to prevent script execution via javascript: or other unsafe protocols. */
+function isSafeUri(uri: string): boolean {
+  if (!uri) return false;
+
+  if (uri.startsWith("/") || uri.startsWith("./") || uri.startsWith("../")) {
+    return true;
+  }
+
+  try {
+    const url = new URL(uri);
+    const safeProtocols = ["http:", "https:", "data:", "blob:"];
+    return safeProtocols.includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -55,17 +72,18 @@ function mimeLabel(mimeType: string): string {
 export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
   const filename = displayName(uri, artifactId);
   const label = mimeLabel(mimeType);
+  const safeUri = isSafeUri(uri) ? uri : undefined;
 
   return (
     <a
-      href={uri || undefined}
+      href={safeUri}
       download={filename}
       target="_blank"
       rel="noopener noreferrer"
       className={cn(
         "inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm",
         "transition-colors hover:bg-accent/10 hover:text-accent",
-        !uri && "pointer-events-none opacity-60"
+        !safeUri && "pointer-events-none opacity-60"
       )}
       data-artifact-id={artifactId}
       aria-label={`Download ${filename}`}
@@ -87,7 +105,7 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
       </span>
 
       {/* Download arrow */}
-      {uri && (
+      {safeUri && (
         <span aria-hidden className="text-muted">
           ↓
         </span>

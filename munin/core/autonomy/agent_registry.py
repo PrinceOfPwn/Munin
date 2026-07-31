@@ -70,6 +70,33 @@ class AgentRegistry:
 
     # ------------------------------------------------------------------
 
+    def _validate_dependencies(self, spec: SubagentSpec, dependencies: list[str] | None = None) -> None:
+        """Validate that all tool/agent dependencies are active."""
+        if self._state is None:
+            return
+
+        from ..tool_gateway import catalog_names  # noqa: PLC0415
+
+        available_tools = catalog_names(self._state, include_generated=True)
+
+        missing_tools = []
+        for tool_name in spec.tools:
+            if tool_name not in available_tools:
+                missing_tools.append(tool_name)
+
+        if dependencies:
+            for dep in dependencies:
+                if dep.startswith("agent_"):
+                    try:
+                        self._definition_row(dep, None)
+                    except KeyError:
+                        missing_tools.append(dep)
+                elif dep not in available_tools:
+                    missing_tools.append(dep)
+
+        if missing_tools:
+            raise ValueError(f"Missing or inactive dependencies: {', '.join(missing_tools)}")
+
     def register_agent(
         self,
         spec: SubagentSpec,
@@ -80,6 +107,7 @@ class AgentRegistry:
         model_config: dict | None = None,
         peer_handoffs: list[str] | None = None,
     ) -> tuple[str, int]:
+        self._validate_dependencies(spec, dependencies)
         agent_id = f"agent_{_slugify(spec.name)}"
         now = datetime.now(timezone.utc).isoformat()
         defn = json.loads(spec.to_json())
@@ -125,6 +153,8 @@ class AgentRegistry:
         """
         row = self._definition_row(agent_id, version)
         spec = SubagentSpec.from_json(row["definition_json"])
+        dependencies = json.loads(row["dependencies_json"] or "[]")
+        self._validate_dependencies(spec, dependencies)
         if factory is None:
             from .subagent_factory import SubagentFactory  # noqa: PLC0415
 

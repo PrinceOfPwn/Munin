@@ -14,6 +14,35 @@ const BACKEND = (process.env.MUNIN_PRODUCTION_API_URL || "http://127.0.0.1:8787"
 // Backend SSE pump
 // ---------------------------------------------------------------------------
 
+const DOTTED_KIND_MAP: Record<string, BackendEnvelope["kind"]> = {
+  "agent.reasoning": "reasoning",
+  "tool.intent": "tool_intent",
+  "tool.started": "tool_started",
+  "tool.result": "tool_result",
+  "tool.completed": "tool_completed",
+  "tool.failed": "tool_failed",
+  "subagent.started": "subagent_started",
+  "subagent.state": "subagent_state",
+  "human.request": "human_request",
+  "human.resolved": "human_resolved",
+  "run.state": "run_state",
+};
+
+function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
+  if (typeof raw !== "object" || !raw) return null;
+  const event = raw as { kind?: string; payload?: Record<string, unknown> };
+  if (!event.kind || typeof event.kind !== "string") return null;
+
+  const resolvedKind = DOTTED_KIND_MAP[event.kind] ?? event.kind;
+  const normalized: BackendEnvelope = { kind: resolvedKind as BackendEnvelope["kind"] };
+
+  if (event.payload && typeof event.payload === "object") {
+    Object.assign(normalized, event.payload);
+  }
+
+  return normalized;
+}
+
 async function pumpRunEvents(
   runId: string,
   writer: { write: (chunk: UIMessageChunk) => void },
@@ -54,12 +83,14 @@ async function pumpRunEvents(
         if (!dataLine) continue;
         const raw = dataLine.slice("data:".length).trim();
         if (!raw || raw === "[DONE]") continue;
-        let envelope: BackendEnvelope;
+        let envelope: BackendEnvelope | null;
         try {
-          envelope = JSON.parse(raw) as BackendEnvelope;
+          const parsed = JSON.parse(raw);
+          envelope = normalizeRunEvent(parsed);
         } catch {
           continue;
         }
+        if (!envelope) continue;
         for (const chunk of translator.translate(envelope)) {
           writer.write(chunk);
         }

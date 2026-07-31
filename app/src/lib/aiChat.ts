@@ -60,11 +60,20 @@ export async function sendGuidance(runId: string, text: string): Promise<void> {
 }
 
 /** Approve a human-in-the-loop request. */
-export async function approveHitlRequest(requestId: string): Promise<void> {
-  await productionApi.resolveHumanRequest(requestId, "approved");
+export async function approveHitlRequest(
+  requestId: string,
+  choice: string,
+  nonce: string,
+): Promise<void> {
+  await productionApi.resolveHumanRequest(requestId, choice, nonce);
 }
 
 /** Reject a human-in-the-loop request with an optional reason. */
-export async function rejectHitlRequest(requestId: string, reason?: string): Promise<void> {
-  await productionApi.resolveHumanRequest(requestId, "rejected", "", reason ?? "");
+export async function rejectHitlRequest(
+  requestId: string,
+  choice: string,
+  nonce: string,
+  reason?: string,
+): Promise<void> {
+  await productionApi.resolveHumanRequest(requestId, choice, nonce, reason ?? "");
 }

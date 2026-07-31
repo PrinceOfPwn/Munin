@@ -107,11 +107,21 @@ async def supervisor_runner(
 
     from .supervisor import build_munin_supervisor  # noqa: PLC0415
 
+    middleware_events: list[dict] = []
+
+    def wrapped_progress_sink(envelope: dict) -> None:
+        middleware_events.append(envelope)
+        if progress_sink is not None:
+            try:
+                progress_sink(envelope)
+            except Exception:  # noqa: BLE001
+                pass
+
     supervisor = build_munin_supervisor(
         state=store,
         model=model,
         run_id=run_id,
-        progress_sink=progress_sink,
+        progress_sink=wrapped_progress_sink,
     )
 
     messages = _history_to_messages(conversation_history)
@@ -125,6 +135,9 @@ async def supervisor_runner(
     async for event in supervisor.astream_events(
         {"messages": messages}, config=config, version="v2"
     ):
+        while middleware_events:
+            yield middleware_events.pop(0)
+
         envelope = translate_event(event, run_id=run_id)
         if envelope is None:
             continue
@@ -134,3 +147,6 @@ async def supervisor_runner(
             except Exception:  # noqa: BLE001 - observability must not sink a run
                 pass
         yield envelope
+
+    while middleware_events:
+        yield middleware_events.pop(0)

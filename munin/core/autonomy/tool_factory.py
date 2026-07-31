@@ -124,12 +124,15 @@ class ToolFactory:
         settings = self._state.settings
         script_path = Path(settings.generated_tools_dir) / f"{slug}.py"
         script_path.parent.mkdir(parents=True, exist_ok=True)
-        script_path.write_text(source, encoding="utf-8")
+
+        staging_path = script_path.with_suffix(".py.staging")
+        staging_path.write_text(source, encoding="utf-8")
 
         # 1. AST guard (same guard used at forge time).
         try:
-            validate_source_file(script_path, set(allowed_imports) if allowed_imports else None)
+            validate_source_file(staging_path, set(allowed_imports) if allowed_imports else None)
         except Exception as exc:  # noqa: BLE001
+            staging_path.unlink(missing_ok=True)
             return {"ok": False, "tool": tool_name, "error": f"AST guard rejected: {exc}"}
 
         # 2. Optional sandbox smoke test.
@@ -150,12 +153,15 @@ class ToolFactory:
                 "duration_seconds": outcome.duration_seconds,
             }
             if not outcome.ok:
+                staging_path.unlink(missing_ok=True)
                 return {
                     "ok": False,
                     "tool": tool_name,
                     "error": f"sandbox test failed: {outcome.error}",
                     "validation": validation,
                 }
+
+        staging_path.replace(script_path)
 
         # 3. Persist with provenance (procedural table is the Tool Registry).
         signature = {
@@ -235,7 +241,7 @@ class ToolFactory:
                 handler = self._load_from_registry(name)
                 self._live[name] = handler
             else:
-                from ..subagents.base import build_tool_catalog  # noqa: TID252, PLC0415
+                from ...subagents.base import build_tool_catalog  # noqa: TID252, PLC0415
 
                 catalog = build_tool_catalog(self._state, {name})
                 handler = catalog.get(name)

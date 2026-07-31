@@ -156,7 +156,7 @@ describe("createTranslator - data-* parts", () => {
     expect(chunks[0]).toMatchObject({ type: "data-subagent", data: { state: "running" } });
   });
 
-  it("human_request becomes a data-hitl-request with resolved:false", () => {
+  it("human_request becomes a data-hitl-request with resolved:false, nonce and choices", () => {
     const { translate } = createTranslator("run-x");
     const chunks = translate(
       makeEnvelope({
@@ -164,6 +164,8 @@ describe("createTranslator - data-* parts", () => {
         request_id: "req-1",
         tool_name: "execute_command",
         args: { cmd: "ls" },
+        nonce: "abc123",
+        choices: ["approve", "deny"],
       }),
     );
     expect(chunks).toEqual([
@@ -174,6 +176,8 @@ describe("createTranslator - data-* parts", () => {
           requestId: "req-1",
           toolName: "execute_command",
           args: { cmd: "ls" },
+          nonce: "abc123",
+          choices: ["approve", "deny"],
           resolved: false,
         },
       },

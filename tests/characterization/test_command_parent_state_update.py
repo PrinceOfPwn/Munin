@@ -16,8 +16,5 @@ def test_swarm_member_route(monkeypatch, fake_chat_model_factory):
     from munin.core.autonomy.subagent_factory import SubagentFactory
     factory = SubagentFactory(tools=[], model=fake_chat_model_factory())
     spec = SubagentSpec(name="swarm_test", purpose="test", runtime_type="swarm_member")
-    try:
-        agent = factory.create_subagent(spec)
-        assert agent is not None
-    except ImportError:
-        pytest.skip("deepagents or langgraph not installed")
+    with pytest.raises(NotImplementedError):
+        factory.create_subagent(spec)

@@ -84,7 +84,7 @@ class SubagentSpec(BaseModel):
     )
 
     class Config:
-        extra = "allow"
+        extra = "forbid"
 
     def to_json(self) -> str:
         return self.model_dump_json()

@@ -33,7 +33,18 @@ from typing import Any
 from ..core.prompting import subagent_runtime_prompt
 from ..mcp.audit import redact_secrets
 from ..mcp.shared_state import SharedStateStore, presence_metadata
-from ..mcp.tools import capabilities_tool, hugin_rag_tool, hugin_tool, ldap_tools, tavily_tool
+from ..mcp.tools import (
+    capabilities_tool,
+    diagnostics_tool,
+    discord_tool,
+    extension_forge_tool,
+    forge_tool,
+    graph_forge_tool,
+    hugin_rag_tool,
+    hugin_tool,
+    ldap_tools,
+    tavily_tool,
+)
 
 logger = logging.getLogger("munin.subagent")
 
@@ -582,7 +593,22 @@ _STATIC_TOOLS: dict[str, Callable[..., Any]] = {
     "hugin_rag_search": hugin_rag_tool.hugin_rag_search,
     "hugin_plan_for": hugin_rag_tool.hugin_plan_for,
     "hugin_node_detail": hugin_rag_tool.hugin_node_detail,
+    # System tools
     "munin_capabilities": capabilities_tool.munin_capabilities,
+    "munin_diagnostics": diagnostics_tool.munin_diagnostics,
+    # Forge tools
+    "tool_forge": forge_tool.tool_forge,
+    "extension_forge": extension_forge_tool.extension_forge,
+    "extension_list": extension_forge_tool.extension_list,
+    "extension_describe": extension_forge_tool.extension_describe,
+    "extension_open_pr": extension_forge_tool.extension_open_pr,
+    "graph_forge": graph_forge_tool.graph_forge,
+    "list_generated_graphs": graph_forge_tool.list_generated_graphs,
+    "describe_generated_graph": graph_forge_tool.describe_generated_graph,
+    "drop_generated_graph": graph_forge_tool.drop_generated_graph,
+    # Discord tools
+    "send_discord_message": discord_tool.send_discord_message,
+    "discord_status": discord_tool.discord_status,
 }
 
 

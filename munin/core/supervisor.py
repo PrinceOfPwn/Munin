@@ -24,6 +24,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_CHECKPOINTER_CACHE: dict[str, Any] = {}
+
 _KERNEL_INSTRUCTIONS = """
 ## Autonomy Kernel
 
@@ -168,12 +170,16 @@ def build_munin_supervisor(
         tools_provider=lambda: gateway_tools(state, include_generated=include_generated),
     )
 
+    if "shared" not in _CHECKPOINTER_CACHE:
+        _CHECKPOINTER_CACHE["shared"] = make_checkpointer()
+
     return build_supervisor(
         tools=gateway_tools(state, include_generated=include_generated),
         model=model,
         system_prompt=compose_munin_prompt(soul_prompt=soul_prompt),
         middleware=middleware,
         meta_tools=kernel.meta_tools(),
+        checkpointer=_CHECKPOINTER_CACHE["shared"],
     )
 
 
@@ -186,9 +192,12 @@ def __getattr__(name: str) -> Any:  # pragma: no cover - exercised by langgraph 
     if name == "supervisor":
         from ..mcp.config import get_settings  # noqa: TID252, PLC0415
         from ..mcp.shared_state import SharedStateStore  # noqa: TID252, PLC0415
+        from .llm_client import LLMClient  # noqa: PLC0415
 
-        state = SharedStateStore(get_settings())
-        graph = build_munin_supervisor(state=state, run_id="langgraph-server")
+        settings = get_settings()
+        state = SharedStateStore(settings)
+        model = LLMClient(settings).make_langchain()
+        graph = build_munin_supervisor(state=state, model=model, run_id="langgraph-server")
         globals()["supervisor"] = graph
         return graph
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
