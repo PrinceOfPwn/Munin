@@ -1,5 +1,8 @@
 # Munin — architecture
 
+For the complete operator-facing model, including Hugin retrieval, forged
+graphs, persistence, and handoff contracts, read [Munin System Guide](munin-system-guide.md).
+
 ## 30-second overview
 
 Munin is a **ReAct agent** with a soul (Markdown files) and a memory (shared SQLite),

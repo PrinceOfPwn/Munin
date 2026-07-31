@@ -2,6 +2,9 @@
 
 This guide details the operation, architecture, GUI setup, Turso persistent memory state, and Human-in-the-Loop workflows of **Munin**. It is intended for authorized labs, security research, and infrastructure assessment.
 
+For the complete component map and Munin/Hugin operating model, see the
+[Munin System Guide](munin-system-guide.md).
+
 ---
 
 ## 🧠 Mental Model
@@ -115,6 +118,14 @@ The Job Summary prints the temporary Web UI URL. In Settings, paste your `MUNIN_
 4. Create specialist agent graphs with `graph_forge`, specifying a target `purpose` and a minimal `tool_whitelist_csv`.
 5. Wake subagents via `munin_wake(subagent, task_json)`.
 6. Monitor execution in **Agents → Live Trace**.
+
+### Hugin-assisted investigations
+
+Use `hugin_rag_search` for ranked evidence, `hugin_plan_for` to order candidates,
+`hugin_neighbors` to expand relationships, and `hugin_node_detail` to inspect
+provenance. Use `hugin_search` for direct matching and `hugin_refresh` only when
+the cache is missing or stale. Hugin output is passive evidence to validate,
+never authorization or proof of a target-specific finding.
 
 ---
 
