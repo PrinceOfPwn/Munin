@@ -38,6 +38,32 @@ No prose outside the JSON. No markdown fences.
 """
 
 
+def _execution_contract(tool_whitelist: list[str]) -> dict[str, Any]:
+    """Give every forged graph the same observable, evidence-first shape."""
+    contexts = ["semantic_memory", "shared_intel"]
+    if {"hugin_search", "hugin_neighbors", "hugin_refresh"} & set(tool_whitelist):
+        contexts.append("hugin_cached_graph")
+    return {
+        "version": 1,
+        "mode": "evidence_mesh",
+        "context_sources": contexts,
+        "human_checkpoints": [
+            "scope_unclear",
+            "before_active_or_irreversible_action",
+            "before_final_publication",
+        ],
+        "delivery": {
+            "format": "markdown",
+            "sections": ["Summary", "Evidence", "Next steps"],
+            "post_to_parent": True,
+        },
+        "termination": {
+            "required": "Return a final evidence-backed answer after the assigned objective is complete; do not poll indefinitely.",
+            "max_iterations": 8,
+        },
+    }
+
+
 class GraphForgeSubagent:
     def __init__(self, state: SharedStateStore, llm: LLMClient | None = None) -> None:
         self.state = state
@@ -77,6 +103,7 @@ class GraphForgeSubagent:
             output_data={"name": payload["name"], "tool_whitelist": payload["tool_whitelist"]},
             tags=["forge", "graph"],
         )
+        contract = _execution_contract(payload.get("tool_whitelist") or tool_whitelist)
         return {
             "ok": True,
             "summary": f"graph forged: {payload['name']}",
@@ -84,4 +111,5 @@ class GraphForgeSubagent:
             "purpose": payload["purpose"],
             "system_prompt": payload["system_prompt"],
             "tool_whitelist": payload.get("tool_whitelist") or tool_whitelist,
+            "execution_contract": contract,
         }

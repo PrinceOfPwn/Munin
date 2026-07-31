@@ -32,7 +32,7 @@ from typing import Any
 
 from ..mcp.audit import redact_secrets
 from ..mcp.shared_state import SharedStateStore, presence_metadata
-from ..mcp.tools import hugin_tool, ldap_tools, tavily_tool
+from ..mcp.tools import capabilities_tool, hugin_tool, ldap_tools, tavily_tool
 
 logger = logging.getLogger("munin.subagent")
 
@@ -574,6 +574,7 @@ _STATIC_TOOLS: dict[str, Callable[..., Any]] = {
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
     "hugin_neighbors": hugin_tool.hugin_neighbors,
+    "munin_capabilities": capabilities_tool.munin_capabilities,
 }
 
 
@@ -668,6 +669,14 @@ class ReActSubagentBase:
             metadata_json=json.dumps(presence_metadata(self.pid), ensure_ascii=True),
         )
 
+    def _task_context(self, task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Optional context packet for a specialised runtime.
+
+        Native subagents intentionally start with no ambient context. Forged
+        Evidence Mesh graphs override this with a compact, auditable packet.
+        """
+        return "", {}
+
     # ------------------------------------------------------------------
     # Main entry point — called by runner for each claimed wake item
     # ------------------------------------------------------------------
@@ -683,8 +692,12 @@ class ReActSubagentBase:
         catalog = build_tool_catalog(self.state, self.allowed_tools)
         specs = _tool_specs(catalog)
 
+        context_text, context_meta = self._task_context(task)
+        system_prompt = self.system_prompt
+        if context_text:
+            system_prompt = f"{system_prompt}\n\n{context_text}"
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt.strip()},
         ]
 
@@ -692,9 +705,38 @@ class ReActSubagentBase:
         self.state.episodic_record(
             agent=self.name,
             action="task_start",
-            input_data={"task": task},
+            input_data={"task": task, "context": context_meta},
             tags=["react"],
         )
+        if context_meta:
+            self.state.episodic_record(
+                agent=self.name,
+                action="evidence_mesh_ready",
+                output_data=context_meta,
+                tags=["graph", "evidence-mesh"],
+            )
+            try:
+                self.state.post_message(
+                    sender_agent=self.name,
+                    recipient_agent="munin",
+                    subject="evidence mesh ready",
+                    message_type="PROGRESS",
+                    body=json.dumps(
+                        {
+                            "stage": "evidence_mesh_ready",
+                            "context_sources": context_meta.get("context_sources", []),
+                            "facts": context_meta.get("fact_count", 0),
+                            "intel": context_meta.get("intel_count", 0),
+                            "hugin": context_meta.get("hugin_count", 0),
+                        },
+                        ensure_ascii=True,
+                    ),
+                    related_task_id=None,
+                    related_target_ip="",
+                    metadata_json=json.dumps({"subagent": self.name, "stage": "evidence_mesh_ready"}),
+                )
+            except Exception:
+                logger.debug("could not publish evidence-mesh progress", exc_info=True)
 
         final_content = ""
         tool_calls_log: list[dict[str, Any]] = []

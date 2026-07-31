@@ -17,14 +17,87 @@ def test_graph_manifest_roundtrip(store):
     }
     path = persist_graph_manifest(store.settings, graph, queue_git=False)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["tool_whitelist"] == ["hugin_search", "ldap_search"]
+    assert payload["execution_contract"] == {}
 
     store.graph_drop(graph["name"])
     assert store.graph_get(graph["name"]) is None
     result = rehydrate_graph_manifests(store, store.settings)
     assert result == {"loaded": 1, "errors": []}
     assert store.graph_get(graph["name"])["purpose"] == graph["purpose"]
+
+
+def test_graph_execution_contract_survives_store_and_manifest(store):
+    from munin.mcp.graph_persist import persist_graph_manifest, rehydrate_graph_manifests
+
+    contract = {
+        "version": 1,
+        "mode": "evidence_mesh",
+        "context_sources": ["semantic_memory", "shared_intel", "hugin_cached_graph"],
+        "delivery": {"sections": ["Summary", "Evidence", "Next steps"]},
+    }
+    store.graph_register(
+        name="evidence-researcher",
+        purpose="Research with durable evidence",
+        system_prompt="Use evidence.",
+        tool_whitelist=["hugin_search"],
+        reset_policy="persistent",
+        created_by_agent="test",
+        execution_contract=contract,
+    )
+    graph = store.graph_get("evidence-researcher")
+    assert graph and graph["execution_contract"] == contract
+    persist_graph_manifest(store.settings, graph, queue_git=False)
+
+    store.graph_drop("evidence-researcher")
+    rehydrate_graph_manifests(store, store.settings)
+    restored = store.graph_get("evidence-researcher")
+    assert restored and restored["execution_contract"] == contract
+
+
+def test_evidence_mesh_builds_auditable_hugin_context(store, monkeypatch):
+    from munin.mcp.tools import hugin_tool
+    from munin.subagents.runner import _ForgedGraphRunner
+
+    store.semantic_remember("engagement.scope", {"target": "example.org"})
+    monkeypatch.setattr(
+        hugin_tool,
+        "_load_cached",
+        lambda **_kwargs: (
+            {
+                "entities": [
+                    {
+                        "id": "technique-1",
+                        "label": "Example discovery technique",
+                        "category": "discovery",
+                        "tags": ["example", "research"],
+                    }
+                ]
+            },
+            12,
+            False,
+        ),
+    )
+    # Context generation is deterministic and should not require an LLM client.
+    runner = object.__new__(_ForgedGraphRunner)
+    runner.name = "researcher"
+    runner.state = store
+    runner.execution_contract = {
+        "context_sources": ["semantic_memory", "shared_intel", "hugin_cached_graph"],
+        "delivery": {"sections": ["Summary", "Evidence", "Next steps"]},
+    }
+
+    text, meta = runner._task_context({"prompt": "Research example discovery"})
+
+    assert "Evidence Mesh context" in text
+    assert "technique-1" in text
+    assert meta == {
+        "context_sources": ["semantic_memory", "shared_intel", "hugin_cached_graph"],
+        "fact_count": 1,
+        "intel_count": 0,
+        "hugin_count": 1,
+    }
 
 
 def test_reset_purge_removes_only_on_reset_manifests(store):

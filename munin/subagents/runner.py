@@ -14,11 +14,14 @@ import argparse
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any
 
 from ..mcp.config import get_settings
+from ..mcp.audit import redact_secrets
+from ..mcp.tools import hugin_tool
 from ..mcp.shared_state import (
     PRESENCE_LEASE_SECONDS,
     SharedStateStore,
@@ -156,6 +159,7 @@ class _WrappedGraphForge:
                 tool_whitelist=outcome["tool_whitelist"],
                 reset_policy=task.get("reset_policy", "on_reset"),
                 created_by_agent=task.get("created_by_agent", "graph_forge"),
+                execution_contract=outcome.get("execution_contract", {}),
             )
             outcome["registered"] = record
             from ..mcp.graph_persist import persist_graph_manifest  # noqa: PLC0415,TID252
@@ -182,11 +186,81 @@ class _ForgedGraphRunner(ReActSubagentBase):
 
     def __init__(self, *, state: SharedStateStore, graph: dict[str, Any]) -> None:
         self.name = graph["name"]
-        self.system_prompt = graph.get("system_prompt", "Complete the task using your tools.")
+        self.execution_contract = graph.get("execution_contract") or {
+            "version": 1,
+            "mode": "evidence_mesh",
+            "context_sources": ["semantic_memory", "shared_intel"],
+            "human_checkpoints": ["scope_unclear", "before_active_or_irreversible_action"],
+            "delivery": {"format": "markdown", "sections": ["Summary", "Evidence", "Next steps"]},
+            "termination": {"max_iterations": 8},
+        }
+        delivery = self.execution_contract.get("delivery", {}) if isinstance(self.execution_contract, dict) else {}
+        sections = delivery.get("sections", ["Summary", "Evidence", "Next steps"]) if isinstance(delivery, dict) else []
+        self.system_prompt = (
+            graph.get("system_prompt", "Complete the task using your tools.")
+            + "\n\n## Evidence Mesh execution contract\n"
+            + "Use the evidence capsule supplied at task start as leads, not unquestioned fact. "
+            + "Cite the relevant evidence in your final answer. If scope is unclear or an active/irreversible "
+            + "step is needed, post an approval request to the parent and wait for guidance. "
+            + "Finish with these sections: "
+            + ", ".join(str(section) for section in sections)
+            + ". Do not poll indefinitely after you have delivered the requested result."
+        )
         self.allowed_tools = set(graph.get("tool_whitelist") or [])
         # Always give forged graphs messaging tools so they can talk to munin
         self.allowed_tools |= {"post_agent_message", "fetch_agent_messages", "memory_remember", "memory_recall"}
         super().__init__(state)
+
+    def _task_context(self, task: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Build the compact, source-labelled context packet for a graph run."""
+        contract = self.execution_contract if isinstance(self.execution_contract, dict) else {}
+        sources = [str(item) for item in contract.get("context_sources", [])]
+        prompt = str(task.get("prompt") or json.dumps(task, ensure_ascii=True, default=str))
+        packet: dict[str, Any] = {
+            "graph": self.name,
+            "context_sources": sources,
+            "facts": [],
+            "shared_intel": [],
+            "hugin": [],
+        }
+        if "semantic_memory" in sources:
+            packet["facts"] = redact_secrets(self.state.semantic_list(limit=12))
+        if "shared_intel" in sources:
+            packet["shared_intel"] = redact_secrets(self.state.query_intel(limit=12))
+        if "hugin_cached_graph" in sources:
+            try:
+                bundle, age, stale = hugin_tool._load_cached(allow_stale=True)  # noqa: SLF001 - no hidden network refresh
+                tokens = {token.lower() for token in re.findall(r"[A-Za-z0-9_-]{4,}", prompt)}
+                for entity in (bundle or {}).get("entities", []):
+                    rendered = json.dumps(entity, ensure_ascii=False, default=str).lower()
+                    if tokens and not any(token in rendered for token in tokens):
+                        continue
+                    packet["hugin"].append(
+                        {
+                            "id": entity.get("id"),
+                            "label": entity.get("label") or entity.get("title"),
+                            "category": entity.get("category"),
+                            "tags": entity.get("tags", []),
+                            "source_url": entity.get("source_url") or entity.get("url"),
+                        }
+                    )
+                    if len(packet["hugin"]) >= 6:
+                        break
+                packet["hugin_cache"] = {"age_seconds": age, "is_stale": stale}
+            except Exception as exc:
+                packet["hugin_cache"] = {"error": str(exc)}
+
+        meta = {
+            "context_sources": sources,
+            "fact_count": len(packet["facts"]),
+            "intel_count": len(packet["shared_intel"]),
+            "hugin_count": len(packet["hugin"]),
+        }
+        return (
+            "## Evidence Mesh context (source-labelled; validate before acting)\n"
+            + json.dumps(packet, ensure_ascii=True, default=str)[:12_000],
+            meta,
+        )
 
 
 def main() -> None:
