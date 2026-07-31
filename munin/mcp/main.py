@@ -225,6 +225,13 @@ def _load_host_opsec_snapshot() -> dict[str, Any]:
 
 
 def _httpx_binary() -> str:
+    # Deployments which install the ProjectDiscovery binary in a dedicated
+    # location can make the selection deterministic.  This also prevents an
+    # unrelated ``httpx``/``pd-httpx`` already present on PATH from silently
+    # becoming the active reconnaissance tool.
+    configured = os.environ.get("MUNIN_HTTPX_BINARY", "").strip()
+    if configured:
+        return configured
     for candidate in ("pd-httpx", "/usr/local/bin/pd-httpx"):
         if command_exists(candidate) or Path(candidate).exists():
             return candidate
@@ -345,6 +352,11 @@ def audited_tool(
                 )
             return result
 
+        # Preserve the audited risk level on the FastMCP callable.  The
+        # Deep Agents builder derives its native HITL policy from this live
+        # registry metadata rather than from a stale second name list.
+        wrapper.__munin_audit_level__ = level  # type: ignore[attr-defined]
+        wrapper.__munin_tool_name__ = tool_name  # type: ignore[attr-defined]
         return wrapper
 
     return decorator
@@ -1397,23 +1409,22 @@ def _start_discord_operator_bridge() -> None:
             return
 
         def handle_message(author_id: int, author: str, prompt: str, channel_id: int) -> None:
-            # Import lazily: MuninAgent imports MCP tool modules, so importing it
-            # during module construction would create a circular dependency.
+            # Fase 2 (issue #9): both dispatch paths this branch used
+            # (``DurableDiscordAdapter`` → ``ProductionDispatcher``, and the
+            # in-process ``MuninAgent.respond``) were deleted along with the
+            # rest of Arch A.  A Discord operator bridge over ``supervisor_runner``
+            # is planned for a follow-up phase (issue #9 Fase 3).  For now inbound
+            # Discord control is disabled at the handler level so the outbound-only
+            # path keeps working without dragging the legacy ReAct loop back in.
+            del author_id, prompt  # unused until the supervisor bridge lands
             try:
-                if os.environ.get("MUNIN_DISCORD_DURABLE_ACTOR_ID", "").strip():
-                    from ..production.discord_adapter import DurableDiscordAdapter
-
-                    queued = DurableDiscordAdapter(SETTINGS).enqueue(author_id=author_id, author=author, prompt=prompt)
-                    post_to_discord(f"Munin — {author}\nQueued durable operation `{queued['run_id'][-8:]}`. Continue it in the Flight Deck.", channel_id=channel_id)
-                    return
-                from ..core.munin_agent import MuninAgent
-
-                result = MuninAgent(SETTINGS).respond(prompt, max_iterations=config.max_iterations)
-                answer = str(result.get("content") or result.get("summary") or "Task completed without a text response.")
-                post_to_discord(f"Munin — {author}\n{answer}", channel_id=channel_id)
-            except Exception as exc:  # pragma: no cover - external provider / Discord failure
+                post_to_discord(
+                    f"Munin — {author}\nInbound Discord control is temporarily disabled "
+                    "while the supervisor bridge is rewired (issue #9 Fase 2).",
+                    channel_id=channel_id,
+                )
+            except Exception:  # pragma: no cover - external provider / Discord failure
                 logger.exception("Discord operator task failed")
-                post_to_discord(f"Munin — task failed: {exc}", channel_id=channel_id)
 
         bridge = get_bridge(handle_message)
         if bridge and not config.inbound_enabled:
@@ -1530,6 +1541,39 @@ def _make_auth_middleware(expected_token: str) -> Callable[..., Any]:
         return middleware
 
     return middleware_factory
+
+
+def create_mcp_app(*, auth_token: str | None = None) -> Any:
+    """Return the FastMCP streamable-http ASGI sub-app, ready to mount.
+
+    Fase 3 (issue #9): :mod:`munin.server` mounts this under ``/mcp`` on the
+    unified backend port.  When ``auth_token`` is falsy the caller is
+    responsible for gating access (either via ``MUNIN_MCP_ALLOW_ANON=1`` or
+    an outer middleware); otherwise we wrap the transport with the same
+    bearer-token check used by the standalone ``munin mcp`` binary.
+
+    Issue #9 fix: the sub-app's internal ``Route`` is set to ``/`` (via
+    `MCP.settings.streamable_http_path`) so that mounting it under
+    ``Mount("/mcp", ...)`` produces the public path ``/mcp`` — not the
+    double-prefixed ``/mcp/mcp`` that the FastMCP default ``/mcp`` caused.
+    The host :mod:`munin.server` lifespan is then responsible for running
+    ``MCP.session_manager`` (Starlette does not propagate lifespans to
+    mounted sub-apps, so without it the session manager raises "Task group
+    is not initialized" on the first request).
+    """
+    token = (auth_token if auth_token is not None else SETTINGS.mcp_auth_token) or ""
+    MCP.settings.streamable_http_path = "/"
+    app = MCP.streamable_http_app()
+    if token:
+        middleware = _make_auth_middleware(token)
+        app = middleware(app)
+    elif os.environ.get("MUNIN_MCP_ALLOW_ANON", "0") != "1":
+        logger.warning(
+            "create_mcp_app: MUNIN_MCP_AUTH_TOKEN is empty and MUNIN_MCP_ALLOW_ANON is not 1 — "
+            "the mounted /mcp sub-app is UNAUTHENTICATED.  Configure a token before exposing this "
+            "process to a public tunnel."
+        )
+    return app
 
 
 def _install_signal_handlers() -> None:

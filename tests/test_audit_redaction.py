@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 
 def test_bearer_token_redacted(isolated_workspace):
     from munin.mcp.audit import AuditTrailLogger
@@ -62,3 +58,25 @@ def test_ghp_token_redacted(isolated_workspace):
         summary="",
     )
     assert "ghp_abcdefghijklmnop1234567890" not in event["command_or_params"]
+
+
+def test_trusted_lab_mode_preserves_exact_audit_output(monkeypatch, isolated_workspace):
+    from munin.mcp.audit import AuditTrailLogger
+
+    monkeypatch.setenv("MUNIN_REDACTION_MODE", "off")
+    logger = AuditTrailLogger(isolated_workspace)
+    event = logger.record(
+        run_id="trusted-run",
+        tool="mock",
+        level="admin",
+        mode="sync",
+        status="ok",
+        target="",
+        source_context="pytest",
+        command_or_params={"password": "lab-secret", "token": "lab-token"},
+        summary="exact lab output",
+    )
+    assert event["command_or_params"] == {
+        "password": "lab-secret",
+        "token": "lab-token",
+    }

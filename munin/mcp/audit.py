@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 from .utils import ensure_parent, json_dumps, utc_now_iso
-
 
 # Redact anything that looks like a secret before it reaches the audit trail on disk.
 # The audit trail persists command strings and params from every tool call, so a naive
@@ -30,6 +30,14 @@ _SECRET_KEY_PATTERN = re.compile(
 
 def redact_secrets(value: Any) -> Any:
     """Recursively redact credential-shaped keys and values before persistence."""
+    if os.environ.get("MUNIN_REDACTION_MODE", "on").strip().lower() in {
+        "off",
+        "none",
+        "disabled",
+        "false",
+        "0",
+    }:
+        return value
     if isinstance(value, str):
         out = value
         for pattern, replacement in _SECRET_PATTERNS:

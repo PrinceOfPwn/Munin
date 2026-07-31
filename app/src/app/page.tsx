@@ -1,5 +1,5 @@
-import FlightDeckStable from "@/components/FlightDeckStable";
+import AppShell from "@/components/AppShell";
 
 export default function Page() {
-  return <FlightDeckStable />;
+  return <AppShell />;
 }

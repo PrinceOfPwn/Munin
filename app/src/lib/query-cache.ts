@@ -31,12 +31,6 @@ type StoredSnapshot = {
   state: DehydratedState;
 };
 
-type RunLike = {
-  reasoning?: Array<{ kind?: string; persisted?: boolean }>;
-  events?: Array<{ kind?: string; payload?: { kind?: string } }>;
-  [key: string]: unknown;
-};
-
 function canUseIndexedDb(): boolean {
   return typeof window !== "undefined" && "indexedDB" in window;
 }
@@ -91,26 +85,6 @@ async function writeSnapshot(snapshot: StoredSnapshot): Promise<void> {
   }
 }
 
-function sanitizeRunDetail(data: unknown): unknown {
-  if (!data || typeof data !== "object") return data;
-  const detail = data as RunLike;
-  return {
-    ...detail,
-    reasoning: Array.isArray(detail.reasoning)
-      ? detail.reasoning.filter((event) => event.kind !== "provider_reasoning")
-      : detail.reasoning,
-    events: Array.isArray(detail.events)
-      ? detail.events.filter(
-          (event) =>
-            !(
-              event.kind === "reasoning" &&
-              event.payload?.kind === "provider_reasoning"
-            ),
-        )
-      : detail.events,
-  };
-}
-
 function sanitizedState(client: QueryClient): DehydratedState {
   const state = dehydrate(client, {
     shouldDehydrateQuery: (query) => {
@@ -119,21 +93,7 @@ function sanitizedState(client: QueryClient): DehydratedState {
     },
   });
 
-  return {
-    ...state,
-    queries: state.queries.map((query) => {
-      const root = String(query.queryKey[0] || "");
-      const leaf = String(query.queryKey[2] || "");
-      if (root !== "run" || leaf !== "detail") return query;
-      return {
-        ...query,
-        state: {
-          ...query.state,
-          data: sanitizeRunDetail(query.state.data),
-        },
-      };
-    }),
-  };
+  return state;
 }
 
 function buildSnapshot(client: QueryClient, actorId: string): StoredSnapshot {

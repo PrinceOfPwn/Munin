@@ -1,0 +1,330 @@
+"""Unified Munin ASGI server (Fase 3 of issue #9 migration).
+
+Historically Munin ran as **two** processes on **two** ports:
+
+* ``munin mcp --transport streamable-http --port 8890`` — the FastMCP
+  offensive-security tool surface.
+* ``munin production-api --port 8787`` — the authenticated HTTP API + AI
+  SDK ``/api/chat`` stream that the Next.js frontend talks to.
+
+The two servers shared the same libsql database (via
+``settings.db_url``) but no in-process state, so keeping them coherent
+required duplicating settings, tunnels, cookies, allowed-origins tables,
+and health-checks.  Fase 3 collapses them into a single Starlette app:
+
+* ``/mcp/**``       → FastMCP streamable-http transport (was port 8890)
+* everything else   → the ``munin.production.asgi`` HTTP API (was 8787)
+* ``/health``       → unified snapshot of both subsystems
+
+One process. One port (``8787`` by convention — the value the frontend
+proxy and tunnels already assume).  One ``ProductionStore`` +
+``SharedStateStore`` pair, instantiated once here and shared between the
+HTTP handlers and the MCP tools.  The old ``_ChatStateAdapter`` shim
+that ``munin.production.chat`` used to compose the two stores is gone;
+guidance drain is wired onto the ``SharedStateStore`` instance directly
+so :class:`OperatorGuidanceMiddleware` finds it without an adapter.
+
+Launch:
+
+    poetry run uvicorn munin.server:app --host 0.0.0.0 --port 8787
+
+or via the CLI convenience wrapper:
+
+    poetry run munin serve --port 8787
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+from typing import Any
+
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, RedirectResponse
+from starlette.routing import Mount, Route
+
+log = logging.getLogger("munin.server")
+
+
+def _bind_guidance(shared_state: Any, production_store: Any) -> None:
+    """Wire ProductionStore's guidance drain onto the SharedStateStore instance.
+
+    :class:`munin.core.middleware.OperatorGuidanceMiddleware` calls
+    ``state.consume_pending_guidance(run_id=...)`` on whatever object is
+    passed as ``state`` to ``build_munin_supervisor``.  Before Fase 3 the
+    ``munin.production.chat`` module composed two stores through the
+    ``_ChatStateAdapter`` façade to satisfy that requirement; here we do
+    the same by attribute-binding a bound method onto the single shared
+    ``SharedStateStore``.  The adapter class is gone.
+    """
+    try:
+        shared_state.consume_pending_guidance = production_store.consume_pending_guidance  # type: ignore[assignment]
+        shared_state.authorize_approved_tool_call = production_store.authorize_approved_tool_call  # type: ignore[assignment]
+    except Exception as exc:  # noqa: BLE001 - guidance is best-effort
+        log.warning("server: unable to bind guidance drain onto shared state: %s", exc)
+
+
+def _build_health(mcp_module: Any, shared_state: Any, production_store: Any) -> Any:
+    async def health(_: Request) -> JSONResponse:
+        # Best-effort counters — never let a probe raise.
+        try:
+            overview = shared_state.overview()
+        except Exception:  # noqa: BLE001
+            overview = {}
+        try:
+            # ``MuninStore._read_only`` routes to the durable backend, so
+            # the health probe reports the canonical conversation count.
+            with production_store._read_only() as conn:  # noqa: SLF001 - read-only probe
+                row = conn.execute("SELECT COUNT(1) AS n FROM conversations").fetchone()
+                convs = int(row["n"] if isinstance(row, dict) or hasattr(row, "keys") else row[0])
+        except Exception:  # noqa: BLE001
+            convs = -1
+        try:
+            tools_count = len(getattr(mcp_module.MCP, "_tool_manager", None)._tools)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            tools_count = -1
+        return JSONResponse(
+            {
+                "ok": True,
+                "service": "munin-server",
+                "subsystems": {
+                    "http_api": {"ok": True, "conversations_total": convs},
+                    "mcp": {"ok": True, "tools_registered": tools_count},
+                    "shared_state": {
+                        "ok": True,
+                        "intel_total": overview.get("intel_total", 0),
+                        "tasks_running": overview.get("tasks_running", 0),
+                    },
+                },
+            }
+        )
+
+    return health
+
+
+def create_app() -> Starlette:
+    """Build the composed Starlette application.
+
+    Order matters: the MCP transport is mounted first so any request
+    beginning with ``/mcp/`` is handled by FastMCP; everything else
+    falls through to the auth-protected HTTP surface.
+    """
+    from .mcp import main as mcp_module  # noqa: PLC0415 - lazy so `ast.parse` still works standalone
+    from .mcp.config import get_settings  # noqa: PLC0415
+    from .production.asgi import create_http_app  # noqa: PLC0415
+    from .production.store import MuninStore, ProductionStore  # noqa: PLC0415
+
+    settings = get_settings()
+
+    # ── Store bootstrap ──────────────────────────────────────────────
+    # Fase 4 (issue #9): replace the single ``ProductionStore`` with the
+    # split-backend :class:`MuninStore` façade.  Auth sessions, rate
+    # limits, recovery tokens, guidance queue, and in-progress agent
+    # runs live in the local ``hot_db_path`` SQLite file; the durable
+    # Turso store keeps users, conversations, messages, artifacts, the
+    # audit trail, and finalised runs.  See :mod:`munin.production.store`
+    # for the routing table.  ``MuninStore.from_settings`` transparently
+    # falls back to hot-only mode when ``durable_db_url`` is empty
+    # (matches pre-Fase-4 sqlite-only development setups).
+    shared_state = mcp_module.STATE
+    production_store = MuninStore.from_settings(
+        settings, master_key=ProductionStore.master_key_from_environment()
+    )
+    _bind_guidance(shared_state, production_store)
+
+    # ── Compose sub-apps ─────────────────────────────────────────────
+    http_app = create_http_app(store=production_store, shared_state=shared_state)
+    mcp_app = mcp_module.create_mcp_app()
+
+    routes = [
+        Route("/health", _build_health(mcp_module, shared_state, production_store)),
+        # Issue #9 fix: ``Mount("/mcp", app=mcp_app)`` strips the ``/mcp`` prefix
+        # before handing the remaining path to the FastMCP sub-app, whose
+        # internal route is now ``/`` (see :func:`munin.mcp.main.create_mcp_app`).
+        # A bare ``POST /mcp`` therefore leaves the sub-app with an empty path,
+        # which FastMCP's ``Route("/")`` does not match (Starlette ``Mount``
+        # only redirects ``/mcp`` -> ``/mcp/`` when no inner route consumes the
+        # empty remainder, but the catch-all ``Mount("/", http_app)`` below
+        # would intercept the redirect first). Register an explicit 307
+        # redirect for the bare path so clients that send ``/mcp`` are bumped
+        # to ``/mcp/`` where the streamable-http transport actually listens.
+        Route(
+            "/mcp",
+            lambda request: RedirectResponse("/mcp/", status_code=307),
+            methods=["GET", "POST", "DELETE"],
+        ),
+        Mount("/mcp", app=mcp_app),
+        Mount("/", app=http_app),
+    ]
+
+    # ── Discord adapter (follow-up to Fase 2 of issue #9) ────────────
+    # A single-process bridge that turns Discord messages into
+    # ``create_turn`` + ``supervisor_runner`` invocations on the *same*
+    # uvicorn event loop.  ``create_discord_task`` returns ``None`` when
+    # ``MUNIN_DISCORD_BOT_TOKEN`` is unset (the default), so the ASGI
+    # app is unchanged for every deployment that has not opted in.  When
+    # enabled, the task is created inside the lifespan ``startup`` (so
+    # ``asyncio.get_running_loop`` sees the right loop) and cancelled
+    # during ``shutdown``.  See :mod:`munin.production.discord_adapter`.
+    discord_task_holder: dict[str, Any] = {}
+
+    async def _startup_discord() -> None:
+        try:
+            from .production.discord_adapter import create_discord_task  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001 - adapter is optional
+            log.warning("server: discord adapter import failed: %s", exc)
+            return
+        try:
+            task = create_discord_task(settings, production_store, shared_state)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("server: discord adapter startup failed: %s", exc)
+            return
+        if task is not None:
+            discord_task_holder["task"] = task
+
+    async def _shutdown_discord() -> None:
+        task = discord_task_holder.get("task")
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except BaseException:  # noqa: BLE001 - shutdown must not raise
+            pass
+
+    # ── Shutdown hook ────────────────────────────────────────────────
+    # Fase 5: the DurableStore now owns a bounded libsql connection pool.
+    # Uvicorn/Starlette dispatches the ``shutdown`` lifespan event during a
+    # graceful restart; without this hook every rolling deploy would leak
+    # every socket the pool pre-warmed.  ``close_pools`` is idempotent and
+    # never raises — safe to run even when the process is being killed
+    # forcefully.
+    async def _shutdown_pools() -> None:
+        try:
+            production_store.close_pools()
+        except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+            log.warning("server: close_pools failed during shutdown: %s", exc)
+
+    # ``AsyncSqliteSaver.from_conn_string`` is an async context manager. It
+    # must remain entered for the whole application lifetime; its entered
+    # saver is then injected through SharedStateStore into the Deep Agents
+    # graph. This eliminates the previous production-only MemorySaver gap.
+    checkpoint_ctx: Any | None = None
+
+    async def _startup_checkpointer() -> None:
+        nonlocal checkpoint_ctx
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
+        except ImportError:
+            log.warning(
+                "server: langgraph-checkpoint-sqlite unavailable; using in-memory fallback"
+            )
+            return
+
+        configured = Path(settings.munin_checkpoint_db)
+        checkpoint_path = (
+            configured
+            if configured.is_absolute()
+            else Path(settings.workspace_root) / configured
+        )
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_ctx = AsyncSqliteSaver.from_conn_string(str(checkpoint_path))
+        shared_state.langgraph_checkpointer = await checkpoint_ctx.__aenter__()
+        # A graph can have been built by an early import/health call. Rebuild
+        # so the cached Deep Agents graph binds the durable saver.
+        from .core.supervisor import invalidate_supervisor_cache  # noqa: PLC0415
+
+        invalidate_supervisor_cache()
+        log.info("server: durable LangGraph checkpoints at %s", checkpoint_path)
+
+    async def _shutdown_checkpointer() -> None:
+        nonlocal checkpoint_ctx
+        if checkpoint_ctx is None:
+            return
+        try:
+            await checkpoint_ctx.__aexit__(None, None, None)
+        finally:
+            checkpoint_ctx = None
+            with suppress(Exception):
+                delattr(shared_state, "langgraph_checkpointer")
+
+    # A detached executor is intentionally process-local, but its ownership,
+    # event log and LangGraph checkpoint are durable.  Start the small scanner
+    # only after the async saver is entered, so a restart can safely continue
+    # expired work from the same thread without re-running HITL or competing
+    # with a still-valid lease.
+    chat_recovery_holder: dict[str, asyncio.Task[None]] = {}
+
+    async def _startup_chat_recovery() -> None:
+        try:
+            from .production.chat import start_chat_recovery_worker  # noqa: PLC0415
+
+            chat_recovery_holder["task"] = start_chat_recovery_worker(
+                store=production_store,
+                shared_state=shared_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - serving remains available
+            log.warning("server: durable chat recovery startup failed: %s", exc)
+
+    async def _shutdown_chat_recovery() -> None:
+        task = chat_recovery_holder.pop("task", None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    # ── MCP session manager (issue #9 fix) ──────────────────────────
+    # Starlette does not propagate the ``startup``/``shutdown`` lifespan
+    # events to sub-apps mounted via ``Mount``.  FastMCP's
+    # ``StreamableHTTPSessionManager`` is therefore only created lazily
+    # inside ``MCP.streamable_http_app()`` (already invoked by
+    # ``create_mcp_app`` above) and must be entered explicitly here; without
+    # it the first ``POST /mcp`` raises ``RuntimeError("Task group is not
+    # initialized. Make sure to use run().")``.  Mounting the sub-app is
+    # not enough — the host owns the lifespan.
+    mcp_session_ctx = mcp_module.MCP.session_manager.run()
+
+    @asynccontextmanager
+    async def _lifespan(app: Any) -> AsyncIterator[None]:
+        await mcp_session_ctx.__aenter__()
+        try:
+            await _startup_checkpointer()
+            await _startup_chat_recovery()
+            await _startup_discord()
+            yield
+        finally:
+            await _shutdown_discord()
+            await _shutdown_chat_recovery()
+            await _shutdown_checkpointer()
+            await _shutdown_pools()
+            await mcp_session_ctx.__aexit__(None, None, None)
+
+    return Starlette(
+        debug=False,
+        routes=routes,
+        lifespan=_lifespan,
+    )
+
+
+def main() -> None:
+    """CLI shim: ``python -m munin.server`` boots via uvicorn."""
+    import uvicorn  # noqa: PLC0415 - keep import lazy for test-time introspection
+
+    host = os.environ.get("MUNIN_SERVER_HOST", "127.0.0.1")
+    port = int(os.environ.get("MUNIN_SERVER_PORT", "8787"))
+    uvicorn.run("munin.server:app", host=host, port=port, log_level="info")
+
+
+# Module-level ``app`` so ``uvicorn munin.server:app`` works without a factory.
+# ``app_from_environment`` is retained (in ``asgi.py``) as a backward-compatible
+# alias for the pre-Fase-3 test suite that imported it directly.
+app = create_app()
+
+
+if __name__ == "__main__":
+    main()

@@ -527,15 +527,60 @@ def munin_chat(
 
     def execute(progress=None) -> dict[str, Any]:
         try:
-            from ...core.munin_agent import MuninAgent  # noqa: PLC0415
-            agent = MuninAgent(settings)
-            result = agent.respond(
-                message.strip(),
-                max_iterations=iterations,
-                progress=progress,
-                conversation_id=prepared.conversation_id,
-                conversation_history=prepared.history,
-            )
+            import asyncio  # noqa: PLC0415
+            from ...core.runtime_adapter import supervisor_runner  # noqa: PLC0415
+
+            try:
+                from ...core.llm_client import LLMClient  # noqa: PLC0415
+
+                llm_model = LLMClient(settings).make_langchain()
+            except Exception as exc:
+                raise RuntimeError(f"Failed to initialize configured model: {exc}") from exc
+
+            async def _run() -> tuple[str, list, int, str]:
+                content = ""
+                stop_reason = "final_answer"
+                pending: dict[str, dict] = {}
+                tool_calls: list = []
+
+                def _sink(event: dict) -> None:
+                    if progress is not None:
+                        progress(event)
+
+                async for envelope in supervisor_runner(
+                    message.strip(),
+                    run_id=f"munin_chat-{prepared.conversation_id}",
+                    conversation_id=prepared.conversation_id,
+                    conversation_history=prepared.history,
+                    store=STATE,
+                    progress_sink=_sink,
+                    model=llm_model,
+                    max_iterations=iterations,
+                ):
+                    kind = envelope.get("kind")
+                    if kind == "tool_intent":
+                        call = {
+                            "id": envelope.get("tool_call_id") or f"call-{len(tool_calls)}",
+                            "name": envelope.get("tool_name", "unknown"),
+                            "arguments": envelope.get("input", {}),
+                            "status": "running",
+                        }
+                        pending[call["id"]] = call
+                        tool_calls.append(call)
+                    elif kind in {"tool_result", "tool_failed"}:
+                        call = pending.get(envelope.get("tool_call_id", ""))
+                        if call is not None:
+                            call["status"] = "failed" if kind == "tool_failed" else "completed"
+                            call["result"] = envelope.get("output") or envelope.get("error", "")
+                    elif kind == "run_state":
+                        if envelope.get("state") == "completed":
+                            content = envelope.get("content", "") or content
+                        elif envelope.get("state") in {"failed", "cancelled", "interrupted"}:
+                            stop_reason = envelope.get("state", stop_reason)
+                iterations_done = sum(1 for c in tool_calls)
+                return content, tool_calls, iterations_done, stop_reason
+
+            content, tool_calls, iterations_done, stop_reason = asyncio.run(_run())
         except Exception as exc:
             logger.exception("munin_chat: agent error")
             error_message = f"Munin could not complete this turn: {exc}"
@@ -554,14 +599,13 @@ def munin_chat(
                 "summary": "agent error",
                 "error": {"code": "agent_error", "message": str(exc)},
             }
-        content = result.get("content", "")
         try:
             assistant_message, artifacts = conversation_service.complete_turn(
                 conversation_id=prepared.conversation_id,
                 content=content,
-                tool_calls=result.get("tool_calls", []),
-                stop_reason=result.get("stop_reason", "unknown"),
-                iterations=result.get("iterations", 0),
+                tool_calls=tool_calls,
+                stop_reason=stop_reason,
+                iterations=iterations_done,
             )
         except Exception as exc:
             logger.exception("munin_chat: unable to persist completed turn")
@@ -581,9 +625,9 @@ def munin_chat(
                 "assistant_message_id": assistant_message["id"],
                 "content": content,
                 "artifacts": artifacts,
-                "tool_calls": result.get("tool_calls", []),
-                "iterations": result.get("iterations", 0),
-                "stop_reason": result.get("stop_reason", "unknown"),
+                "tool_calls": tool_calls,
+                "iterations": iterations_done,
+                "stop_reason": stop_reason,
             },
         }
 
@@ -778,7 +822,11 @@ def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: 
     # forged graph in generated_graphs. Fail early with a clear error otherwise;
     # otherwise the runner subprocess would crash after spawn and the item would
     # sit forever in the wake queue.
-    from ...subagents.runner import _NATIVE_SUBAGENTS  # noqa: PLC0415
+    # ``munin.subagents.runner`` (Arch A subprocess shim) was deleted in Fase 2
+    # of the issue-#9 migration. Native subagents are now expressed as forged
+    # graphs, so the native whitelist is empty and every target must resolve
+    # via ``STATE.graph_get(...)``.
+    _NATIVE_SUBAGENTS: frozenset[str] = frozenset()
     forged = None
     try:
         forged = STATE.graph_get(subagent.strip())

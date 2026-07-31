@@ -47,51 +47,9 @@ def test_conversation_tool_refuses_local_sqlite(store, monkeypatch):
     assert result["error"]["code"] == "turso_required"
 
 
-def test_munin_chat_keeps_conversation_history_for_the_llm(store, monkeypatch):
-    from dataclasses import replace
-
-    from munin.core import munin_agent
-    from munin.mcp.tools import munin_tools
-
-    seen_messages: list[list[dict]] = []
-
-    class RecordingLlm:
-        def chat(self, **kwargs):
-            seen_messages.append([dict(message) for message in kwargs["messages"]])
-            return {"choices": [{"message": {"role": "assistant", "content": "continuing the investigation"}}]}
-
-    real_agent = munin_agent.MuninAgent
-
-    class RecordingAgent:
-        def __init__(self, settings):
-            self._agent = object.__new__(real_agent)
-            self._agent.llm = RecordingLlm()
-            self._agent.memory = type("Memory", (), {"log_step": staticmethod(lambda **kwargs: None)})()
-            self._agent._system_prompt = lambda: "system"
-            self._agent._current_catalog = lambda: {}
-
-        def respond(self, *args, **kwargs):
-            return self._agent.respond(*args, **kwargs)
-
-    settings = replace(
-        store.settings,
-        llm_base_url="https://llm.invalid/v1",
-        llm_api_key="configured",
-        llm_model="test",
-    )
-    monkeypatch.setattr(munin_agent, "MuninAgent", RecordingAgent)
-    monkeypatch.setattr(munin_tools, "STATE", store)
-    monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
-    # The public MCP tool enforces Turso. Unit tests use the isolated SQLite
-    # harness only to exercise the conversation protocol itself.
-    monkeypatch.setattr(munin_tools, "_conversation_backend_error", lambda _settings: None)
-
-    first = munin_tools.munin_chat("Find LDAP and Apache", conversation_id="conv_llm_context")
-    second = munin_tools.munin_chat("Do it now", conversation_id="conv_llm_context")
-
-    assert first["ok"] is True
-    assert second["ok"] is True
-    second_messages = seen_messages[-1]
-    assert any(message["content"] == "Find LDAP and Apache" for message in second_messages)
-    assert any(message["content"] == "continuing the investigation" for message in second_messages)
-    assert second_messages[-1]["content"] == "Do it now"
+# test_munin_chat_keeps_conversation_history_for_the_llm was removed: it
+# characterised the pre-issue-#9 munin_chat path that dispatched via
+# munin.core.munin_agent.MuninAgent.respond(). The supervisor_runner /
+# Deep Agents runtime replaced that path on this PR; conversation history
+# propagation is now exercised by the runtime_adapter + supervisor integration
+# tests under tests/characterization/.

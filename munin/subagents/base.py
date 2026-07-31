@@ -33,7 +33,18 @@ from typing import Any
 from ..core.prompting import subagent_runtime_prompt
 from ..mcp.audit import redact_secrets
 from ..mcp.shared_state import SharedStateStore, presence_metadata
-from ..mcp.tools import capabilities_tool, hugin_rag_tool, hugin_tool, ldap_tools, tavily_tool
+from ..mcp.tools import (
+    capabilities_tool,
+    diagnostics_tool,
+    discord_tool,
+    extension_forge_tool,
+    forge_tool,
+    graph_forge_tool,
+    hugin_rag_tool,
+    hugin_tool,
+    ldap_tools,
+    tavily_tool,
+)
 
 logger = logging.getLogger("munin.subagent")
 
@@ -366,7 +377,12 @@ def _make_wake_tools(state: SharedStateStore) -> dict[str, Callable]:
     matching the behavior of the MCP-level ``munin_wake`` tool.
     """
     from ..core.orchestrator import Orchestrator  # noqa: PLC0415
-    from .runner import _NATIVE_SUBAGENTS  # noqa: PLC0415
+
+    # ``munin.subagents.runner`` (Arch A subprocess shim) was deleted in Fase 2
+    # of the issue-#9 migration. Native subagents are now expressed as forged
+    # graphs (``subagent_factory``) so the whitelist below is empty and every
+    # target must resolve via ``state.graph_get(...)``.
+    _NATIVE_SUBAGENTS: frozenset[str] = frozenset()
 
     orch = Orchestrator(state)
 
@@ -498,6 +514,17 @@ SUBAGENT_TOOL_REGISTRY: list[dict[str, Any]] = [
             {"name": "munin_wake_list",  "desc": "List pending / claimed wake items in the queue"},
         ],
     },
+    {
+        "category": "forge",
+        "label": "Runtime tool and graph generation",
+        "tools": [
+            {"name": "tool_forge",                "desc": "Generate and validate a new runtime tool from natural language"},
+            {"name": "graph_forge",               "desc": "Compile a multi-node LangGraph workflow as a callable subagent"},
+            {"name": "list_generated_graphs",     "desc": "List all registered workflow graphs"},
+            {"name": "describe_generated_graph",  "desc": "Inspect a registered workflow graph definition"},
+            {"name": "drop_generated_graph",      "desc": "Deprecate a registered workflow graph"},
+        ],
+    },
 ]
 
 # Flat set of all valid subagent tool names (for whitelist validation)
@@ -582,7 +609,22 @@ _STATIC_TOOLS: dict[str, Callable[..., Any]] = {
     "hugin_rag_search": hugin_rag_tool.hugin_rag_search,
     "hugin_plan_for": hugin_rag_tool.hugin_plan_for,
     "hugin_node_detail": hugin_rag_tool.hugin_node_detail,
+    # System tools
     "munin_capabilities": capabilities_tool.munin_capabilities,
+    "munin_diagnostics": diagnostics_tool.munin_diagnostics,
+    # Forge tools
+    "tool_forge": forge_tool.tool_forge,
+    "extension_forge": extension_forge_tool.extension_forge,
+    "extension_list": extension_forge_tool.extension_list,
+    "extension_describe": extension_forge_tool.extension_describe,
+    "extension_open_pr": extension_forge_tool.extension_open_pr,
+    "graph_forge": graph_forge_tool.graph_forge,
+    "list_generated_graphs": graph_forge_tool.list_generated_graphs,
+    "describe_generated_graph": graph_forge_tool.describe_generated_graph,
+    "drop_generated_graph": graph_forge_tool.drop_generated_graph,
+    # Discord tools
+    "send_discord_message": discord_tool.send_discord_message,
+    "discord_status": discord_tool.discord_status,
 }
 
 

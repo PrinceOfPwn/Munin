@@ -29,6 +29,11 @@ class Settings:
     llm_retry_attempts: int = 5
     llm_retry_base_delay: float = 5.0
     llm_retry_max_delay: float = 60.0
+    # Anti-runaway budgets for a single agent invocation. These are safety
+    # rails, not product limits: operators can tune or disable either one
+    # explicitly with ``0`` when a deployment has an external budget policy.
+    agent_model_call_limit: int = 24
+    agent_tool_call_limit: int = 64
     operator_language: str = "auto"
 
     # --- Passive intel providers ---
@@ -66,6 +71,73 @@ class Settings:
     # Root secret used to encrypt BYOK provider keys at rest in Turso. It is
     # deliberately environment-only and is never returned by an MCP tool.
     byok_master_key: str = ""
+
+    # --- Fase 4: split-store persistence ---
+    # ``MuninStore`` composes a "hot" SQLite backend for high-churn, non-durable
+    # state (auth sessions, rate limits, recovery tokens, guidance queue,
+    # in-progress agent runs) with a "durable" backend for long-lived rows
+    # (users, conversations, messages, artifacts, audit trail, completed runs).
+    #
+    # ``hot_db_path`` — filesystem path to the SQLite database that backs the
+    # hot store.  Defaults to ``/tmp/munin-hot.db``.  Data at this path is
+    # intentionally disposable: every reboot invalidates outstanding sessions
+    # and drops queued/running runs.  Override with ``MUNIN_HOT_DB_PATH``.
+    hot_db_path: Path = field(default_factory=lambda: Path("/tmp/munin-hot.db"))
+    # ``durable_db_url`` — libSQL URL of the Turso database that backs the
+    # durable store.  Falls back to ``db_url`` (``MUNIN_DB_URL``) when
+    # ``MUNIN_DURABLE_DB_URL`` is unset, so existing deployments keep working
+    # with a single env var while Fase 4 rolls out.
+    durable_db_url: str = ""
+    durable_db_auth_token: str = ""
+
+    # --- Fase 5: libsql connection pool ---
+    # A bounded pool of libsql connections amortises the TLS + Hrana handshake
+    # (~200-500 ms) that every DurableStore operation used to pay per request.
+    # ``libsql_pool_size`` caps concurrent Turso sockets from a single Munin
+    # process (default 4 — small enough to co-exist with Turso quota, large
+    # enough to hide bursts of parallel readers).  ``libsql_pool_timeout_s``
+    # bounds the blocking checkout window so a saturated pool surfaces as a
+    # fast failure (503) instead of a hung request.  See
+    # :class:`munin.mcp.persistence.LibsqlConnectionPool`.
+    libsql_pool_size: int = 4
+    libsql_pool_timeout_s: float = 10.0
+
+    # --- Local-first delta sync (conversation durability) ---
+    # The GUI conversation path writes to the local hot SQLite database only
+    # (fast, no network).  Dirty rows are tracked in a local outbox and
+    # flushed to the durable backend (Turso) at run end / shutdown.
+    # ``sync_at_end`` (MUNIN_SYNC_AT_END, default on) gates the automatic
+    # flushes wired to ``complete_run`` and ``close_pools``; the public
+    # ``MuninStore.flush_pending_syncs()`` always syncs when called
+    # explicitly.  ``sync_interval_s`` (MUNIN_SYNC_INTERVAL, default 0)
+    # enables opportunistic idle syncs via ``MuninStore.sync_due()`` —
+    # 0 means "only at run end / shutdown".  ``sync_batch_size``
+    # (MUNIN_SYNC_BATCH_SIZE) chunks per-table uploads so a large delta
+    # never saturates a single Turso transaction.
+    sync_at_end: bool = True
+    sync_interval_s: int = 0
+    sync_batch_size: int = 500
+
+    # --- LangGraph server (PR-11) ---
+    #   MUNIN_LANGGRAPH_URL: empty string means LangGraph server not configured
+    munin_langgraph_url: str = ""
+    munin_langgraph_port: int = 8123
+    munin_checkpoint_db: str = "data/langgraph_checkpoints.sqlite"
+
+    # --- Parallel workers (PR-12) ---
+    #   Advisory only — not a hard cap; replaces old MUNIN_MAX_PARALLEL_TOOLS
+    munin_suggested_workers: int = 4
+
+    # --- Discord adapter (follow-up to Fase 2 of issue #9) ---
+    # All three are opt-in.  An empty ``discord_bot_token`` disables the
+    # adapter entirely — the ASGI server never imports ``discord.py`` and
+    # no background task is scheduled.  The allowlists further narrow the
+    # bot's surface when it *is* enabled; empty means "no restriction"
+    # (respond wherever the token can see, to whoever pings).  See
+    # :mod:`munin.production.discord_adapter` for the request flow.
+    discord_bot_token: str = ""
+    discord_allowed_channels: str = ""
+    discord_allowed_user_ids: str = ""
 
     @property
     def runs_root(self) -> Path:
@@ -127,6 +199,13 @@ def _resolve_path(env: str, default: Path) -> Path:
     return Path(raw).expanduser().resolve() if raw else default
 
 
+def _env_bool(env: str, default: bool) -> bool:
+    raw = os.environ.get(env, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off", ""}
+
+
 def get_settings() -> Settings:
     workspace = _resolve_root()
     settings = Settings(
@@ -148,6 +227,8 @@ def get_settings() -> Settings:
         llm_retry_attempts=max(1, int(os.environ.get("LLM_RETRY_ATTEMPTS", "5"))),
         llm_retry_base_delay=max(0.0, float(os.environ.get("LLM_RETRY_BASE_DELAY", "5"))),
         llm_retry_max_delay=max(0.0, float(os.environ.get("LLM_RETRY_MAX_DELAY", "60"))),
+        agent_model_call_limit=max(0, int(os.environ.get("MUNIN_MODEL_CALL_LIMIT", "24"))),
+        agent_tool_call_limit=max(0, int(os.environ.get("MUNIN_TOOL_CALL_LIMIT", "64"))),
         operator_language=os.environ.get("MUNIN_OPERATOR_LANGUAGE", "auto").strip() or "auto",
         # Intel providers
         tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip(),
@@ -177,6 +258,45 @@ def get_settings() -> Settings:
         db_url=os.environ.get("MUNIN_DB_URL", "").strip(),
         db_auth_token=os.environ.get("MUNIN_DB_AUTH_TOKEN", "").strip(),
         byok_master_key=os.environ.get("MUNIN_BYOK_MASTER_KEY", ""),
+        # Fase 4 split-store paths / URLs.  ``MUNIN_DURABLE_DB_URL`` and
+        # ``MUNIN_DURABLE_DB_AUTH_TOKEN`` supersede ``MUNIN_DB_URL`` /
+        # ``MUNIN_DB_AUTH_TOKEN`` when set, but the legacy names remain as
+        # fallbacks so existing deployments keep booting without config edits.
+        hot_db_path=_resolve_path("MUNIN_HOT_DB_PATH", Path("/tmp/munin-hot.db")),
+        durable_db_url=(
+            os.environ.get("MUNIN_DURABLE_DB_URL", "").strip()
+            or os.environ.get("MUNIN_DB_URL", "").strip()
+        ),
+        durable_db_auth_token=(
+            os.environ.get("MUNIN_DURABLE_DB_AUTH_TOKEN", "").strip()
+            or os.environ.get("MUNIN_DB_AUTH_TOKEN", "").strip()
+        ),
+        # Fase 5 pool tunables — both fall back to sane defaults so existing
+        # deployments benefit from pooling without any env edits.
+        libsql_pool_size=max(1, int(os.environ.get("MUNIN_LIBSQL_POOL_SIZE", "4"))),
+        libsql_pool_timeout_s=max(
+            0.1, float(os.environ.get("MUNIN_LIBSQL_POOL_TIMEOUT_S", "10.0"))
+        ),
+        # Local-first delta sync knobs.
+        sync_at_end=_env_bool("MUNIN_SYNC_AT_END", True),
+        sync_interval_s=max(0, int(os.environ.get("MUNIN_SYNC_INTERVAL", "0"))),
+        sync_batch_size=max(1, int(os.environ.get("MUNIN_SYNC_BATCH_SIZE", "500"))),
+        # LangGraph server (PR-11)
+        munin_langgraph_url=os.environ.get("MUNIN_LANGGRAPH_URL", "").strip(),
+        munin_langgraph_port=int(os.environ.get("MUNIN_LANGGRAPH_PORT", "8123")),
+        munin_checkpoint_db=os.environ.get(
+            "MUNIN_CHECKPOINT_DB", "data/langgraph_checkpoints.sqlite"
+        ).strip(),
+        # Parallel workers (PR-12)
+        munin_suggested_workers=int(os.environ.get("MUNIN_SUGGESTED_WORKERS", "4")),
+        # Discord adapter (all three opt-in; empty token disables the bot)
+        discord_bot_token=os.environ.get("MUNIN_DISCORD_BOT_TOKEN", "").strip(),
+        discord_allowed_channels=os.environ.get(
+            "MUNIN_DISCORD_ALLOWED_CHANNELS", ""
+        ).strip(),
+        discord_allowed_user_ids=os.environ.get(
+            "MUNIN_DISCORD_ALLOWED_USER_IDS", ""
+        ).strip(),
     )
     settings.ensure_workspace()
     return settings
@@ -236,4 +356,9 @@ def redact_settings(settings: Settings) -> Settings:
         db_url=_redact_db_url(settings.db_url),
         db_auth_token="***REDACTED***" if settings.db_auth_token else "",
         byok_master_key="***REDACTED***" if settings.byok_master_key else "",
+        durable_db_url=_redact_db_url(settings.durable_db_url),
+        durable_db_auth_token=(
+            "***REDACTED***" if settings.durable_db_auth_token else ""
+        ),
+        discord_bot_token="***REDACTED***" if settings.discord_bot_token else "",
     )

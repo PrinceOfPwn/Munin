@@ -24,6 +24,11 @@ from ...core.execution_progress import emit_tool_progress  # noqa: TID252
 logger = logging.getLogger("munin-mcp.forge")
 
 
+def get_max_iterations(requested: int) -> int:
+    """Sanity floor only — no arbitrary upper cap (PR-06: removes [1,12] clamp)."""
+    return max(1, requested)
+
+
 def _guess_tag(spec: str) -> str:
     lowered = spec.lower()
     for tag in ("ldap", "kerberos", "smb", "http", "kv", "cve", "hugin", "ad"):
@@ -96,7 +101,7 @@ def tool_forge(
         return {"ok": False, "tool": "tool_forge", "mode": "sync", "summary": "empty spec", "error": {"code": "bad_input", "message": "spec required"}}
 
     force = _coerce_bool(force_regenerate)
-    iterations = max(1, min(_coerce_int(max_iterations, 5), 12))
+    iterations = get_max_iterations(_coerce_int(max_iterations, 5))
 
     if not force:
         existing = _existing_match(spec)

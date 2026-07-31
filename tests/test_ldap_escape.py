@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def test_escape_filter_chars_neutralizes_injection(isolated_workspace, monkeypatch):
@@ -51,3 +50,22 @@ def test_get_user_groups_escapes_username(isolated_workspace, monkeypatch):
         ldap_tools.get_user_groups("*)(objectClass=*")
         used_filter = conn.search.call_args.kwargs["search_filter"]
         assert "*)(objectClass=*" not in used_filter
+
+
+def test_ldap_search_accepts_positional_json_params(isolated_workspace, monkeypatch):
+    monkeypatch.setenv("LDAP_BIND_DN", "cn=admin,dc=akatsuki,dc=com")
+    monkeypatch.setenv("LDAP_PASSWORD", "itachi")
+
+    from munin.mcp.tools import ldap_tools
+
+    with patch.object(ldap_tools, "_connect") as mock_connect:
+        conn = MagicMock()
+        conn.entries = []
+        mock_connect.return_value = conn
+        ldap_tools.ldap_search(
+            base_dn="dc=akatsuki,dc=com",
+            filter_template="(cn={0})",
+            params_json='["WEB01"]',
+            attributes_csv="dn,cn",
+        )
+        assert conn.search.call_args.kwargs["search_filter"] == "(cn=WEB01)"
