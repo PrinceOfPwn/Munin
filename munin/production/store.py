@@ -14,7 +14,6 @@ import hmac
 import json
 import os
 import re
-import threading
 import secrets
 import sqlite3
 import time
@@ -38,10 +37,6 @@ FINAL_RUN_STATES = {"completed", "failed", "interrupted", "cancelled"}
 ROLES = {"admin", "operator", "viewer"}
 _FENCED_ARTIFACT = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)[ \t]*\n(?P<content>[\s\S]*?)```")
 
-# How often at most (per session) the authenticate() idle-touch write fires.
-# A read-only validation path never takes the DB writer lock inside this window.
-# Configurable via env so operators can tune without code changes.
-_SESSION_TOUCH_LOCK = threading.Lock()
 _SESSION_TOUCH_INTERVAL_MS: int = int(os.environ.get("MUNIN_SESSION_TOUCH_INTERVAL_SECONDS", "120")) * 1000
 
 
@@ -542,11 +537,9 @@ class ProductionStore:
 
     def authenticate(self, token: str) -> dict[str, Any] | None:
         now = _now_ms()
-        # Read path: never blocks behind a writer. Under WAL this SELECT runs
-        # concurrently with the single RESERVED-lock writer.
         with self._read_only() as conn:
             row = conn.execute(
-                """SELECT u.id,u.username,u.role,u.disabled_at_ms,s.id AS session_id,s.idle_expires_at_ms,s.absolute_expires_at_ms,s.revoked_at_ms
+                """SELECT u.id,u.username,u.role,u.disabled_at_ms,s.id AS session_id,s.idle_expires_at_ms,s.absolute_expires_at_ms,s.revoked_at_ms,s.last_seen_at_ms
                 FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?""",
                 (self._token_hash(token),),
             ).fetchone()
@@ -554,29 +547,20 @@ class ProductionStore:
                 return None
             session_id = row["session_id"]
             absolute = int(row["absolute_expires_at_ms"])
-        # The idle-rotation UPDATE is a 1-row write; keep it in its own short
-        # transaction so it only takes the RESERVED lock for a single statement
-        # instead of holding it across the password verify / SELECT above.
-        #
-        # Throttle: skip the write if we touched this session within the
-        # configured window.  The session is already validated above; skipping
-        # the bookkeeping write is safe and eliminates writer-lock contention
-        # from idle SSE connections and React-Query polling.
-        try:
-            with self._transaction() as conn:
-                conn.execute(
-                    "UPDATE auth_sessions"
-                    " SET last_seen_at_ms=?,idle_expires_at_ms=?"
-                    " WHERE id=? AND revoked_at_ms IS NULL"
-                    " AND last_seen_at_ms < ?",
-                    (now, min(now + 8 * 60 * 60 * 1000, absolute), session_id,
-                     now - _SESSION_TOUCH_INTERVAL_MS),
-                )
-        except sqlite3.OperationalError:
-            # Lock contention: the session is still valid, the next request will
-            # retry the idle rotation. Don't fail authentication over a best-effort
-            # bookkeeping write.
-            pass
+            last_seen = int(row["last_seen_at_ms"])
+        if last_seen < now - _SESSION_TOUCH_INTERVAL_MS:
+            try:
+                with self._transaction() as conn:
+                    conn.execute(
+                        "UPDATE auth_sessions"
+                        " SET last_seen_at_ms=?,idle_expires_at_ms=?"
+                        " WHERE id=? AND revoked_at_ms IS NULL"
+                        " AND last_seen_at_ms < ?",
+                        (now, min(now + 8 * 60 * 60 * 1000, absolute), session_id,
+                         now - _SESSION_TOUCH_INTERVAL_MS),
+                    )
+            except sqlite3.OperationalError:
+                pass
         return {"id": row["id"], "username": row["username"], "role": row["role"], "session_id": session_id}
 
     def rotate_session(self, token: str) -> dict[str, Any]:
