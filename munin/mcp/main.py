@@ -1339,6 +1339,7 @@ def ack_agent_message(message_id: int, recipient_agent: str, status: str = "ACKE
 
 from . import registry  # noqa: E402
 from .tools import (  # noqa: E402
+    capabilities_tool,  # noqa: E402,F401
     diagnostics_tool,  # noqa: E402,F401
     forge_tool,  # noqa: E402,F401
     graph_forge_tool,  # noqa: E402,F401
@@ -1359,6 +1360,10 @@ except Exception as exc:  # pragma: no cover - guardrail; log and keep going
 # Hot-load any tools previously forged by tool_forge, so they're available immediately.
 try:
     registry.rehydrate(MCP, STATE, SETTINGS)
+    # Wake-based forging runs in a subprocess. Keep the live FastMCP catalog in
+    # step with its durable registry rows so a successful forge appears without
+    # restarting the server.
+    registry.start_runtime_sync(MCP, STATE, SETTINGS)
 except Exception as exc:  # pragma: no cover - guardrail; log and keep going
     logger.warning("registry.rehydrate failed: %s", exc)
 

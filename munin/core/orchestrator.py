@@ -145,6 +145,7 @@ class Orchestrator:
         tool_whitelist: list[str],
         reset_policy: str = "on_reset",
         created_by_agent: str = "munin",
+        execution_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self.state.graph_register(
             name=name,
@@ -153,6 +154,7 @@ class Orchestrator:
             tool_whitelist=tool_whitelist,
             reset_policy=reset_policy,
             created_by_agent=created_by_agent,
+            execution_contract=execution_contract,
         )
 
     def list_graphs(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:

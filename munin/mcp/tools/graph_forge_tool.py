@@ -57,6 +57,7 @@ def graph_forge(
         tool_whitelist=outcome["tool_whitelist"],
         reset_policy=reset_policy,
         created_by_agent=created_by_agent,
+        execution_contract=outcome.get("execution_contract", {}),
     )
     from ..graph_persist import persist_graph_manifest  # noqa: PLC0415,TID252
 

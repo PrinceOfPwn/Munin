@@ -79,10 +79,22 @@ def run_generated_tool(name: str, args_json: str = "{}", run_id: str = "") -> di
             registry.resolve_script_path(STATE.settings, row["script_path"]),
             row["signature"].get("function_name") or row["name"].replace("gen__", ""),
         )
-        result = callable_fn(**args)
+        execution = registry.wrap_generated_callable(
+            callable_fn,
+            tool_name=row["name"],
+            state=STATE,
+        )(**args)
     except Exception as exc:
         return {"ok": False, "tool": "run_generated_tool", "mode": "sync", "summary": "exec failed", "error": {"code": "generated_tool_failed", "message": str(exc)}}
-    return {"ok": True, "tool": "run_generated_tool", "mode": "sync", "summary": row["name"], "data": {"result": result}}
+    if not execution.get("ok", False):
+        return {
+            "ok": False,
+            "tool": "run_generated_tool",
+            "mode": "sync",
+            "summary": execution.get("summary", "exec failed"),
+            "error": execution.get("error", {"code": "generated_tool_failed", "message": row["name"]}),
+        }
+    return {"ok": True, "tool": "run_generated_tool", "mode": "sync", "summary": row["name"], "data": execution.get("data", {})}
 
 
 @MCP.tool()
