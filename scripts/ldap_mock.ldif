@@ -1,231 +1,225 @@
-# Munin Mock LDAP — dominio dc=akatsuki,dc=com
+# Enterprise OpenLDAP Mock Directory — Domain: dc=akatsuki,dc=com
 #
-# Contiene usuarios, service accounts, grupos privilegiados y OUs.
-# Las señales de vulnerabilidad (SPNs, DONT_REQ_PREAUTH) están codificadas
-# en atributos ESTRUCTURADOS (title, employeeType, businessCategory), no en
-# descripciones en texto libre. El LLM debe inferir las condiciones ofensivas
-# ejecutando las tools LDAP y examinando los atributos — no leyendo prosa.
+# Realistically modeled enterprise Active Directory / OpenLDAP directory tree.
+# Designed for testing threat intelligence agents, LDAP discovery, and security evaluation.
 #
-# Convención del mock (compatible con OpenLDAP inetOrgPerson):
-#   title            → placeholder para servicePrincipalName (SPN)
-#   employeeType     → placeholder para userAccountControl flags
-#   businessCategory → placeholder para admin flags (opcional)
+# Structured Vulnerability Markers:
+#   title        → SPN placeholder (e.g. MSSQLSvc/sql01.akatsuki.com:1433)
+#   employeeType → UserAccountControl flag (e.g. DONT_REQ_PREAUTH)
 #
-# Cargar con:
-#   ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=akatsuki,dc=com" -w itachi -f ldap_mock.ldif
+# Load into OpenLDAP:
+#   ldapadd -H ldap://localhost:389 -x -D "cn=admin,dc=akatsuki,dc=com" -w itachi -f scripts/ldap_mock.ldif
 
-# ── Organizational Units ──────────────────────────────────────────────────────
+# ── Top-Level Organizational Units ───────────────────────────────────────────
 
 dn: ou=users,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: users
-description: Domain users
+description: Domain Users Container
 
 dn: ou=groups,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: groups
-description: Domain groups
+description: Domain Security Groups Container
 
 dn: ou=computers,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: computers
-description: Domain computers
+description: Domain Computers Container
 
 dn: ou=service-accounts,dc=akatsuki,dc=com
 objectClass: organizationalUnit
 ou: service-accounts
-description: Service and machine accounts
+description: Service Accounts Container
 
-# ── Regular users ─────────────────────────────────────────────────────────────
+dn: ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Corp
+description: Corporate Enterprise Structure
 
-dn: uid=jdoe,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-objectClass: posixAccount
-objectClass: shadowAccount
-uid: jdoe
-cn: John Doe
-sn: Doe
-givenName: John
-mail: jdoe@akatsuki.com
-uidNumber: 1001
-gidNumber: 1001
-homeDirectory: /home/jdoe
-loginShell: /bin/bash
-title: Senior Engineer
-ou: IT
+dn: ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Engineering
+description: Software & Systems Engineering
 
-dn: uid=asmith,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-objectClass: posixAccount
-objectClass: shadowAccount
-uid: asmith
-cn: Alice Smith
-sn: Smith
-givenName: Alice
-mail: asmith@akatsuki.com
-uidNumber: 1002
-gidNumber: 1001
-homeDirectory: /home/asmith
-loginShell: /bin/bash
-title: DevOps Engineer
-ou: DevOps
+dn: ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: IT-Operations
+description: Infrastructure and System Operations
 
-dn: uid=rgarcia,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-objectClass: posixAccount
-objectClass: shadowAccount
-uid: rgarcia
-cn: Roberto Garcia
-sn: Garcia
-givenName: Roberto
-mail: rgarcia@akatsuki.com
-uidNumber: 1003
-gidNumber: 1001
-homeDirectory: /home/rgarcia
-loginShell: /bin/bash
-title: Software Engineer
-ou: Development
+dn: ou=Finance,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Finance
+description: Financial Operations
 
-# htarget: DONT_REQ_PREAUTH encoded in employeeType.
-# Real AD would set the userAccountControl bit 0x400000. In the OpenLDAP mock
-# we use employeeType (a normal inetOrgPerson attribute) as the placeholder.
-# NO leaky description — the LLM must query and interpret employeeType.
-dn: uid=htarget,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-objectClass: posixAccount
-objectClass: shadowAccount
-uid: htarget
-cn: Hugo Target
-sn: Target
-givenName: Hugo
-mail: htarget@akatsuki.com
-uidNumber: 1004
-gidNumber: 1001
-homeDirectory: /home/htarget
-loginShell: /bin/bash
-title: Field Engineer
-ou: Operations
-employeeType: DONT_REQ_PREAUTH
-
-dn: uid=mlopez,ou=users,dc=akatsuki,dc=com
-objectClass: inetOrgPerson
-objectClass: posixAccount
-objectClass: shadowAccount
-uid: mlopez
-cn: Maria Lopez
-sn: Lopez
-givenName: Maria
-mail: mlopez@akatsuki.com
-uidNumber: 1005
-gidNumber: 1001
-homeDirectory: /home/mlopez
-loginShell: /bin/bash
-title: HR Manager
+dn: ou=HR,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
 ou: HR
+description: Human Resources
 
-# ── Privileged user (Domain Admin) ────────────────────────────────────────────
+# ── Enterprise Domain Users ───────────────────────────────────────────────────
 
 dn: uid=administrator,ou=users,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
-objectClass: posixAccount
-objectClass: shadowAccount
 uid: administrator
 cn: Domain Administrator
 sn: Administrator
 givenName: Domain
+displayName: Domain Administrator
 mail: administrator@akatsuki.com
-uidNumber: 500
-gidNumber: 512
-homeDirectory: /home/administrator
-loginShell: /bin/bash
-title: System Administrator
-ou: IT
+title: Lead Infrastructure Administrator
+ou: IT-Operations
+userPassword: {SSHA}Pass389Secure!
 
-# ── Service Accounts ─────────────────────────────────────────────────────────
-# SPNs encoded in the `title` attribute (real AD stores them in
-# servicePrincipalName). Pattern `<SERVICE>/<HOST>:<PORT>` — the tools search
-# for this pattern to identify kerberoastable accounts, mimicking the real
-# `servicePrincipalName=*` filter.
+dn: uid=jdoe,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: jdoe
+cn: John Doe
+sn: Doe
+givenName: John
+displayName: John Doe (Senior Lead)
+mail: jdoe@akatsuki.com
+title: Senior Infrastructure Engineer
+ou: IT-Operations
+telephoneNumber: +1-555-0192
+userPassword: {SSHA}JdoePassword123!
+
+dn: uid=asmith,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: asmith
+cn: Alice Smith
+sn: Smith
+givenName: Alice
+displayName: Alice Smith (DevOps)
+mail: asmith@akatsuki.com
+title: Site Reliability Engineer
+ou: Engineering
+telephoneNumber: +1-555-0144
+userPassword: {SSHA}AsmithPass2026!
+
+dn: uid=rgarcia,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: rgarcia
+cn: Roberto Garcia
+sn: Garcia
+givenName: Roberto
+displayName: Roberto Garcia
+mail: rgarcia@akatsuki.com
+title: Principal Software Engineer
+ou: Engineering
+telephoneNumber: +1-555-0188
+userPassword: {SSHA}RgarciaSecret99!
+
+dn: uid=htarget,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: htarget
+cn: Hugo Target
+sn: Target
+givenName: Hugo
+displayName: Hugo Target
+mail: htarget@akatsuki.com
+title: Field Operations Specialist
+ou: IT-Operations
+employeeType: DONT_REQ_PREAUTH
+telephoneNumber: +1-555-0177
+userPassword: {SSHA}HtargetPass2026!
+
+dn: uid=mlopez,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: mlopez
+cn: Maria Lopez
+sn: Lopez
+givenName: Maria
+displayName: Maria Lopez
+mail: mlopez@akatsuki.com
+title: HR Business Partner
+ou: HR
+telephoneNumber: +1-555-0122
+userPassword: {SSHA}MlopezPass2026!
+
+# ── Service Accounts ──────────────────────────────────────────────────────────
 
 dn: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
-objectClass: posixAccount
 uid: svc_backup
 cn: Backup Service Account
-sn: svc_backup
+sn: Service
+displayName: Service - Backup System
 mail: svc_backup@akatsuki.com
-uidNumber: 2001
-gidNumber: 2000
-homeDirectory: /var/lib/backup
-loginShell: /bin/false
 title: MSSQLSvc/DBSERVER01.akatsuki.com:1433
+ou: IT-Operations
 
 dn: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
-objectClass: posixAccount
 uid: svc_mssql
-cn: MSSQL Service Account
-sn: svc_mssql
+cn: MSSQL Database Service Account
+sn: Service
+displayName: Service - MSSQL Database
 mail: svc_mssql@akatsuki.com
-uidNumber: 2002
-gidNumber: 2000
-homeDirectory: /var/lib/mssql
-loginShell: /bin/false
 title: MSSQLSvc/SQL01.akatsuki.com:1433
+ou: IT-Operations
 
 dn: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
-objectClass: posixAccount
 uid: svc_http
-cn: HTTP Service Account
-sn: svc_http
+cn: Intranet HTTP Service Account
+sn: Service
+displayName: Service - Intranet Web App
 mail: svc_http@akatsuki.com
-uidNumber: 2003
-gidNumber: 2000
-homeDirectory: /var/www
-loginShell: /bin/false
 title: HTTP/intranet.akatsuki.com
+ou: Engineering
 
 dn: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
 objectClass: inetOrgPerson
-objectClass: posixAccount
 uid: svc_jenkins
-cn: Jenkins CI Service Account
-sn: svc_jenkins
+cn: Jenkins CI Automation Account
+sn: Service
+displayName: Service - Jenkins CI/CD
 mail: svc_jenkins@akatsuki.com
-uidNumber: 2004
-gidNumber: 2000
-homeDirectory: /var/lib/jenkins
-loginShell: /bin/false
 title: HTTP/jenkins.akatsuki.com:8080
+ou: Engineering
 
-# ── Groups ────────────────────────────────────────────────────────────────────
+# ── Domain Security Groups ────────────────────────────────────────────────────
 
 dn: cn=Domain Admins,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Domain Admins
-description: Members have full control of the domain
+description: Highest privilege domain administration group
 member: uid=administrator,ou=users,dc=akatsuki,dc=com
 member: uid=jdoe,ou=users,dc=akatsuki,dc=com
 
-dn: cn=IT,ou=groups,dc=akatsuki,dc=com
+dn: cn=Enterprise Admins,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
-cn: IT
-description: IT department
+cn: Enterprise Admins
+description: Enterprise forest administrators
+member: uid=administrator,ou=users,dc=akatsuki,dc=com
+
+dn: cn=IT-Operations,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: IT-Operations
+description: Systems administration personnel
+member: uid=administrator,ou=users,dc=akatsuki,dc=com
 member: uid=jdoe,ou=users,dc=akatsuki,dc=com
+member: uid=htarget,ou=users,dc=akatsuki,dc=com
+
+dn: cn=DevOps,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: DevOps
+description: Infrastructure automation & SRE personnel
 member: uid=asmith,ou=users,dc=akatsuki,dc=com
+member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
 
 dn: cn=Developers,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Developers
-description: Development team
+description: Software engineering staff
 member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
 member: uid=asmith,ou=users,dc=akatsuki,dc=com
 
 dn: cn=Service Accounts,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: Service Accounts
-description: Service and automation accounts
+description: Automated service accounts container group
 member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
 member: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
 member: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
@@ -234,27 +228,27 @@ member: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
 dn: cn=HR,ou=groups,dc=akatsuki,dc=com
 objectClass: groupOfNames
 cn: HR
-description: Human Resources
+description: Human Resources personnel group
 member: uid=mlopez,ou=users,dc=akatsuki,dc=com
 
-# ── Computers ─────────────────────────────────────────────────────────────────
+# ── Domain Computers & Infrastructure ─────────────────────────────────────────
 
 dn: cn=DC01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: DC01
-description: Primary Domain Controller
+description: Primary Active Directory Domain Controller (Windows Server 2022)
 
 dn: cn=SQL01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: SQL01
-description: Database Server
+description: Primary MSSQL Production Database Host
 
 dn: cn=JENKINS01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: JENKINS01
-description: CI/CD Build Server
+description: Central CI/CD Automation Build Server
 
 dn: cn=WS01,ou=computers,dc=akatsuki,dc=com
 objectClass: device
 cn: WS01
-description: Developer Workstation
+description: Developer Workstation Host
