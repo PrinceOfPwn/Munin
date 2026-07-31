@@ -4,16 +4,29 @@ The MCP server remains available for editor/tool integrations.  Operator-facing
 web traffic uses this service so browser sessions are opaque cookies rather than
 shared MCP credentials stored in JavaScript.  MCP and Discord adapters call the
 same :class:`ProductionStore` repository with a service actor.
+
+v3 additions (long-running operator UX):
+  * ``run_events`` — the SSE stream is now capped by ``MUNIN_SSE_MAX_SECONDS``
+    (default 4h) instead of a hard-coded 120-iteration loop, and emits
+    ``heartbeat`` events every ``MUNIN_SSE_HEARTBEAT_SECONDS`` (default 20s)
+    so idle-connection proxies (cloudflared, ngrok, corporate LBs) don't
+    reap the pipe.  The stream terminates cleanly with ``event: close`` when
+    the run reaches a terminal state, exposes the current lease/worker
+    liveness in every heartbeat, and honours ``last-event-id`` on reconnect.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
+import time
 from collections.abc import AsyncIterator
 from typing import Any
+
+log = logging.getLogger("munin.production.asgi")
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -23,6 +36,11 @@ from starlette.routing import Route
 from .agents import profile_catalog
 from .page_agent import validate_page_action
 from .store import ProductionStore
+from .store_v3_1 import install_v3_1_extensions
+
+
+TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
+NON_TERMINAL_RUN_STATES = {"queued", "running", "waiting_for_human"}
 
 
 def _allowed_origins() -> set[str]:
@@ -45,6 +63,32 @@ async def _payload(request: Request) -> dict[str, Any]:
 
 def _cookie_secure() -> bool:
     return os.environ.get("MUNIN_COOKIE_SECURE", "1") != "0"
+
+
+def _worker_alive(snapshot: dict[str, Any]) -> bool:
+    """Best-effort lease liveness check without adding a new store method.
+
+    ``get_run`` and ``get_run_for_actor`` both expose ``lease_expires_at_ms``
+    when a worker owns the lease.  The dispatcher heartbeats every 15s and a
+    lease is 60s wide, so anything within 90s of "now" is a live worker.
+    """
+    lease_expires = snapshot.get("lease_expires_at_ms") or 0
+    if not lease_expires:
+        return False
+    return int(lease_expires) > int(time.time() * 1000) - 90_000
+
+
+def _phase_from_events(reasoning_events: list[dict[str, Any]] | None, tool_events: list[dict[str, Any]] | None) -> str:
+    """Human-readable phase, inferred from the latest reasoning/tool signal."""
+    if tool_events:
+        pending = [t for t in tool_events if t.get("state") in {"pending", "running"}]
+        if pending:
+            latest = pending[-1]
+            return f"tool:{latest.get('tool_name', 'unknown')}"
+    if reasoning_events:
+        latest_r = reasoning_events[-1]
+        return f"reasoning:{latest_r.get('kind', 'unknown')}"
+    return "waiting"
 
 
 class SecurityHeaders:
@@ -103,6 +147,10 @@ class SecurityHeaders:
 def create_app(store: ProductionStore) -> Starlette:
     """Create the session-authenticated production API over a shared store."""
 
+    # v3.1: install the collab/notes/presence/guidance schema + method
+    # extensions.  Idempotent — safe to call every boot.
+    store = install_v3_1_extensions(store)
+
     allowed_origins = _allowed_origins()
 
     async def actor(request: Request, *, csrf: bool = False) -> dict[str, Any]:
@@ -122,6 +170,65 @@ def create_app(store: ProductionStore) -> Starlette:
 
     async def health(_: Request) -> Response:
         return JSONResponse({"ok": True, "service": "munin-production-api"})
+
+    async def simulate_forge(request: Request) -> Response:
+        """Development-only smoke path for the forge floating window.
+
+        Emits the full canonical ``forge_*`` reasoning-event sequence against
+        the given run so an operator can verify the UI wiring end-to-end
+        without needing a live LLM or a real forge subagent invocation.
+
+        Guarded by ``MUNIN_DEV_ENDPOINTS_ENABLED=1`` and by session auth so
+        it can't be reached on production builds.  Not part of the public
+        API surface — see VERIFY.md for the intended smoke-test flow.
+        """
+        if os.environ.get("MUNIN_DEV_ENDPOINTS_ENABLED", "").lower() not in {"1", "true", "yes"}:
+            # 404 not 403 to avoid leaking the route's existence on prod builds.
+            return _error(404, "not_found", "dev endpoint not enabled")
+        try:
+            current = await actor(request, csrf=True)
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        run_id = request.path_params["run_id"]
+        log.warning(
+            "dev endpoint /api/dev/simulate-forge invoked by actor=%s run_id=%s agent=%s",
+            current.get("username") or current.get("id"),
+            run_id,
+            request.query_params.get("agent", "tool-forge"),
+        )
+        # Local import — forge_progress lives in the same package but pulling
+        # it in at module load would create a cycle with parallel/dispatcher.
+        from .forge_progress import emit_forge_stage
+
+        agent_name = str(request.query_params.get("agent", "tool-forge"))
+        stages: list[tuple[str, str, dict[str, Any]]] = [
+            ("forge_propose", "Requesting implementation draft (1/3)", {"forge_iteration": 1}),
+            ("forge_diff_ready", "Draft ready: hello_world_tool (256 bytes)", {"function_name": "hello_world_tool", "script_bytes": 256}),
+            ("forge_typecheck_start", "Validating AST + import guard", {"function_name": "hello_world_tool"}),
+            ("forge_typecheck_output", "Parsed 1 function, 0 unsafe imports", {"stream": "stdout"}),
+            ("forge_typecheck_done", "Typecheck exit: ok=True", {"ok": True}),
+            ("forge_sandbox_start", "Running draft in restricted-exec sandbox", {"function_name": "hello_world_tool"}),
+            ("forge_sandbox_output", "sandbox: defined=True", {"stream": "stdout"}),
+            ("forge_sandbox_done", "Sandbox exit: ok=True", {"ok": True}),
+            ("forge_awaiting_approval", "Forged hello_world_tool — awaiting operator approval", {"tool_slug": "hello_world_tool"}),
+            ("forge_completed", "Forged hello_world_tool in 1 iteration", {"tool_slug": "hello_world_tool", "iterations": 1}),
+        ]
+        emitted: list[str] = []
+        for step, (stage, message, extra) in enumerate(stages, start=1):
+            try:
+                emit_forge_stage(
+                    store,
+                    run_id=run_id,
+                    agent_name=agent_name,
+                    stage=stage,
+                    message=message,
+                    step=step,
+                    **extra,
+                )
+                emitted.append(stage)
+            except Exception as exc:  # noqa: BLE001
+                return _error(500, "emit_failed", f"stage {stage} failed: {exc}")
+        return JSONResponse({"ok": True, "data": {"run_id": run_id, "agent_name": agent_name, "emitted": emitted}})
 
     async def agents(request: Request) -> Response:
         try:
@@ -205,8 +312,6 @@ def create_app(store: ProductionStore) -> Starlette:
 
     async def request_password_recovery(request: Request) -> Response:
         data = await _payload(request)
-        # A deployment wires the returned token to an approved out-of-band delivery adapter.
-        # The HTTP response deliberately stays non-enumerating and never returns it.
         store.issue_password_recovery(username=str(data.get("username", "")))
         return JSONResponse({"ok": True, "message": "If the account exists, recovery delivery has been requested."}, status_code=202)
 
@@ -311,7 +416,24 @@ def create_app(store: ProductionStore) -> Starlette:
             current = await actor(request, csrf=True)
             data = await _payload(request)
             key = request.headers.get("idempotency-key", "")
-            result = store.create_turn(actor_id=current["id"], conversation_id=request.path_params["conversation_id"], content=str(data.get("content", "")), idempotency_key=key)
+            conversation_id = request.path_params["conversation_id"]
+            # v3.1 multi-operator: reject a fresh turn if any run in this
+            # conversation is still non-terminal.  The composer's Turn mode
+            # must be disabled by the client, but we defend on the server so
+            # a stale tab cannot interrupt an active run.
+            try:
+                aggregate = store.get_conversation(actor_id=current["id"], conversation_id=conversation_id)
+                for run in aggregate.get("runs", []):
+                    if run.get("state") in NON_TERMINAL_RUN_STATES:
+                        return _error(
+                            409,
+                            "run_in_progress",
+                            "a run is still active in this conversation — send guidance instead of a new turn",
+                        )
+            except (PermissionError, KeyError):
+                # Fall through to create_turn which does its own auth.
+                pass
+            result = store.create_turn(actor_id=current["id"], conversation_id=conversation_id, content=str(data.get("content", "")), idempotency_key=key)
             if not result["idempotent_replay"] and os.environ.get("MUNIN_PRODUCTION_AUTO_DISPATCH", "1") == "1":
                 from ..mcp.config import get_settings
                 from .dispatcher import ProductionDispatcher
@@ -364,18 +486,253 @@ def create_app(store: ProductionStore) -> Starlette:
         except ValueError as exc:
             return _error(409, "retry_not_available", str(exc))
 
+    async def list_run_guidance(request: Request) -> Response:
+        try:
+            current = await actor(request)
+            run_id = request.path_params["run_id"]
+            store.get_run_for_actor(actor_id=current["id"], run_id=run_id)
+            return JSONResponse({"ok": True, "data": store.list_run_guidance(run_id=run_id)})
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "run not found")
+
     async def run_guidance(request: Request) -> Response:
         try:
             current = await actor(request, csrf=True)
             data = await _payload(request)
-            result = store.append_operator_guidance(actor_id=current["id"], run_id=request.path_params["run_id"], guidance=str(data.get("guidance", "")))
-            return JSONResponse({"ok": True, "data": result}, status_code=201)
+            run_id = request.path_params["run_id"]
+            # Accept either legacy `guidance` or v3.1 `body`.  v3.1 adds
+            # `target_agent_id` so forge-window composers can address a
+            # specific subagent, and `budget_extension_seconds` for the
+            # elastic-budget affordance.
+            body = str(data.get("body") or data.get("guidance") or "")
+            target_agent_id = data.get("target_agent_id")
+            budget_extension = int(data.get("budget_extension_seconds") or 0)
+            # Preserve legacy behaviour: also record the guidance as a durable
+            # run event so old UIs keep seeing it in the run log.
+            legacy = store.append_operator_guidance(
+                actor_id=current["id"], run_id=run_id, guidance=body
+            )
+            # v3.1: enqueue for injection into the next ReAct iteration.
+            entry = store.enqueue_guidance(
+                run_id=run_id,
+                actor_id=current["id"],
+                actor_username=current.get("username", current["id"]),
+                body=body,
+                target_agent_id=str(target_agent_id) if target_agent_id else None,
+                budget_extension_seconds=budget_extension,
+            )
+            return JSONResponse(
+                {"ok": True, "data": {"event": legacy, "queued": entry}},
+                status_code=201,
+            )
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))
         except KeyError:
             return _error(404, "not_found", "run not found")
         except ValueError as exc:
             return _error(400, "invalid_guidance", str(exc))
+
+    # ── v3.1 collaboration endpoints ─────────────────────────────────────
+
+    async def collaborators(request: Request) -> Response:
+        try:
+            current = await actor(request, csrf=request.method == "POST")
+            conversation_id = request.path_params["conversation_id"]
+            # A read requires at least viewer access; a write requires owner.
+            store.require_collaborator_access(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                required_role="viewer",
+            )
+            if request.method == "GET":
+                return JSONResponse(
+                    {"ok": True, "data": store.list_collaborators(conversation_id=conversation_id)}
+                )
+            store.require_collaborator_access(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                required_role="owner",
+            )
+            data = await _payload(request)
+            username = str(data.get("username", "")).strip().lower()
+            role = str(data.get("role", "collaborator"))
+            if not username:
+                return _error(400, "invalid_collaborator", "username is required")
+            # Resolve username → actor_id via the store's connection.
+            conn = store._connect()  # noqa: SLF001
+            try:
+                row = conn.execute(
+                    "SELECT id FROM users WHERE username=? AND disabled_at_ms IS NULL",
+                    (username,),
+                ).fetchone()
+                if not row:
+                    return _error(404, "not_found", "user not found")
+                target_actor_id = row["id"]
+            finally:
+                conn.close()
+            store.add_collaborator(
+                conversation_id=conversation_id,
+                actor_id=target_actor_id,
+                role=role,
+                added_by_actor_id=current["id"],
+            )
+            return JSONResponse(
+                {"ok": True, "data": store.list_collaborators(conversation_id=conversation_id)},
+                status_code=201,
+            )
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except ValueError as exc:
+            return _error(400, "invalid_collaborator", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "conversation not found")
+
+    async def notes(request: Request) -> Response:
+        try:
+            current = await actor(request, csrf=request.method == "POST")
+            conversation_id = request.path_params["conversation_id"]
+            store.require_collaborator_access(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                required_role="viewer",
+            )
+            if request.method == "GET":
+                after = int(request.query_params.get("after_ms", "0") or 0)
+                return JSONResponse(
+                    {"ok": True, "data": store.list_notes(conversation_id=conversation_id, after_ms=after)}
+                )
+            store.require_collaborator_access(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                required_role="collaborator",
+            )
+            data = await _payload(request)
+            note = store.append_note(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                body=str(data.get("body", "")),
+            )
+            note.setdefault("actor_username", current.get("username"))
+            return JSONResponse({"ok": True, "data": note}, status_code=201)
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except ValueError as exc:
+            return _error(400, "invalid_note", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "conversation not found")
+
+    async def presence(request: Request) -> Response:
+        try:
+            current = await actor(request, csrf=True)
+            conversation_id = request.path_params["conversation_id"]
+            store.require_collaborator_access(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                required_role="viewer",
+            )
+            data = await _payload(request)
+            store.heartbeat_presence(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                typing=bool(data.get("typing", False)),
+            )
+            return JSONResponse(
+                {"ok": True, "data": store.active_presence(conversation_id=conversation_id)}
+            )
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "conversation not found")
+
+    async def conversation_events(request: Request) -> Response:
+        """SSE stream over the durable ``conversation_broadcasts`` table.
+
+        Reactive by design: the loop only sleeps when the cursor is caught up.
+        Every heartbeat re-checks collaborator access so revocations propagate
+        without waiting for the browser to reconnect.
+        """
+        try:
+            current = await actor(request)
+            conversation_id = request.path_params["conversation_id"]
+            store.require_collaborator_access(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                required_role="viewer",
+            )
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "conversation not found")
+
+        max_duration = int(os.environ.get("MUNIN_SSE_MAX_SECONDS", "14400"))
+        heartbeat_every = int(os.environ.get("MUNIN_SSE_HEARTBEAT_SECONDS", "20"))
+        actor_id = current["id"]
+
+        async def stream() -> AsyncIterator[bytes]:
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            last_heartbeat = start
+            cursor = int(request.headers.get("last-event-id", request.query_params.get("after", "0")) or 0)
+            yield b": munin-conversation-stream v3.1\n\n"
+            while (loop.time() - start) < max_duration:
+                now = loop.time()
+                emitted = 0
+                try:
+                    broadcasts = store.conversation_broadcasts_after(
+                        conversation_id=conversation_id, after_sequence=cursor
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    broadcasts = []
+                    yield (
+                        f"event: warning\ndata: {json.dumps({'message': str(exc)}, separators=(',', ':'))}\n\n"
+                    ).encode()
+                for entry in broadcasts:
+                    cursor = int(entry["sequence"])
+                    payload = json.dumps(entry.get("payload") or {}, separators=(",", ":"))
+                    yield f"id: {cursor}\nevent: {entry['kind']}\ndata: {payload}\n\n".encode()
+                    emitted += 1
+
+                if (now - last_heartbeat) >= heartbeat_every:
+                    # Re-verify access on every heartbeat so revocations propagate mid-stream.
+                    try:
+                        store.require_collaborator_access(
+                            conversation_id=conversation_id,
+                            actor_id=actor_id,
+                            required_role="viewer",
+                        )
+                    except PermissionError:
+                        yield (
+                            "event: close\n"
+                            f"data: {json.dumps({'reason': 'access_revoked'}, separators=(',', ':'))}\n\n"
+                        ).encode()
+                        return
+                    hb = {
+                        "elapsed_seconds": int(now - start),
+                        "cursor": cursor,
+                    }
+                    yield f"event: heartbeat\ndata: {json.dumps(hb, separators=(',', ':'))}\n\n".encode()
+                    last_heartbeat = now
+
+                if await request.is_disconnected():
+                    return
+                # Only sleep when the cursor is caught up; a bursty producer
+                # keeps the loop hot without hammering Turso between events.
+                if emitted == 0:
+                    await asyncio.sleep(1)
+
+            yield f"event: close\ndata: {json.dumps({'reason': 'max_duration'}, separators=(',', ':'))}\n\n".encode()
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     async def human_resolution(request: Request) -> Response:
         try:
@@ -411,6 +768,23 @@ def create_app(store: ProductionStore) -> Starlette:
             return _error(404, "not_found", "branch not found")
 
     async def run_events(request: Request) -> Response:
+        """Server-sent events for a run, optimised for very long operations.
+
+        Fixes vs. the pre-v3 shape:
+
+        * The lifespan is bounded by ``MUNIN_SSE_MAX_SECONDS`` (default 4h) so
+          an idle-but-still-executing 3h30m run does not silently truncate at
+          the two-minute mark of the previous ``range(120)`` loop.
+        * Heartbeat events are emitted at ``MUNIN_SSE_HEARTBEAT_SECONDS``
+          (default 20s) with the current inferred phase, elapsed time, worker
+          liveness and last cursor.  ~20s beats stay under the default idle
+          budgets of cloudflared, ngrok and typical corporate LBs.
+        * Terminal run states end the stream cleanly with ``event: close``
+          so the client can stop reconnecting instead of thrashing.
+        * ``last-event-id`` continues to be honoured on reconnect so no
+          buffered event is missed after a transient disconnect.
+        """
+
         try:
             current = await actor(request)
             run_id = request.path_params["run_id"]
@@ -419,16 +793,84 @@ def create_app(store: ProductionStore) -> Starlette:
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))
 
+        max_duration = int(os.environ.get("MUNIN_SSE_MAX_SECONDS", "14400"))
+        heartbeat_every = int(os.environ.get("MUNIN_SSE_HEARTBEAT_SECONDS", "20"))
+        actor_id = current["id"]
+
         async def stream() -> AsyncIterator[bytes]:
             cursor = after
-            for _ in range(120):
-                for event in store.run_events_after(run_id=run_id, after_sequence=cursor):
-                    cursor = event["sequence"]
-                    yield f"id: {cursor}\nevent: run-event\ndata: {json.dumps(event, separators=(',', ':'))}\n\n".encode()
-                await asyncio.sleep(1)
-            yield b"event: close\ndata: {}\n\n"
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            last_heartbeat = start
+            # Initial marker so the client can flip its "connecting" state.
+            yield b": munin-stream v3\n\n"
+            while (loop.time() - start) < max_duration:
+                emitted = 0
+                try:
+                    for event in store.run_events_after(run_id=run_id, after_sequence=cursor):
+                        cursor = event["sequence"]
+                        payload = json.dumps(event, separators=(",", ":"))
+                        yield f"id: {cursor}\nevent: run-event\ndata: {payload}\n\n".encode()
+                        emitted += 1
+                except Exception as exc:  # noqa: BLE001
+                    # Never let a transient store hiccup take down the SSE
+                    # connection.  Emit a `warning` event so the UI can show
+                    # a soft indicator and let the client reconnect.
+                    payload = json.dumps({"message": str(exc)}, separators=(",", ":"))
+                    yield f"event: warning\ndata: {payload}\n\n".encode()
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                now = loop.time()
+                # Always emit a heartbeat at the configured interval, even if
+                # events were flushed this tick, so proxies see traffic and
+                # the UI stays honest about elapsed time / phase.
+                if (now - last_heartbeat) >= heartbeat_every:
+                    try:
+                        snapshot = store.get_run_for_actor(actor_id=actor_id, run_id=run_id)
+                    except PermissionError:
+                        yield (
+                            "event: close\n"
+                            f"data: {json.dumps({'reason': 'access_revoked'}, separators=(',', ':'))}\n\n"
+                        ).encode()
+                        return
+                    except Exception:  # noqa: BLE001
+                        snapshot = {"state": "unknown"}
+                    reasoning = snapshot.get("reasoning") or []
+                    tools = snapshot.get("tools") or []
+                    heartbeat = {
+                        "phase": _phase_from_events(reasoning, tools),
+                        "state": snapshot.get("state", "unknown"),
+                        "elapsed_seconds": int(now - start),
+                        "cursor": cursor,
+                        "worker_alive": _worker_alive(snapshot),
+                        "reasoning_count": len(reasoning),
+                        "tool_count": len(tools),
+                    }
+                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat, separators=(',', ':'))}\n\n".encode()
+                    last_heartbeat = now
+                    if snapshot.get("state") in TERMINAL_STATES:
+                        yield f"event: close\ndata: {json.dumps({'final_state': snapshot['state']}, separators=(',', ':'))}\n\n".encode()
+                        return
+
+                # Detect operator disconnect early to release the connection.
+                if await request.is_disconnected():
+                    return
+
+                # Poll interval — short so events feel live, but not tight
+                # enough to hammer the store.  Long-running runs spend most
+                # of their time here between reasoning bursts.
+                await asyncio.sleep(1)
+
+            yield f"event: close\ndata: {json.dumps({'reason': 'max_duration', 'max_seconds': max_duration}, separators=(',', ':'))}\n\n".encode()
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     async def replay(request: Request) -> Response:
         try:
@@ -447,9 +889,19 @@ def create_app(store: ProductionStore) -> Starlette:
         Route("/api/conversations", conversations, methods=["GET", "POST"]), Route("/api/conversations/{conversation_id}/export", conversation_export, methods=["GET"]), Route("/api/conversations/{conversation_id}", conversation_detail, methods=["GET", "PATCH", "DELETE"]), Route("/api/artifacts/{artifact_id}", artifact, methods=["GET"]),
         Route("/api/conversations/{conversation_id}/turns", turn, methods=["POST"]), Route("/api/runs/{run_id}", run, methods=["GET"]),
         Route("/api/runs/{run_id}/detail", run_detail, methods=["GET"]), Route("/api/runs/{run_id}/cancel", run_cancel, methods=["POST"]),
-        Route("/api/runs/{run_id}/retry", run_retry, methods=["POST"]), Route("/api/runs/{run_id}/guidance", run_guidance, methods=["POST"]),
+        Route("/api/runs/{run_id}/retry", run_retry, methods=["POST"]),
+        Route("/api/runs/{run_id}/guidance", run_guidance, methods=["POST"]),
+        Route("/api/runs/{run_id}/guidance", list_run_guidance, methods=["GET"]),
         Route("/api/runs/{run_id}/branches", branch, methods=["POST"]), Route("/api/branches/{branch_id}/compare", branch_compare, methods=["GET"]),
         Route("/api/human-requests/{request_id}/resolve", human_resolution, methods=["POST"]), Route("/api/runs/{run_id}/events", run_events, methods=["GET"]), Route("/api/runs/{run_id}/replay/{snapshot_id}", replay, methods=["GET"]),
+        # v3.1.1 dev-only smoke path for the forge floating window
+        # (gated by MUNIN_DEV_ENDPOINTS_ENABLED=1 inside the handler).
+        Route("/api/dev/simulate-forge/{run_id}", simulate_forge, methods=["POST"]),
+        # v3.1 multi-operator collaboration
+        Route("/api/conversations/{conversation_id}/collaborators", collaborators, methods=["GET", "POST"]),
+        Route("/api/conversations/{conversation_id}/notes", notes, methods=["GET", "POST"]),
+        Route("/api/conversations/{conversation_id}/presence", presence, methods=["POST"]),
+        Route("/api/conversations/{conversation_id}/events", conversation_events, methods=["GET"]),
     ]
     return SecurityHeaders(Starlette(debug=False, routes=routes), allowed_origins=allowed_origins)  # type: ignore[return-value]
 
