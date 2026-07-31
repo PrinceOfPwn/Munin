@@ -1,0 +1,438 @@
+"""
+Runtime adapter — the single execution path into the Deep Agents supervisor.
+
+Owns:
+* conversation history → LangChain messages conversion,
+* thread/checkpoint config (``thread_id`` = conversation; runs resume),
+* ``astream_events`` (v2) → Munin progress envelope translation
+  (assistant deltas, safe operational activity, run lifecycle). Tool lifecycle envelopes
+  (``tool_intent``/``tool_result``/``tool_failed``) are emitted by
+  ``ProgressEmitMiddleware`` inside the graph — one channel per concern,
+  no double emission.
+
+Consumers: ``munin_chat`` (MCP), ``munin run`` (CLI), and any future
+UI-message-stream adapter.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, AsyncIterator, Callable, Iterable
+
+# LangGraph requires an integer ``recursion_limit`` even when the application
+# deliberately does not impose a graph-step budget.  Use the largest practical
+# Python integer as the explicit "unlimited" sentinel instead of inheriting
+# LangGraph's small default (which aborts legitimate long-running agents).
+# Operator cancellation, run leases, tool approval, and the model/tool
+# middleware budgets remain the independent safety controls.
+UNLIMITED_RECURSION_LIMIT = 2**31 - 1
+
+
+def _recursion_limit_from_environment() -> int:
+    raw = os.environ.get("MUNIN_RECURSION_LIMIT", "unlimited").strip().lower()
+    if raw in {"", "0", "none", "infinite", "infinity", "unlimited"}:
+        return UNLIMITED_RECURSION_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return UNLIMITED_RECURSION_LIMIT
+    return value if value > 0 else UNLIMITED_RECURSION_LIMIT
+
+
+DEFAULT_RECURSION_LIMIT = _recursion_limit_from_environment()
+
+_ROOT_GRAPH_NAMES = frozenset({"LangGraph", "munin", "munin_supervisor", "__end__"})
+
+
+def _history_to_messages(history: Iterable[dict] | None) -> list[Any]:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: PLC0415
+
+    messages: list[Any] = []
+    for item in history or []:
+        role = str(item.get("role", "")).lower()
+        content = str(item.get("content", ""))
+        if not content:
+            continue
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+        elif role == "system":
+            messages.append(SystemMessage(content=content))
+    return messages
+
+
+def _trailing_tag_prefix(text: str, tag: str) -> int:
+    """Return the suffix length that could become ``tag`` in the next delta."""
+    lowered = text.lower()
+    for length in range(min(len(text), len(tag) - 1), 0, -1):
+        if tag.startswith(lowered[-length:]):
+            return length
+    return 0
+
+
+def _split_think_tags(content: str, thinking_state: dict[str, Any]) -> tuple[str, str]:
+    """Split provider-emitted ``<think>`` deltas into reasoning and answer.
+
+    This is deliberately limited to explicit provider output. It does not infer
+    latent chain-of-thought from ordinary assistant prose. Partial XML-like tags
+    are retained across chunks so a network boundary cannot leak tag fragments
+    into the final answer or truncate the visible provider reasoning.
+    """
+    pending = str(thinking_state.get("tag_prefix") or "") + content
+    thinking_state["tag_prefix"] = ""
+    reasoning: list[str] = []
+    visible: list[str] = []
+    cursor = 0
+    in_think = bool(thinking_state.get("in_think"))
+    lowered = pending.lower()
+
+    while cursor < len(pending):
+        if in_think:
+            end = lowered.find("</think>", cursor)
+            if end < 0:
+                tail = pending[cursor:]
+                prefix = _trailing_tag_prefix(tail, "</think>")
+                reasoning.append(tail[:-prefix] if prefix else tail)
+                if prefix:
+                    thinking_state["tag_prefix"] = tail[-prefix:]
+                thinking_state["in_think"] = True
+                break
+            reasoning.append(pending[cursor:end])
+            cursor = end + len("</think>")
+            in_think = False
+            thinking_state["in_think"] = False
+            continue
+
+        start = lowered.find("<think", cursor)
+        if start < 0:
+            tail = pending[cursor:]
+            prefix = _trailing_tag_prefix(tail, "<think")
+            visible.append(tail[:-prefix] if prefix else tail)
+            if prefix:
+                thinking_state["tag_prefix"] = tail[-prefix:]
+            break
+        visible.append(pending[cursor:start])
+        closing = lowered.find(">", start)
+        if closing < 0:
+            thinking_state["tag_prefix"] = pending[start:]
+            break
+        cursor = closing + 1
+        in_think = True
+        thinking_state["in_think"] = True
+
+    return "".join(reasoning), "".join(visible)
+
+
+def _block_text(block: dict[str, Any]) -> str:
+    for key in ("text", "content", "reasoning_content", "thinking"):
+        value = block.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _stream_parts(chunk: Any, thinking_state: dict[str, Any]) -> tuple[list[str], list[str], str]:
+    """Extract explicit provider reasoning and normal assistant text from a chunk."""
+    reasoning: list[str] = []
+    visible: list[str] = []
+    provider = ""
+    additional = getattr(chunk, "additional_kwargs", None)
+    if isinstance(additional, dict):
+        for key in ("reasoning_content", "reasoning", "thinking", "reasoning_summary"):
+            value = additional.get(key)
+            if isinstance(value, str) and value:
+                reasoning.append(value)
+        provider = str(additional.get("provider") or additional.get("model_provider") or "")
+    metadata = getattr(chunk, "response_metadata", None)
+    if isinstance(metadata, dict):
+        provider = provider or str(metadata.get("provider") or metadata.get("model_provider") or "")
+
+    content = getattr(chunk, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                tagged_reasoning, text = _split_think_tags(block, thinking_state)
+                if tagged_reasoning:
+                    reasoning.append(tagged_reasoning)
+                if text:
+                    visible.append(text)
+            elif isinstance(block, dict):
+                block_type = str(block.get("type") or "")
+                text = _block_text(block)
+                if not text:
+                    continue
+                if block_type in {"reasoning", "thinking", "reasoning_content", "reasoning_summary"}:
+                    reasoning.append(text)
+                elif block_type in {"text", "output_text"}:
+                    tagged_reasoning, answer = _split_think_tags(text, thinking_state)
+                    if tagged_reasoning:
+                        reasoning.append(tagged_reasoning)
+                    if answer:
+                        visible.append(answer)
+    elif isinstance(content, str) and content:
+        tagged_reasoning, text = _split_think_tags(content, thinking_state)
+        if tagged_reasoning:
+            reasoning.append(tagged_reasoning)
+        if text:
+            visible.append(text)
+
+    return reasoning, visible, provider or "openai-compatible"
+
+
+def translate_events(
+    event: dict, *, run_id: str, thinking_state: dict[str, Any] | None = None
+) -> list[dict]:
+    """Translate one LangGraph event into zero or more Munin envelopes.
+
+    A provider chunk can carry both an explicit reasoning delta and normal
+    assistant text. Keeping them as distinct envelopes is essential for the
+    AI SDK UIMessage protocol and for durable replay.
+    """
+    thinking_state = thinking_state if thinking_state is not None else {}
+    event_type = event.get("event", "")
+    name = event.get("name", "")
+
+    if event_type == "on_chain_stream":
+        chunk = event.get("data", {}).get("chunk")
+        # Deep Agents' native HumanInTheLoopMiddleware emits this LangGraph
+        # interrupt checkpoint.  Keep the provider/model internals out of the
+        # stream; the production adapter turns the typed action request into
+        # an authenticated, durable Munin human-request resource below.
+        if isinstance(chunk, dict) and chunk.get("__interrupt__"):
+            requests: list[dict[str, Any]] = []
+            for item in chunk["__interrupt__"]:
+                value = getattr(item, "value", item)
+                if not isinstance(value, dict):
+                    continue
+                actions = value.get("action_requests")
+                if isinstance(actions, list):
+                    requests.extend(action for action in actions if isinstance(action, dict))
+            if requests:
+                return [{"kind": "human_interrupt", "run_id": run_id, "actions": requests}]
+
+    if event_type == "on_chat_model_stream":
+        chunk = event.get("data", {}).get("chunk")
+        reasoning, text, provider = _stream_parts(chunk, thinking_state)
+        step = max(1, int(thinking_state.get("model_step") or 1))
+        envelopes: list[dict] = []
+        for delta in reasoning:
+            if delta:
+                envelopes.append(
+                    {
+                        "kind": "provider_reasoning",
+                        "run_id": run_id,
+                        "text": delta,
+                        "provider": provider,
+                        "step": step,
+                    }
+                )
+        for delta in text:
+            if delta:
+                envelopes.append({"kind": "assistant_text", "run_id": run_id, "text": delta})
+        return envelopes
+
+    if event_type == "on_chat_model_start":
+        thinking_state["model_step"] = int(thinking_state.get("model_step") or 0) + 1
+        return [
+            {
+                "kind": "activity",
+                "run_id": run_id,
+                "stage": "planning",
+                "text": "Planning the next authorized action",
+            }
+        ]
+
+    if event_type == "on_chain_end" and name in _ROOT_GRAPH_NAMES:
+        output = event.get("data", {}).get("output")
+        final_text = ""
+        if isinstance(output, dict):
+            messages = output.get("messages") or []
+            if messages:
+                last = messages[-1]
+                _reasoning, text, _provider = _stream_parts(last, thinking_state)
+                final_text = "".join(text)
+        return [
+            {
+                "kind": "run_state",
+                "run_id": run_id,
+                "state": "completed",
+                "content": final_text,
+            }
+        ]
+
+    if event_type == "on_chain_error":
+        return [
+            {
+                "kind": "run_state",
+                "run_id": run_id,
+                "state": "failed",
+                "error": str(event.get("data", {}).get("error", "unknown")),
+            }
+        ]
+
+    return []
+
+
+def translate_event(
+    event: dict, *, run_id: str, thinking_state: dict[str, Any] | None = None
+) -> dict | None:
+    """Compatibility wrapper for single-envelope consumers and older tests."""
+    envelopes = translate_events(event, run_id=run_id, thinking_state=thinking_state)
+    return envelopes[0] if envelopes else None
+
+
+def _persist_human_interrupt(
+    *,
+    store: Any,
+    run_id: str,
+    actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Convert a Deep Agents interrupt into Munin's durable HITL resource."""
+    from ..mcp.audit import redact_secrets  # noqa: TID252, PLC0415
+
+    safe_actions = redact_secrets(actions)
+    names = [str(action.get("name") or "unknown") for action in safe_actions]
+    request = store.request_human_decision(
+        run_id=run_id,
+        action="Approve tool execution: " + ", ".join(names),
+        risk="critical" if "extension_open_pr" in names else "high",
+        evidence=[str(action.get("description") or "")[:1_000] for action in safe_actions],
+        scope={"actions": safe_actions},
+        choices=["approve", "reject"],
+    )
+    return {
+        "kind": "human_request",
+        "run_id": run_id,
+        "request_id": request["id"],
+        "tool_name": names[0] if len(names) == 1 else "multiple_tools",
+        "args": {"actions": safe_actions},
+        "nonce": request["nonce"],
+        "choices": request["choices"],
+    }
+
+
+async def supervisor_runner(
+    prompt: str,
+    *,
+    run_id: str,
+    conversation_id: str,
+    tools: list[Any] | None = None,  # legacy kwarg — gateway owns the catalog now
+    store: Any,
+    progress_sink: Callable[[dict], None] | None = None,
+    model: Any = None,
+    system_prompt: str = "",  # composed in build_munin_supervisor (soul + policy)
+    max_iterations: int | None = None,
+    conversation_history: list[dict] | None = None,
+    thread_id: str | None = None,
+    human_request_store: Any | None = None,
+    resume_decisions: list[dict[str, Any]] | None = None,
+    resume_from_checkpoint: bool = False,
+) -> AsyncIterator[dict]:
+    """Run one Munin turn through the Deep Agents supervisor.
+
+    Yields translated Munin progress envelopes.  ``tools``/``system_prompt``
+    are accepted for backwards compatibility but the authoritative catalog and
+    prompt are assembled inside ``build_munin_supervisor`` (gateway + soul).
+    """
+    from langchain_core.messages import HumanMessage  # noqa: PLC0415
+
+    from .middleware.operator_guidance import ACTIVE_RUN_ID as _OG_RUN_ID
+    from .middleware.progress_emit import (
+        ACTIVE_PROGRESS_SINK as _PE_SINK,
+    )
+    from .middleware.progress_emit import ACTIVE_RUN_ID as _PE_RUN_ID
+    from .supervisor import build_munin_supervisor  # noqa: PLC0415
+
+    middleware_events: list[dict] = []
+    thinking_state: dict[str, Any] = {}
+
+    def wrapped_progress_sink(envelope: dict) -> None:
+        middleware_events.append(envelope)
+        if progress_sink is not None:
+            try:
+                progress_sink(envelope)
+            except Exception:  # noqa: BLE001
+                pass
+
+    supervisor = build_munin_supervisor(
+        state=store,
+        model=model,
+        run_id=run_id,
+        progress_sink=wrapped_progress_sink,
+    )
+
+    config = {
+        "configurable": {"thread_id": thread_id or conversation_id or run_id},
+        # ``max_iterations`` is retained for explicit programmatic callers;
+        # omitted/zero values use the unlimited sentinel above.
+        "recursion_limit": (
+            max_iterations
+            if max_iterations and max_iterations > 0
+            else DEFAULT_RECURSION_LIMIT
+        ),
+    }
+
+    # Bind the per-invocation middleware overrides. The supervisor graph is
+    # process-wide (cached), so its middleware instances are SHARED across
+    # runs; they read these contextvars at hook time to recover the live
+    # ``run_id`` and ``progress_sink`` for *this* call. Tokens are reset in a
+    # ``finally`` so a concurrent task never inherits a stale binding.
+    tok_og_rid = _OG_RUN_ID.set(run_id)
+    tok_pe_rid = _PE_RUN_ID.set(run_id)
+    tok_pe_sink = _PE_SINK.set(wrapped_progress_sink)
+    try:
+        input_value: Any = None
+        if resume_decisions is not None:
+            from langgraph.types import Command  # noqa: PLC0415
+
+            input_value = Command(resume={"decisions": resume_decisions})
+        elif not resume_from_checkpoint:
+            messages = _history_to_messages(conversation_history)
+            messages.append(HumanMessage(content=prompt))
+            input_value = {"messages": messages}
+
+        async for event in supervisor.astream_events(input_value, config=config, version="v2"):
+            while middleware_events:
+                yield middleware_events.pop(0)
+
+            for envelope in translate_events(event, run_id=run_id, thinking_state=thinking_state):
+                if envelope.get("kind") == "human_interrupt":
+                    try:
+                        envelope = _persist_human_interrupt(
+                            store=human_request_store or store,
+                            run_id=run_id,
+                            actions=list(envelope.get("actions") or []),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - fail closed on a missing approval record
+                        envelope = {
+                            "kind": "run_state",
+                            "run_id": run_id,
+                            "state": "failed",
+                            "error": f"could not persist human approval request: {exc}",
+                        }
+                if progress_sink is not None:
+                    try:
+                        progress_sink(envelope)
+                    except Exception:  # noqa: BLE001 - observability must not sink a run
+                        pass
+                yield envelope
+
+        while middleware_events:
+            yield middleware_events.pop(0)
+    finally:
+        # Starlette can close a streamed async generator from its disconnect
+        # finalizer task rather than the task that created it. ContextVar
+        # tokens are task-bound, so resetting one from that finalizer raises a
+        # noisy ``Token ... was created in a different Context`` exception.
+        # Clear the current context in that defensive case; the originating
+        # request context is discarded with its task and cannot leak into the
+        # next request.
+        for variable, token in (
+            (_PE_SINK, tok_pe_sink),
+            (_PE_RUN_ID, tok_pe_rid),
+            (_OG_RUN_ID, tok_og_rid),
+        ):
+            try:
+                variable.reset(token)
+            except ValueError:
+                variable.set(None)

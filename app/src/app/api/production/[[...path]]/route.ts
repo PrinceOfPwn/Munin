@@ -23,10 +23,14 @@ const FORWARDED_HEADERS = ["accept", "content-type", "cookie", "idempotency-key"
  *   - `duplex: 'half'` on the outbound fetch is required by Node's undici to
  *     start streaming the response before the upstream is fully written.
  */
-async function proxy(request: Request, context: { params: { path?: string[] } }): Promise<Response> {
+async function proxy(
+  request: Request,
+  context: { params: Promise<{ path?: string[] }> },
+): Promise<Response> {
   const base = (process.env.MUNIN_PRODUCTION_API_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
   const incoming = new URL(request.url);
-  const path = (context.params.path || []).map(encodeURIComponent).join("/");
+  const { path: pathSegments = [] } = await context.params;
+  const path = pathSegments.map(encodeURIComponent).join("/");
   const headers = new Headers();
   for (const name of FORWARDED_HEADERS) {
     const value = request.headers.get(name);

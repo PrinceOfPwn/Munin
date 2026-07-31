@@ -40,7 +40,7 @@ Designed for authorized laboratories, internal exercises, and explicitly authori
 | :--- | :--- | :--- |
 | **MCP & HTTP Transport** | Asynchronous FastMCP server (`/mcp`) exposing all tools using Bearer tokens and HTTP state control. | `munin/mcp/main.py`, FastMCP, `streamable-http`. |
 | **ReAct Agent** | Reasoning loop (System Prompt, thought, action, observation) interacting with the dynamic tool catalog. | `munin_chat`, `munin_self_diagnose`. |
-| **Soul** | Markdown-based versioned agent identity (goals, identity, principles, skills). Controls behavior. | `soul_propose_edit`, `soul_reject_proposal`. |
+| **Soul** | Markdown-based versioned agent identity (goals, identity, principles, skills). Controls behavior. | `soul_propose_edit` → PR (human merge). |
 | **Memory** | Persistent storage of semantic knowledge (facts) and episodic knowledge (events/traces). | `memory_remember`, `memory_recall`, `episodic_query`. |
 | **Shared Intel** | Asynchronous sharing of findings among agents in the same campaign. | `publish_shared_intel`, `query_shared_intel`. |
 | **Hugin (RAG & Graphs)** | Query structured attack plans and hypotheses from the knowledge repository sibling. | `hugin_search`, `hugin_rag_search`, `hugin_plan_for`, `hugin_neighbors`, `hugin_node_detail`. |

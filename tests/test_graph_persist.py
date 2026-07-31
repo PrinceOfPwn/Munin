@@ -56,48 +56,11 @@ def test_graph_execution_contract_survives_store_and_manifest(store):
     assert restored and restored["execution_contract"] == contract
 
 
-def test_evidence_mesh_builds_auditable_hugin_context(store, monkeypatch):
-    from munin.mcp.tools import hugin_tool
-    from munin.subagents.runner import _ForgedGraphRunner
-
-    store.semantic_remember("engagement.scope", {"target": "example.org"})
-    monkeypatch.setattr(
-        hugin_tool,
-        "_load_cached",
-        lambda **_kwargs: (
-            {
-                "entities": [
-                    {
-                        "id": "technique-1",
-                        "label": "Example discovery technique",
-                        "category": "discovery",
-                        "tags": ["example", "research"],
-                    }
-                ]
-            },
-            12,
-            False,
-        ),
-    )
-    # Context generation is deterministic and should not require an LLM client.
-    runner = object.__new__(_ForgedGraphRunner)
-    runner.name = "researcher"
-    runner.state = store
-    runner.execution_contract = {
-        "context_sources": ["semantic_memory", "shared_intel", "hugin_cached_graph"],
-        "delivery": {"sections": ["Summary", "Evidence", "Next steps"]},
-    }
-
-    text, meta = runner._task_context({"prompt": "Research example discovery"})
-
-    assert "Evidence Mesh context" in text
-    assert "technique-1" in text
-    assert meta == {
-        "context_sources": ["semantic_memory", "shared_intel", "hugin_cached_graph"],
-        "fact_count": 1,
-        "intel_count": 0,
-        "hugin_count": 1,
-    }
+# test_evidence_mesh_builds_auditable_hugin_context was removed in Fase 2:
+# it exercised the legacy ``_ForgedGraphRunner._task_context`` helper from
+# ``munin.subagents.runner`` (Arch A subprocess subagent shim), which was
+# deleted alongside the dispatcher.  Evidence-mesh context assembly for
+# subagents is now covered by ``subagent_factory`` regression tests.
 
 
 def test_reset_purge_removes_only_on_reset_manifests(store):

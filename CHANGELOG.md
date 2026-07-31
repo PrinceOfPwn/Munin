@@ -45,6 +45,14 @@ ready to ship for either free-tier (artifact roundtrip) or Turso persistence.
 Selected highlights (see `ARCHITECTURE.md` "What was broken and now works"
 for the full list):
 
+- **`persisted_subagent_dict` agents could never run** — `create_subagent`
+  produced the Deep Agents `SubAgent` declaration dict, but
+  `SubagentFactory.invoke_subagent` raised `NotImplementedError` for any
+  dict lacking `purpose`, and the fallback branch would fail validation
+  (`SubagentSpec` has `extra="forbid"`). Now the declaration is normalized
+  (description → purpose, tool objects → names, non-str model dropped) and
+  materialized as a `compiled_langgraph` runnable at invoke time.
+
 - **`munin_wake` didn't spawn a runner** — enqueued the task, then nobody
   spawned `python -m munin.subagents.runner`. Now delegates to
   `Orchestrator.wake` which is atomic + idempotent

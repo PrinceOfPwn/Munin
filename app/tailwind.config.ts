@@ -42,8 +42,14 @@ const config: Config = {
         amber: "#f59e0b",
       },
       fontFamily: {
-        sans: ["Inter", "Geist", "system-ui", "sans-serif"],
-        mono: ["Geist Mono", "JetBrains Mono", "ui-monospace", "monospace"],
+        sans: ["var(--font-inter)", "Inter", "Geist", "system-ui", "sans-serif"],
+        mono: [
+          "var(--font-geist-mono)",
+          "Geist Mono",
+          "JetBrains Mono",
+          "ui-monospace",
+          "monospace",
+        ],
       },
       borderRadius: {
         DEFAULT: "6px",

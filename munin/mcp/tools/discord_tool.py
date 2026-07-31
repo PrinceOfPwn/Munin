@@ -8,13 +8,22 @@ from mcp.server.fastmcp import FastMCP
 
 from ...integrations.discord_bridge import get_bridge, post_to_discord
 from ...integrations.discord_config import get_discord_config
+from ..audit import redact_secrets
 
 
 def send_discord_message(content: str, run_id: str = "") -> dict[str, Any]:
-    """Send a concise operator notification; never use it for raw secrets."""
+    """Send a concise operator notification with enforced secret filtering.
+
+    SECURITY: Content is automatically redacted before publication.
+    For sensitive operations, route through HITL approval workflow first.
+    """
     if not get_discord_config().outbound_enabled:
         return {"ok": False, "tool": "send_discord_message", "mode": "sync", "summary": "Discord is not configured", "error": {"code": "discord_not_configured", "message": "Set token and channel ID"}}
-    accepted = post_to_discord(content)
+    redacted_content = redact_secrets(content)
+    if redacted_content != content:
+        import logging
+        logging.getLogger(__name__).warning("send_discord_message: secrets redacted from outbound message")
+    accepted = post_to_discord(redacted_content)
     return {"ok": accepted, "tool": "send_discord_message", "mode": "sync", "summary": "Discord message queued" if accepted else "Discord bridge is not connected", "data": (get_bridge() or None).status() if get_bridge() else {}}
 
 

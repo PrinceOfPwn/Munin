@@ -136,8 +136,8 @@ class LLMClient:
                 content_parts.append(text)
                 emit_llm_stream({"stage": "assistant_delta", "delta": text, "message": text})
 
-            for field in _REASONING_FIELDS:
-                value = delta.get(field)
+            for reasoning_field in _REASONING_FIELDS:
+                value = delta.get(reasoning_field)
                 if isinstance(value, str) and value:
                     reasoning_parts.append(value)
                     emit_llm_stream(

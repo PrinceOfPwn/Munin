@@ -1,18 +1,35 @@
-"use client";
+﻿"use client";
 
+// -----------------------------------------------------------------------------
+// queries.ts â€” Fase 2 (issue #9) trimmed to the conversation aggregate.
+//
+// Everything else (runs, run detail, agents, provider profiles, HITL,
+// artifacts, conversation-detail with SSE polling) used dispatcher-only
+// endpoints that were deleted in Fase 2.  Runtime state now flows through
+// `useMuninChat` in `aiChat.ts`.
+//
+// Browser-cache integration (issue #9 cache layer):
+//   * `useConversations` paints instantly from the IndexedDB mirror via
+//     `placeholderData` (v5 name â€” `keepPreviousData` the option is gone),
+//     then background-refetches; every successful server list is written
+//     through to IndexedDB.
+//   * create / rename / archive run the v5 optimistic pattern
+//     (onMutate â†’ setQueryData + IndexedDB write-through â†’ server call â†’
+//     onSuccess reconcile / onError rollback â†’ onSettled invalidate).
+// -----------------------------------------------------------------------------
+
+import { useEffect } from "react";
 import {
-  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
+  type QueryClient,
+  type QueryKey,
 } from "@tanstack/react-query";
-import {
-  productionApi,
-  type Conversation,
-  type ConversationDetail,
-  type TimelineMessage,
-} from "./production-api";
-import { isTerminalRun } from "./utils";
+
+import { useBrowserCache } from "@/lib/cache";
+import { uuid } from "@/lib/utils";
+import { productionApi, type Conversation } from "./production-api";
 
 type CreatedConversation = Partial<Conversation> & {
   id: string;
@@ -33,217 +50,185 @@ function normalizeCreatedConversation(raw: CreatedConversation): Conversation {
   };
 }
 
+/** Roll back every conversation query to a captured snapshot. */
+function restoreConversationQueries(
+  qc: ReturnType<typeof useQueryClient>,
+  previous: Array<[unknown, Conversation[] | undefined]>,
+): void {
+  for (const [key, data] of previous) {
+    if (data !== undefined) qc.setQueryData(key as never, data as never);
+  }
+}
+
+/** Snapshot all `["conversations", ...]` queries for optimistic rollback. */
+function snapshotConversationQueries(
+  qc: ReturnType<typeof useQueryClient>,
+): Array<[unknown, Conversation[] | undefined]> {
+  return qc.getQueriesData<Conversation[]>({ queryKey: ["conversations"] });
+}
+
 /** Base list of conversations, filtered by an optional server-side query. */
 export function useConversations(query = "") {
-  return useQuery({
+  const { cachedConversations, writeConversations } = useBrowserCache();
+
+  const result = useQuery({
     queryKey: ["conversations", query],
     queryFn: () => productionApi.conversations(query),
     staleTime: 30_000,
-    placeholderData: keepPreviousData,
-  });
-}
-
-/**
- * One conversation with its message timeline + runs.
- *
- * SSE is the fast path, but it is deliberately not the only path. A short
- * polling fallback remains active while a run is non-terminal so a tunnel or
- * Turso stream hiccup cannot leave an empty assistant placeholder on screen.
- */
-export function useConversation(id: string | null, sseHealthy = false) {
-  return useQuery({
-    queryKey: ["conversation", id],
-    queryFn: () => (id ? productionApi.conversation(id) : Promise.resolve<ConversationDetail | null>(null)),
-    enabled: !!id,
-    staleTime: 10_000,
-    refetchInterval: (query) => {
-      const data = query.state.data as ConversationDetail | null | undefined;
-      if (!data) return 5_000;
-      if (!data.runs.some((run) => !isTerminalRun(run.state))) return false;
-      return sseHealthy ? 10_000 : 5_000;
+    // Cache-first: the unfiltered cached list paints instantly while the
+    // server list refetches in the background. Search queries stay on
+    // `keepPreviousData` â€” the server-side filter does not match the cache.
+    placeholderData: (previous) => {
+      if (previous) return previous;
+      return query === "" ? cachedConversations : undefined;
     },
   });
+
+  // Write-through: persist every successful server list into IndexedDB.
+  // (v5 removed onSuccess from useQuery â€” an effect on data is the pattern.)
+  useEffect(() => {
+    if (result.data && result.data.length > 0) {
+      writeConversations(result.data);
+    }
+  }, [result.data, writeConversations]);
+
+  return result;
 }
 
-/** Fine-grained run detail. SSE updates this cache and polling repairs gaps. */
-export function useRunDetail(id: string | null) {
-  return useQuery({
-    queryKey: ["run", id, "detail"],
-    queryFn: () => (id ? productionApi.runDetail(id) : null),
-    enabled: !!id,
-    staleTime: 5_000,
-    refetchInterval: (query) => {
-      const data = query.state.data as Awaited<ReturnType<typeof productionApi.runDetail>> | null | undefined;
-      if (!data) return 5_000;
-      return isTerminalRun(data.run.state) ? false : 5_000;
-    },
-  });
-}
-
-/** Queued + delivered operator guidance for a run. */
-export function useRunGuidance(id: string | null) {
-  return useQuery({
-    queryKey: ["run", id, "guidance"],
-    queryFn: () => (id ? productionApi.listRunGuidance(id) : Promise.resolve([])),
-    enabled: !!id,
-    staleTime: 30_000,
-  });
-}
-
-export function useAgents() {
-  return useQuery({
-    queryKey: ["agents"],
-    queryFn: () => productionApi.agents(),
-    staleTime: 60_000,
-  });
-}
-
-export function useProviderProfiles() {
-  return useQuery({
-    queryKey: ["provider-profiles"],
-    queryFn: () => productionApi.providerProfiles(),
-    staleTime: 30_000,
-  });
-}
-
-export function useArtifact(id: string | null) {
-  return useQuery({
-    queryKey: ["artifact", id],
-    queryFn: () => (id ? productionApi.artifact(id) : null),
-    enabled: !!id,
-  });
-}
-
-// ── Mutations with optimistic cache updates ────────────────────────────────
-
-export function useSendTurn() {
+export function useCreateConversation() {
   const qc = useQueryClient();
+  const { upsertConversation, removeConversation } = useBrowserCache();
+
   return useMutation({
-    mutationFn: async (input: { conversationId: string; content: string; idempotencyKey: string }) =>
-      productionApi.turn(input.conversationId, input.content, input.idempotencyKey),
-    onMutate: async (variables) => {
-      const key = ["conversation", variables.conversationId] as const;
-      await qc.cancelQueries({ queryKey: key });
-      const previous = qc.getQueryData<ConversationDetail | null>(key);
-      const previousLists = qc.getQueriesData<Conversation[]>({ queryKey: ["conversations"] });
-      const now = Date.now();
-
-      if (previous) {
-        const lastSequence = previous.messages.at(-1)?.sequence || 0;
-        const optimistic: TimelineMessage = {
-          id: `optimistic-${variables.idempotencyKey}`,
-          kind: "user",
-          status: "pending",
-          content: variables.content,
-          sequence: lastSequence + 1,
-        };
-        qc.setQueryData<ConversationDetail>(key, {
-          ...previous,
-          conversation: {
-            ...previous.conversation,
-            last_activity_at_ms: now,
-            message_count: Number(previous.conversation.message_count || 0) + 1,
-          },
-          messages: [...previous.messages, optimistic],
-        });
-      }
-
-      qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) =>
-        items?.map((item) =>
-          item.id === variables.conversationId
-            ? { ...item, last_activity_at_ms: now, message_count: Number(item.message_count || 0) + 1 }
-            : item,
-        ),
+    mutationFn: async (title?: string) =>
+      normalizeCreatedConversation(
+        (await productionApi.createConversation(title)) as CreatedConversation,
+      ),
+    onMutate: async (title) => {
+      await qc.cancelQueries({ queryKey: ["conversations"] });
+      const previous = snapshotConversationQueries(qc);
+      const tempId = `local-${uuid()}`;
+      const temp: Conversation = {
+        id: tempId,
+        title: (title ?? "").trim() || "New operation",
+        status: "active",
+        tags: [],
+        last_activity_at_ms: Date.now(),
+        message_count: 0,
+        version: 1,
+      };
+      qc.setQueriesData<Conversation[]>(
+        { queryKey: ["conversations"] },
+        (items) => [temp, ...(items ?? [])],
       );
-
-      return { previous, previousLists };
+      upsertConversation(temp);
+      return { previous, tempId };
     },
-    onError: (_error, variables, context) => {
-      if (context?.previous) {
-        qc.setQueryData(["conversation", variables.conversationId], context.previous);
-      }
-      context?.previousLists?.forEach(([key, data]) => qc.setQueryData(key, data));
+    onSuccess: (conversation, _variables, context) => {
+      if (!context) return;
+      qc.setQueriesData<Conversation[]>(
+        { queryKey: ["conversations"] },
+        (items) =>
+          items?.map((item) =>
+            item.id === context.tempId ? conversation : item,
+          ),
+      );
+      upsertConversation(conversation);
     },
-    onSuccess: () => {
+    onError: (_error, _variables, context) => {
+      if (!context) return;
+      restoreConversationQueries(qc, context.previous);
+      removeConversation(context.tempId);
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
-    },
-    onSettled: (_data, _error, variables) => {
-      qc.invalidateQueries({ queryKey: ["conversation", variables.conversationId] });
     },
   });
 }
 
-export function useCancelRun() {
+export function useRenameConversation() {
   const qc = useQueryClient();
+  const { upsertConversation } = useBrowserCache();
+
   return useMutation({
-    mutationFn: (runId: string) => productionApi.cancelRun(runId),
-    onSuccess: (run) => {
-      qc.invalidateQueries({ queryKey: ["run", run.id, "detail"] });
-      qc.invalidateQueries({ queryKey: ["conversation"], refetchType: "active" });
-      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
+    mutationFn: (input: { id: string; version: number; title: string }) =>
+      productionApi.renameConversation(input.id, input.version, input.title),
+    onMutate: async ({ id, title }) => {
+      await qc.cancelQueries({ queryKey: ["conversations"] });
+      const previous = snapshotConversationQueries(qc);
+      const current = qc
+        .getQueryData<Conversation[]>(["conversations", ""])
+        ?.find((item) => item.id === id);
+      qc.setQueriesData<Conversation[]>(
+        { queryKey: ["conversations"] },
+        (items) =>
+          items?.map((item) => (item.id === id ? { ...item, title } : item)),
+      );
+      if (current) upsertConversation({ ...current, title });
+      return { previous };
     },
-  });
-}
-
-export function useRetryRun() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (runId: string) => productionApi.retryRun(runId),
-    onSuccess: (run) => {
-      qc.invalidateQueries({ queryKey: ["run", run.id, "detail"] });
-      qc.invalidateQueries({ queryKey: ["conversation"], refetchType: "active" });
-      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
+    onSuccess: (updated, variables) => {
+      qc.setQueriesData<Conversation[]>(
+        { queryKey: ["conversations"] },
+        (items) =>
+          items?.map((item) =>
+            item.id === variables.id ? { ...item, ...updated } : item,
+          ),
+      );
+      upsertConversation(updated);
     },
-  });
-}
-
-export function useGuideRun() {
-  return useMutation({
-    mutationFn: (input: { runId: string; guidance: string }) =>
-      productionApi.guideRun(input.runId, input.guidance),
-  });
-}
-
-export function useResolveHumanRequest() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { requestId: string; choice: string; nonce?: string; guidance?: string }) =>
-      productionApi.resolveHumanRequest(input.requestId, input.choice, input.nonce, input.guidance),
-    onSuccess: () => {
+    onError: (_error, _variables, context) => {
+      if (!context) return;
+      restoreConversationQueries(qc, context.previous);
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
-      qc.invalidateQueries({ queryKey: ["run"], refetchType: "active" });
     },
   });
 }
 
 export function useArchiveConversation() {
   const qc = useQueryClient();
+  const { upsertConversation, removeConversation } = useBrowserCache();
+
   return useMutation({
     mutationFn: (input: { id: string; version: number; archived: boolean }) =>
       productionApi.archiveConversation(input.id, input.version, input.archived),
-    onSuccess: (_conversation, variables) => {
-      qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) =>
-        variables.archived ? items?.filter((item) => item.id !== variables.id) : items,
+    onMutate: async ({ id, archived }) => {
+      await qc.cancelQueries({ queryKey: ["conversations"] });
+      const previous = snapshotConversationQueries(qc);
+      const current = qc
+        .getQueryData<Conversation[]>(["conversations", ""])
+        ?.find((item) => item.id === id);
+      qc.setQueriesData<Conversation[]>(
+        { queryKey: ["conversations"] },
+        (items) =>
+          archived ? items?.filter((item) => item.id !== id) : items,
       );
-      qc.invalidateQueries({ queryKey: ["conversation", variables.id] });
-      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
+      if (current) {
+        if (archived) removeConversation(id);
+        else upsertConversation({ ...current, status: "active" });
+      }
+      return { previous };
     },
-  });
-}
-
-export function useCreateConversation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (title?: string) =>
-      normalizeCreatedConversation(
-        (await productionApi.createConversation(title)) as CreatedConversation,
-      ),
-    onSuccess: (conversation) => {
-      qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) => {
-        if (!items) return [conversation];
-        if (items.some((item) => item.id === conversation.id)) return items;
-        return [conversation, ...items];
-      });
+    onSuccess: (updated, variables) => {
+      qc.setQueriesData<Conversation[]>(
+        { queryKey: ["conversations"] },
+        (items) =>
+          variables.archived
+            ? items?.filter((item) => item.id !== variables.id)
+            : items?.map((item) =>
+                item.id === variables.id ? { ...item, ...updated } : item,
+              ),
+      );
+      if (variables.archived) removeConversation(variables.id);
+      else upsertConversation(updated);
+    },
+    onError: (_error, _variables, context) => {
+      if (!context) return;
+      restoreConversationQueries(qc, context.previous);
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     },
   });

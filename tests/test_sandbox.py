@@ -7,7 +7,6 @@ generated script run.
 
 from __future__ import annotations
 
-import pytest
 
 
 def test_plain_arithmetic_ok():
