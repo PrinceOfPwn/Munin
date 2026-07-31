@@ -1,5 +1,65 @@
 # Changes
 
+## 2026-07-31 — Auth lock contention fix + PR #12 CI typecheck fix
+
+### `munin/production/store.py` — auth/lock throughput (operator-reported auth taking minutes)
+
+Operator diagnosis confirmed: every database path — including read-only auth
+flows (`authenticate`, `validate_csrf`, `refresh_csrf`, `session_record`) — was
+opening a write transaction via `_transaction()` with `BEGIN IMMEDIATE`, which
+acquires SQLite's RESERVED lock. Combined with `busy_timeout=30000`, each auth
+call could stall up to 30s behind a long write (run persisting events, AES-GCM
+per-row artifact encryption). The login flow chains several of these calls, so
+UI spinners accumulated to 2-3 minutes.
+
+- **Split store I/O into two contexts.**
+  - `_transaction()` (unchanged behavior): `BEGIN IMMEDIATE`, reserved for
+    paths that mutate state. Only mutations go here.
+  - `_read_only()` (new): `BEGIN DEFERRED`, never takes the RESERVED lock. Under
+    WAL any number of readers proceed concurrently with the single writer.
+- **`authenticate()`**: read path moved to `_read_only()`. The best-effort
+  `last_seen_at_ms` / idle-rotation UPDATE is now a separate short
+  `_transaction()` that only takes the RESERVED lock for its single statement
+  (instead of holding it across the SELECT). Lock contention on that write is
+  swallowed rather than failing auth — the next request retries the bookkeeping.
+- **`validate_csrf`, `session_record`**: moved from bare `self._connect()` to
+  `_read_only()` for a guaranteed read snapshot and consistent cleanup.
+- **Other read paths** (`schema_tables`, `applied_migration_ids`, `get_artifact`,
+  `run_execution_context`, `get_run`, `get_run_for_actor`,
+  `get_run_detail_for_actor`, `list_run_events`, `get_conversation`,
+  `list_conversations`, `export_conversation`, `reveal_provider_key`,
+  `list_provider_profiles`, `rotate_provider_profile`'s read phase,
+  `recorded_replay`, `compare_operation_branch`): all moved to `_read_only()`.
+- **Connection defaults lowered**: `timeout=30` → `timeout=2`,
+  `busy_timeout=30000` → `busy_timeout=2000`, and `journal_mode=WAL` forced per
+  connection. A saturated writer now fails the request fast (UI can show
+  "backend busy") instead of holding a 30s spinner.
+
+Net effect: read paths (auth, listings, run detail, SSE event pump reads) no
+longer queue behind the RESERVED lock; the only serial point left is genuine
+mutation, and each mutation is shorter because encryption writes are no longer
+sharing a transaction with the auth SELECTs.
+
+### `app/src/app/api/chat/[[...path]]/route.ts` — CI fix (commit f56a2a7 broke `Munin CI`)
+
+`next build` typecheck failed at `route.ts:59`:
+
+```
+Type error: Conversion of type 'BackendEnvelope' to type 'Record<string, unknown>'
+may be a mistake because neither type sufficiently overlaps with the other.
+If this was intentional, convert the expression to 'unknown' first.
+  Index signature for type 'string' is missing in type 'BackendEnvelope'.
+```
+
+The dynamic top-level field copy did `(normalized as Record<string, unknown>)[field]`,
+which TS strict mode rejects because `BackendEnvelope` is a typed interface
+without an index signature. Fixed by casting via `unknown` (TS's own
+suggestion): `normalized as unknown as Record<string, unknown>`. Behavior is
+identical (same fields assigned, same `Object.assign` of `event.payload`).
+Verified locally: `tsc --noEmit` clean, `vitest run translator.test.ts` 19/19 pass.
+
+---
+
 ## 2026-07-30 — Migration plan for issue #9 (Deep Agents + LangGraph + Vercel AI SDK)
 
 **Added**: `GLUE_INVENTORY.md`, `IMPROVEMENT_BACKLOG.md`, `IMPLEMENTATION_ROADMAP.md`

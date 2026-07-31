@@ -54,14 +54,19 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
     "output", "error", "subagent_id", "name", "state", "request_id", "args", "resolution",
     "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds"];
 
+  // Cast via `unknown` because BackendEnvelope is a typed interface without an
+  // index signature; assigning dynamic string-keyed fields onto it requires an
+  // explicit narrowing that `as Record<string, unknown>` alone refuses under
+  // strict mode.
+  const normalizedRecord = normalized as unknown as Record<string, unknown>;
   for (const field of topLevelFields) {
     if (field in event && event[field] !== undefined) {
-      (normalized as Record<string, unknown>)[field] = event[field];
+      normalizedRecord[field] = event[field];
     }
   }
 
   if (event.payload && typeof event.payload === "object") {
-    Object.assign(normalized, event.payload);
+    Object.assign(normalizedRecord, event.payload);
   }
 
   return normalized;

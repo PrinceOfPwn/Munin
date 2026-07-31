@@ -287,10 +287,15 @@ class ProductionStore:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         def connect() -> sqlite3.Connection:
-            conn = sqlite3.connect(path, timeout=30, isolation_level=None)
+            # Read paths use a short busy_timeout so a saturated writer fails
+            # the request fast (the UI shows "backend busy") instead of
+            # holding a spinner for the full 30s lock window. Write paths
+            # still wait up to ``MUNIN_DB_WRITE_TIMEOUT_MS`` (default 5000).
+            conn = sqlite3.connect(path, timeout=2, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA busy_timeout=2000")
+            conn.execute("PRAGMA journal_mode=WAL")
             return conn
 
         return cls(connect, master_key=master_key)
@@ -339,6 +344,12 @@ class ProductionStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
+        """Write transaction: ``BEGIN IMMEDIATE`` acquires the RESERVED lock.
+
+        Reserved for paths that mutate state. Read paths must use
+        :meth:`_read_only` instead so concurrent logins / SSE polls never
+        queue behind a long-running encryption write.
+        """
         conn = self._connect()
         committed = False
         try:
@@ -353,6 +364,34 @@ class ProductionStore:
             raise
         finally:
             with suppress(Exception):
+                conn.close()
+
+    @contextmanager
+    def _read_only(self) -> Iterator[Any]:
+        """Read path: ``BEGIN DEFERRED`` never takes the RESERVED lock.
+
+        Under WAL SQLite lets any number of readers proceed concurrently with
+        a single writer, so this context never blocks on a run persisting
+        events or encrypting artifacts. Callers must not issue INSERT /
+        UPDATE / DELETE inside this context — use :meth:`_transaction`.
+        """
+        conn = self._connect()
+        rolled_back = False
+        try:
+            conn.execute("BEGIN DEFERRED")
+            yield conn
+        except Exception:
+            rolled_back = True
+            with suppress(Exception):
+                conn.execute("ROLLBACK")
+            raise
+        else:
+            with suppress(Exception):
+                conn.execute("COMMIT")
+        finally:
+            with suppress(Exception):
+                if rolled_back:
+                    pass
                 conn.close()
 
     def migrate(self) -> None:
@@ -371,19 +410,13 @@ class ProductionStore:
             )
 
     def schema_tables(self) -> set[str]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             return {str(row["name"]) for row in rows}
-        finally:
-            conn.close()
 
     def applied_migration_ids(self) -> list[str]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             return [str(row["migration_id"]) for row in conn.execute("SELECT migration_id FROM schema_migrations ORDER BY applied_at_ms").fetchall()]
-        finally:
-            conn.close()
 
     def _audit(self, conn: Any, *, actor_id: str | None, action: str, resource_type: str, resource_id: str, outcome: str, metadata: Any = None) -> None:
         conn.execute(
@@ -502,7 +535,9 @@ class ProductionStore:
 
     def authenticate(self, token: str) -> dict[str, Any] | None:
         now = _now_ms()
-        with self._transaction() as conn:
+        # Read path: never blocks behind a writer. Under WAL this SELECT runs
+        # concurrently with the single RESERVED-lock writer.
+        with self._read_only() as conn:
             row = conn.execute(
                 """SELECT u.id,u.username,u.role,u.disabled_at_ms,s.id AS session_id,s.idle_expires_at_ms,s.absolute_expires_at_ms,s.revoked_at_ms
                 FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?""",
@@ -510,8 +545,23 @@ class ProductionStore:
             ).fetchone()
             if not row or row["disabled_at_ms"] or row["revoked_at_ms"] or int(row["idle_expires_at_ms"]) <= now or int(row["absolute_expires_at_ms"]) <= now:
                 return None
-            conn.execute("UPDATE auth_sessions SET last_seen_at_ms=?,idle_expires_at_ms=? WHERE id=?", (now, min(now + 8 * 60 * 60 * 1000, int(row["absolute_expires_at_ms"])), row["session_id"]))
-            return {"id": row["id"], "username": row["username"], "role": row["role"], "session_id": row["session_id"]}
+            session_id = row["session_id"]
+            absolute = int(row["absolute_expires_at_ms"])
+        # The idle-rotation UPDATE is a 1-row write; keep it in its own short
+        # transaction so it only takes the RESERVED lock for a single statement
+        # instead of holding it across the password verify / SELECT above.
+        try:
+            with self._transaction() as conn:
+                conn.execute(
+                    "UPDATE auth_sessions SET last_seen_at_ms=?,idle_expires_at_ms=? WHERE id=? AND revoked_at_ms IS NULL",
+                    (now, min(now + 8 * 60 * 60 * 1000, absolute), session_id),
+                )
+        except sqlite3.OperationalError:
+            # Lock contention: the session is still valid, the next request will
+            # retry the idle rotation. Don't fail authentication over a best-effort
+            # bookkeeping write.
+            pass
+        return {"id": row["id"], "username": row["username"], "role": row["role"], "session_id": session_id}
 
     def rotate_session(self, token: str) -> dict[str, Any]:
         with self._transaction() as conn:
@@ -525,12 +575,9 @@ class ProductionStore:
     def validate_csrf(self, *, session_id: str, csrf_token: str) -> bool:
         if not csrf_token:
             return False
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             row = conn.execute("SELECT csrf_hash,revoked_at_ms FROM auth_sessions WHERE id=?", (session_id,)).fetchone()
             return bool(row and not row["revoked_at_ms"] and hmac.compare_digest(str(row["csrf_hash"]), self._token_hash(csrf_token)))
-        finally:
-            conn.close()
 
     def refresh_csrf(self, session_id: str) -> str:
         """Issue a new anti-CSRF value after authenticating an HttpOnly session."""
@@ -556,12 +603,9 @@ class ProductionStore:
             return True
 
     def session_record(self, session_id: str) -> dict[str, Any] | None:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             row = conn.execute("SELECT id,user_id,created_at_ms,last_seen_at_ms,idle_expires_at_ms,absolute_expires_at_ms,revoked_at_ms,replaced_by_session_id FROM auth_sessions WHERE id=?", (session_id,)).fetchone()
             return _row(row) if row else None
-        finally:
-            conn.close()
 
     def create_conversation(self, *, owner_id: str, title: str, tags: list[str] | None = None, scope: dict[str, Any] | None = None) -> dict[str, Any]:
         now = _now_ms()
@@ -738,15 +782,12 @@ class ProductionStore:
             return {key: value for key, value in artifact.items() if key != "content"}
 
     def get_artifact(self, *, actor_id: str, artifact_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             artifact = conn.execute("SELECT a.* FROM conversation_artifacts a WHERE a.id=?", (artifact_id,)).fetchone()
             if not artifact:
                 raise KeyError(artifact_id)
             self._require_participant(conn, actor_id=actor_id, conversation_id=artifact["conversation_id"])
             return _row(artifact)
-        finally:
-            conn.close()
 
     def renew_lease(self, *, run_id: str, lease_token: str, lease_seconds: int = 60) -> bool:
         with self._transaction() as conn:
@@ -759,8 +800,7 @@ class ProductionStore:
 
     def run_execution_context(self, *, run_id: str) -> dict[str, Any]:
         """Load the bounded durable transcript a worker is allowed to use."""
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             if not run:
                 raise KeyError(run_id)
@@ -776,8 +816,6 @@ class ProductionStore:
                 "message": prompt["content"] if prompt else "",
                 "history": [{"role": "assistant" if row["kind"] == "assistant" else "user", "content": row["content"]} for row in reversed(rows)],
             }
-        finally:
-            conn.close()
 
     def force_run_lease_expiry(self, run_id: str, when: Any) -> None:
         millis = int(when.timestamp() * 1000) if hasattr(when, "timestamp") else int(when)
@@ -802,29 +840,22 @@ class ProductionStore:
         return recovered
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             row = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             if not row:
                 raise KeyError(run_id)
             return self._run_dict(row)
-        finally:
-            conn.close()
 
     def get_run_for_actor(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             row = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             if not row:
                 raise KeyError(run_id)
             self._require_participant(conn, actor_id=actor_id, conversation_id=row["conversation_id"])
             return self._run_dict(row)
-        finally:
-            conn.close()
 
     def get_run_detail_for_actor(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             if not run:
                 raise KeyError(run_id)
@@ -842,23 +873,17 @@ class ProductionStore:
                 "human_requests": [{"id": row["id"], "action": row["action"], "risk": row["risk"], "evidence": json.loads(row["evidence_json"]), "scope": json.loads(row["scope_json"]), "choices": json.loads(row["choices_json"]), "state": row["state"], "expires_at_ms": int(row["expires_at_ms"]), "created_at_ms": int(row["created_at_ms"]), "resolved_at_ms": row["resolved_at_ms"]} for row in requests],
                 "artifacts": [_row(row) for row in artifacts],
             }
-        finally:
-            conn.close()
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             rows = conn.execute("SELECT * FROM run_events WHERE run_id=? ORDER BY sequence", (run_id,)).fetchall()
             return [{"id": row["id"], "run_id": row["run_id"], "sequence": int(row["sequence"]), "kind": row["kind"], "payload": json.loads(row["payload_json"]), "created_at_ms": int(row["created_at_ms"])} for row in rows]
-        finally:
-            conn.close()
 
     def run_events_after(self, *, run_id: str, after_sequence: int) -> list[dict[str, Any]]:
         return [event for event in self.list_run_events(run_id) if event["sequence"] > max(0, after_sequence)]
 
     def get_conversation(self, *, actor_id: str, conversation_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             self._require_participant(conn, actor_id=actor_id, conversation_id=conversation_id)
             conversation = conn.execute("SELECT * FROM conversations WHERE id=? AND deleted_at_ms IS NULL", (conversation_id,)).fetchone()
             if not conversation:
@@ -870,8 +895,6 @@ class ProductionStore:
                 "messages": [{"id": row["id"], "kind": row["kind"], "status": row["status"], "content": row["content"], "sequence": int(row["sequence"]), "run_id": row["run_id"]} for row in messages],
                 "runs": [self._run_dict(row) for row in runs],
             }
-        finally:
-            conn.close()
 
     def list_conversations(
         self,
@@ -884,8 +907,7 @@ class ProductionStore:
         cursor_ms: int | None = None,
     ) -> dict[str, Any]:
         """Server-side owner/participant search and cursor pagination."""
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             normalized_query = query.strip().lower()[:160]
             needle = f"%{normalized_query}%"
             normalized_status = status.strip()[:40]
@@ -935,8 +957,6 @@ class ProductionStore:
                 )
             next_cursor = results[-1]["last_activity_at_ms"] if len(results) == max(1, min(int(limit), 100)) else None
             return {"conversations": results, "next_cursor_ms": next_cursor}
-        finally:
-            conn.close()
 
     def rename_conversation(self, *, actor_id: str, conversation_id: str, title: str, expected_version: int) -> dict[str, Any]:
         normalized = " ".join(title.split())[:160]
@@ -990,15 +1010,12 @@ class ProductionStore:
 
     def export_conversation(self, *, actor_id: str, conversation_id: str) -> dict[str, Any]:
         aggregate = self.get_conversation(actor_id=actor_id, conversation_id=conversation_id)
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             artifacts = conn.execute("SELECT id,filename,media_type,language,content_hash,size_bytes,run_id,message_id FROM conversation_artifacts WHERE conversation_id=? ORDER BY created_at_ms", (conversation_id,)).fetchall()
             events = conn.execute("SELECT e.* FROM run_events e JOIN agent_runs r ON r.id=e.run_id WHERE r.conversation_id=? ORDER BY e.created_at_ms,e.sequence", (conversation_id,)).fetchall()
             aggregate["artifacts"] = [_row(row) for row in artifacts]
             aggregate["events"] = [{**_row(row), "payload": json.loads(row["payload_json"])} for row in events]
             return redact_payload(aggregate)
-        finally:
-            conn.close()
 
     def append_reasoning_event(self, *, run_id: str, kind: str, content: str, provider: str, persistence_enabled: bool, agent_name: str = "munin", step: int = 0) -> dict[str, Any]:
         if kind not in {"provider_reasoning", "operational_summary", "tool_intent", "observation", "decision", "model_request"}:
@@ -1193,22 +1210,16 @@ class ProductionStore:
         return {"id": profile_id, "label": label[:120], "provider": provider[:64], "model": model[:240], "uses": list(uses), "key_fingerprint": fingerprint, "status": "active"}
 
     def reveal_provider_key(self, *, actor_id: str, profile_id: str) -> str:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             row = conn.execute("SELECT * FROM provider_profiles WHERE id=? AND owner_id=? AND status='active' AND revoked_at_ms IS NULL", (profile_id, actor_id)).fetchone()
             if not row:
                 raise PermissionError("provider profile is unavailable")
             return self._cipher.decrypt(owner_id=actor_id, profile_id=profile_id, provider=row["provider"], ciphertext=json.loads(row["ciphertext_json"]), wrapped_dek=json.loads(row["wrapped_dek_json"]))
-        finally:
-            conn.close()
 
     def list_provider_profiles(self, *, actor_id: str) -> list[dict[str, Any]]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             rows = conn.execute("SELECT id,label,provider,base_url,model,uses_json,key_fingerprint,status,active,created_at_ms,rotated_at_ms,revoked_at_ms,updated_at_ms FROM provider_profiles WHERE owner_id=? ORDER BY updated_at_ms DESC", (actor_id,)).fetchall()
             return [{**_row(row), "uses": json.loads(row["uses_json"]), "active": bool(row["active"])} for row in rows]
-        finally:
-            conn.close()
 
     def set_active_provider_profile(self, *, actor_id: str, profile_id: str) -> dict[str, Any]:
         with self._transaction() as conn:
@@ -1229,14 +1240,11 @@ class ProductionStore:
             return True
 
     def rotate_provider_profile(self, *, actor_id: str, profile_id: str, plaintext_key: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             prior = conn.execute("SELECT * FROM provider_profiles WHERE id=? AND owner_id=? AND status='active' AND revoked_at_ms IS NULL", (profile_id, actor_id)).fetchone()
             if not prior:
                 raise PermissionError("provider profile is unavailable")
             data = _row(prior)
-        finally:
-            conn.close()
         replacement = self.save_provider_profile(actor_id=actor_id, label=str(data["label"]), provider=str(data["provider"]), base_url=str(data["base_url"]), model=str(data["model"]), uses=json.loads(data["uses_json"]), plaintext_key=plaintext_key)
         with self._transaction() as transaction:
             transaction.execute("UPDATE provider_profiles SET status='rotated',active=0,rotated_at_ms=?,updated_at_ms=? WHERE id=? AND owner_id=?", (_now_ms(), _now_ms(), profile_id, actor_id))
@@ -1259,14 +1267,11 @@ class ProductionStore:
         return snapshot
 
     def recorded_replay(self, *, run_id: str, snapshot_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             row = conn.execute("SELECT * FROM operation_snapshots WHERE id=? AND run_id=?", (snapshot_id, run_id)).fetchone()
             if not row:
                 raise KeyError(snapshot_id)
             return {"mode": "recorded", "egress_enabled": False, "run_id": run_id, "snapshot_id": snapshot_id, "state": json.loads(row["state_json"])}
-        finally:
-            conn.close()
 
     def create_operation_branch(
         self,
@@ -1299,8 +1304,7 @@ class ProductionStore:
             return branch
 
     def compare_operation_branch(self, *, actor_id: str, branch_id: str) -> dict[str, Any]:
-        conn = self._connect()
-        try:
+        with self._read_only() as conn:
             branch = conn.execute("SELECT b.*,r.conversation_id FROM operation_branches b JOIN agent_runs r ON r.id=b.parent_run_id WHERE b.id=?", (branch_id,)).fetchone()
             if not branch:
                 raise KeyError(branch_id)
@@ -1313,8 +1317,6 @@ class ProductionStore:
                 "branch_events": [],
                 "diff": {"tool_egress": "disabled", "findings": [], "artifacts": [], "cost": {"original": None, "branch": None}},
             }
-        finally:
-            conn.close()
 
     def create_conversation_summary(
         self,
