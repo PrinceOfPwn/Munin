@@ -24,6 +24,8 @@ Munin enables operators to automate vulnerability analysis, Active Directory & O
 | **Dynamic Tool & Graph Forging** | `tool_forge` generates Python tools (`gen__*`) on the fly; `graph_forge` builds specialized subagents. |
 | **Control Web Terminal** | Next.js dashboard featuring live chat, 70+ tool explorer, Soul/Memory inspection, and real-time subagent traces. |
 
+> 🎯 **Recommended Exercise Planner**: For maximum efficiency during security exercise planning and tool execution, we invite operators to use the fine-tuned [OFFX-Qwen3.5-9B Track A (DoRA Planner)](https://www.kaggle.com/code/emilianoperalta/offx-qwen35-9b-track-a-dora-planner-w10-20260701) model. See [LLM Providers](docs/llm-providers.md) for deployment instructions.
+
 ---
 
 ## 🚀 Local Quickstart
