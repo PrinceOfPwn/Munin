@@ -20,6 +20,7 @@ jobs:
     env:
       MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+      MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -92,7 +93,6 @@ jobs:
     env:
       MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
-      MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY }}
       MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY }}
       MUNIN_E2E_TEST_RUN_ID: e2e_${{ github.run_id }}_deadbeef
       MUNIN_MCP_AUTH_TOKEN: actions-e2e-lab-token
