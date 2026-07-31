@@ -91,6 +91,7 @@ tests/                 Unit, integration, and persistence regression tests
 
 ## 📚 Technical Documentation
 
+- 🚀 [GitHub Actions Live Session Tutorial](docs/github-actions-tutorial.md)
 - 📘 [Operator & User Guide](docs/operator-guide.md)
 - 🏛️ [Architecture & Persistence Specification](docs/architecture-persistence.md)
 - 🛠️ [Tools Reference Inventory](docs/tools_reference.md)
