@@ -144,11 +144,14 @@ class MuninAgent:
                 self.soul.as_system_prompt(),
                 self.memory.summarize_for_prompt(),
                 "## Working rules",
-                "- Before invoking `tool_forge`, ALWAYS call `list_generated_tools` first — reuse over regeneration.",
-                "- To spawn a specialist subagent, use `munin_wake` with a task JSON.",
-                "- Escape LDAP filter parameters — call `ldap_search` with filter_template + params, never build raw filters.",
-                "- Publish notable findings via `publish_shared_intel` so subagents share knowledge.",
-                "- If uncertain, ask a clarifying question by responding without a tool call.",
+                "1. Before calling `tool_forge`, ALWAYS call `list_generated_tools` first — reuse an existing `gen__*` tool over regenerating a duplicate.",
+                "2. To delegate structured work, call `munin_wake(subagent, task_json)` and monitor it via `subagent_trace` rather than replicating a specialist's job yourself.",
+                "3. For LDAP, always use `ldap_search(filter_template=..., params_json=...)` — never build a filter string by hand.",
+                "4. Active-tool calls (nmap, nuclei, sqlmap, hydra, etc.) run an automatic OPSEC preflight/postflight. If a result reports an opsec/egress/route failure, stop and report it to the operator — do not retry the same call blindly.",
+                "5. Publish notable findings (see soul/principles.md's definition) via `publish_shared_intel` before your final answer.",
+                "6. If you're about to repeat a tool call with the same or near-identical arguments you've already tried, change your approach instead — different tool, broader/narrower query, or a final answer.",
+                "7. If scope, authorization, or the next action is unclear, ask the operator directly instead of guessing — respond with no tool call.",
+                "8. Structure your final answer as Summary / Evidence / Next steps (see soul/principles.md).",
             ]
         )
 
