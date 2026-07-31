@@ -153,6 +153,7 @@ def main() -> None:
         "httpx_probe",
         "execute_command",
         "munin_diagnostics",
+        "hugin_refresh",
         "hugin_rag_search",
         "extension_forge",
         "graph_forge",
@@ -163,8 +164,20 @@ def main() -> None:
         raise RuntimeError(f"missing required MCP tools: {missing}")
     print(f"OK catalog: {len(_tool_names(catalog))} tools; critical surface registered")
 
+    if not args.proxy_only:
+        hugin_refresh = client.tool(3, "hugin_refresh", {"run_id": "actions-e2e-hugin-refresh"}, timeout=90)
+        _contains(hugin_refresh, "hugin_refresh", "Hugin refresh")
+        hugin_rag = client.tool(
+            4,
+            "hugin_rag_search",
+            {"query": "LDAP", "limit": 3, "run_id": "actions-e2e-hugin-rag"},
+            timeout=90,
+        )
+        _contains(hugin_rag, "hugin_rag_search", "Hugin RAG search")
+        print("OK Hugin refresh and graph-aware retrieval")
+
     diagnostics = client.tool(
-        3,
+        5,
         "munin_diagnostics",
         {"mode": "quick", "run_id": "actions-e2e-diagnostics"},
         require_ok=False,
@@ -184,7 +197,7 @@ def main() -> None:
         return
 
     ldap = client.tool(
-        4,
+        6,
         "ldap_search",
         {
             "filter_template": "(&(objectClass=device)(cn=WEB01))",
@@ -198,7 +211,7 @@ def main() -> None:
     print("OK LDAP fixture contains the Apache training node")
 
     ldap_nmap = client.tool(
-        5,
+        7,
         "nmap_scan",
         {
             "target": LDAP_TARGET,
@@ -214,7 +227,7 @@ def main() -> None:
     print("OK nmap_scan reached the authorized LDAP service")
 
     apache_nmap = client.tool(
-        6,
+        8,
         "nmap_scan",
         {
             "target": APACHE_TARGET,
@@ -231,7 +244,7 @@ def main() -> None:
     print("OK nmap_scan fingerprinted the isolated Apache fixture")
 
     httpx = client.tool(
-        7,
+        9,
         "httpx_probe",
         {
             "targets": f"http://{APACHE_TARGET}:80",
@@ -244,7 +257,7 @@ def main() -> None:
     print("OK httpx_probe collected web evidence from Apache")
 
     command = client.tool(
-        8,
+        10,
         "execute_command",
         {
             "command": f"curl -fsSI http://{APACHE_TARGET}:80/",
