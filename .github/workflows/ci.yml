@@ -42,6 +42,12 @@ jobs:
       - name: Turso online roundtrip
         if: ${{ env.MUNIN_DB_URL != '' && env.MUNIN_DB_AUTH_TOKEN != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         run: python scripts/turso_smoke.py
+      - name: Janitor expired Production Suite test namespaces
+        if: always()
+        run: |
+          if [ -n "$MUNIN_DB_URL" ] && [ -n "$MUNIN_MASTER_KEY" ]; then
+            python scripts/production_fixture_janitor.py --janitor
+          fi
 
   frontend:
     name: Frontend production build
@@ -86,6 +92,9 @@ jobs:
     env:
       MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+      MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY }}
+      MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY }}
+      MUNIN_E2E_TEST_RUN_ID: e2e_${{ github.run_id }}_deadbeef
       MUNIN_MCP_AUTH_TOKEN: actions-e2e-lab-token
       LDAP_URI: ldap://127.0.0.1:389
       LDAP_BASE_DN: dc=akatsuki,dc=com
@@ -145,6 +154,21 @@ jobs:
           echo $! > /tmp/munin-e2e.pid
       - name: Exercise MCP against online lab services
         run: python scripts/ci_live_smoke.py --require-turso
+      - name: Start authenticated Production Suite API
+        env:
+          MUNIN_ALLOWED_ORIGINS: http://127.0.0.1:3000
+          MUNIN_COOKIE_SECURE: "0"
+          MUNIN_PRODUCTION_AUTO_DISPATCH: "0"
+        run: |
+          nohup munin production-api --host 127.0.0.1 --port 8787 \
+            </dev/null > /tmp/munin-production-api.log 2>&1 &
+          echo $! > /tmp/munin-production-api.pid
+          for i in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8787/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat /tmp/munin-production-api.log
+          exit 1
       - name: Build and start the production GUI
         working-directory: app
         env:
@@ -163,6 +187,12 @@ jobs:
           exit 1
       - name: Verify same-origin GUI MCP proxy
         run: MUNIN_SMOKE_BASE_URL=http://127.0.0.1:3000 python scripts/ci_live_smoke.py --proxy-only --require-turso
+      - name: Cleanup exact Production Suite test namespace
+        if: always()
+        run: |
+          if [ -n "$MUNIN_DB_URL" ] && [ -n "$MUNIN_MASTER_KEY" ]; then
+            python scripts/production_fixture_janitor.py --test-run-id "$MUNIN_E2E_TEST_RUN_ID"
+          fi
       - name: Upload E2E logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -171,4 +201,5 @@ jobs:
           path: |
             /tmp/munin-e2e.log
             /tmp/munin-gui-e2e.log
+            /tmp/munin-production-api.log
           retention-days: 7

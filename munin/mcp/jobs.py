@@ -39,6 +39,21 @@ class JobManager:
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="offx-mcp")
         self.records: dict[str, JobRecord] = {}
         self.lock = Lock()
+        self.is_shutdown = False
+
+    def shutdown(self) -> None:
+        """Release worker threads during server/test shutdown.
+
+        A job manager is an execution detail, never the durable source of
+        operation truth. Closing it prevents interpreter hangs after tests and
+        avoids retaining queued work when a server process exits; the durable
+        run dispatcher safely recovers the corresponding Turso lease.
+        """
+        with self.lock:
+            if self.is_shutdown:
+                return
+            self.is_shutdown = True
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
     def _acquire_lock(self, timeout: float = LOCK_TIMEOUT) -> bool:
         return self.lock.acquire(timeout=timeout)
@@ -62,6 +77,8 @@ class JobManager:
         fn: Callable[[JobRecord], dict[str, Any]],
         on_finish: Callable[[JobRecord], None] | None = None,
     ) -> JobRecord:
+        if self.is_shutdown:
+            raise RuntimeError("job manager is shutting down")
         job = JobRecord(
             job_id=uuid4().hex,
             tool=tool,

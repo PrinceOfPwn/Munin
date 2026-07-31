@@ -154,3 +154,33 @@ and plan in the roles of Product Engineer, Distributed Systems Engineer,
 Security Architect, and Design Systems Lead. Its accepted and rejected
 recommendations will be appended here with rationale before implementation
 commits begin.
+
+### 2026-07-29 — `gpt-5.6-sol` independent review decisions
+
+The reviewer correctly identified that the pre-existing direct libSQL
+connection operates in autocommit mode, so a Python context manager is not a
+multi-statement transactional boundary. It also identified the static browser
+bearer token and unauthenticated server-side proxy as a confused-deputy risk.
+No code was edited during the review.
+
+| Review recommendation | Decision | Rationale |
+| --- | --- | --- |
+| Explicit `BEGIN`/`COMMIT` transactions, migration checksums/locking, forward-only schema, and no ad hoc production DDL | **Accepted** | This is required for the turn protocol and is implemented before durable runtime code. |
+| Idempotency key plus request hash, run leases with fencing epoch/token, CAS, formal transition table, linked retry attempts | **Accepted** | These close the duplicate-send/late-worker corruption paths observed in the audit. |
+| Remove browser-held MCP secret; add session auth, guarded proxy, strict origin policy, CSRF, rate limit, and recovery codes/admin reset instead of speculative email recovery | **Accepted** | A browser token and open proxy are incompatible with the requested production boundary. |
+| Shared structured redaction at every persistence/export/Discord boundary | **Accepted** | Existing best-effort audit regexes are insufficient for reasoning, artifacts, events, and exports. |
+| Add `JobManager.shutdown()` and isolated Turso E2E namespace with `finally` and `always()` cleanup | **Accepted** | The current suite reaches 100% but does not exit in the local run; shared Turso fixture pollution is unacceptable. |
+| Reasoning defaults off; distinguish native provider reasoning, observable operational summaries, and model requests | **Accepted** | It satisfies observable operations without implying hidden chain-of-thought. |
+| Context manifests, source-cited deterministic compaction, profile/version/budget snapshots, authenticated nonce-bound HITL | **Accepted** | These are prerequisites for reliable memory, agent recovery, and replay provenance. |
+| Per-profile envelope encryption with AEAD/AAD, DEK/KEK versioning, SSRF/DNS/redirect defenses | **Accepted** | The existing symmetric profile storage is a useful precursor but not the specified envelope model. |
+| Hugin/Strix metadata-first retrieval; content untrusted; pinned provenance/licence review; Page Agent disabled by default with typed action registry | **Accepted** | The feature needs governance rather than unrestricted prompt or DOM access. |
+| Recorded-only Raven Replay foundation before real fork execution/promotion | **Accepted** | Safe replay is useful immediately; replay branches remain policy-gated and disabled until a sandbox proves them. |
+| Reduce the PR to only the P0 vertical and defer every requested Flight Deck/product module | **Partially rejected** | The user explicitly requested the complete suite in this Draft PR. The implementation retains the requested surfaces, but they are delivered as contracts, feature flags, and safe read models above the P0 durable vertical; activation of risky execution paths remains blocked until validation. |
+| Treat the full Flight Deck, Shadow Council, Page Agent, live Strix catalogue, extension runtime, and replay promotion as unqualified production features now | **Rejected** | The user requested them, but they must remain disabled-by-default or recorded/read-only until their authorization, sandbox, and E2E gates pass. This preserves scope without misrepresenting unfinished risk controls as production-safe. |
+
+The visual review is accepted: a 40–44px utility header, compact/collapsible
+navigation rail, central event workspace, and 300–360px contextual inspector;
+existing raven asset; dark editorial tokens; semantic state labels; 44px mobile
+targets; 360px drawer/bottom sheet; and no duplicated header/sidebar nav. The
+current small monospace/pill-heavy treatment will be replaced by operational
+bands, tables, timelines, and inspectors.
