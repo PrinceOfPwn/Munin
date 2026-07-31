@@ -87,3 +87,11 @@ class ProductionDispatcher:
             stop.set()
             heartbeat_thread.join(timeout=2)
         return claim["id"]
+
+    def run_forever(self, *, poll_seconds: float = 2.0, stop: threading.Event | None = None) -> None:
+        """Durable queue worker: claims from Turso, not from an HTTP request."""
+        stopper = stop or threading.Event()
+        while not stopper.is_set():
+            self.store.recover_expired_runs()
+            if self.run_once() is None:
+                stopper.wait(max(0.2, poll_seconds))
