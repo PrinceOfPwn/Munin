@@ -12,13 +12,18 @@ def registry(tmp_path):
 
 
 def test_version_increments(registry):
+    """Stable agent_id per name; re-registration bumps the version (issue #9 §5)."""
     spec = SubagentSpec(name="v_agent", purpose="test")
     id1, v1 = registry.register_agent(spec)
     id2, v2 = registry.register_agent(spec)
-    # Same spec → new unique ID each time (uuid in agent_id)
-    # Different agent_ids get version 1
+    assert id1 == id2 == "agent_v_agent"
     assert v1 == 1
-    assert v2 == 1
+    assert v2 == 2
+    # latest (v2) is the default read; v1 remains addressable
+    latest = registry.inspect_registered_agent("agent_v_agent")
+    assert latest["version"] == 2
+    old = registry.inspect_registered_agent("agent_v_agent", version=1)
+    assert old["version"] == 1
 
 
 def test_deprecate_agent(registry):

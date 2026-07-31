@@ -25,8 +25,9 @@ MUNIN_SUGGESTED_WORKERS: int = int(os.environ.get("MUNIN_SUGGESTED_WORKERS", "4"
 
 
 class WorkerState(TypedDict):
-    """State for a single fan-out worker."""
+    """State for a single fan-out worker and the fan-in aggregator."""
     messages: list
+    items: list  # input only: the full work list the coordinator fans out over
     worker_index: int
     task_args: dict
     aggregate: Annotated[list, operator.add]

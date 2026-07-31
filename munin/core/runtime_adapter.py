@@ -1,11 +1,86 @@
 """
-Runtime adapter — collapsed to supervisor-only path.
+Runtime adapter — the single execution path into the Deep Agents supervisor.
 
-Previously accepted MUNIN_RUNTIME env flag (legacy | supervisor).
-Flag removed: all execution goes through the LangGraph supervisor.
+Owns:
+* conversation history → LangChain messages conversion,
+* thread/checkpoint config (``thread_id`` = conversation; runs resume),
+* ``astream_events`` (v2) → Munin progress envelope translation
+  (reasoning deltas, run lifecycle).  Tool lifecycle envelopes
+  (``tool_intent``/``tool_result``/``tool_failed``) are emitted by
+  ``ProgressEmitMiddleware`` inside the graph — one channel per concern,
+  no double emission.
+
+Consumers: ``munin_chat`` (MCP), ``munin run`` (CLI), and any future
+UI-message-stream adapter.
 """
 from __future__ import annotations
-from typing import Any, AsyncIterator, Callable
+
+import os
+from typing import Any, AsyncIterator, Callable, Iterable
+
+DEFAULT_RECURSION_LIMIT = int(os.environ.get("MUNIN_RECURSION_LIMIT", "100"))
+
+_ROOT_GRAPH_NAMES = frozenset({"LangGraph", "munin", "munin_supervisor", "__end__"})
+
+
+def _history_to_messages(history: Iterable[dict] | None) -> list[Any]:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage  # noqa: PLC0415
+
+    messages: list[Any] = []
+    for item in history or []:
+        role = str(item.get("role", "")).lower()
+        content = str(item.get("content", ""))
+        if not content:
+            continue
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            messages.append(AIMessage(content=content))
+        elif role == "system":
+            messages.append(SystemMessage(content=content))
+    return messages
+
+
+def translate_event(event: dict, *, run_id: str) -> dict | None:
+    """Translate one LangGraph astream_events(v2) event into a Munin envelope.
+
+    Returns None for events with no user-facing meaning.
+    """
+    event_type = event.get("event", "")
+    name = event.get("name", "")
+
+    if event_type == "on_chat_model_stream":
+        chunk = event.get("data", {}).get("chunk")
+        content = getattr(chunk, "content", None)
+        if content:
+            text = content if isinstance(content, str) else str(content)
+            return {"kind": "reasoning", "run_id": run_id, "text": text}
+        return None
+
+    if event_type == "on_chain_end" and name in _ROOT_GRAPH_NAMES:
+        output = event.get("data", {}).get("output")
+        final_text = ""
+        if isinstance(output, dict):
+            messages = output.get("messages") or []
+            if messages:
+                last = messages[-1]
+                final_text = getattr(last, "content", "") or ""
+        return {
+            "kind": "run_state",
+            "run_id": run_id,
+            "state": "completed",
+            "content": final_text,
+        }
+
+    if event_type == "on_chain_error":
+        return {
+            "kind": "run_state",
+            "run_id": run_id,
+            "state": "failed",
+            "error": str(event.get("data", {}).get("error", "unknown")),
+        }
+
+    return None
 
 
 async def supervisor_runner(
@@ -13,49 +88,49 @@ async def supervisor_runner(
     *,
     run_id: str,
     conversation_id: str,
-    tools: list[Any],
+    tools: list[Any] | None = None,  # legacy kwarg — gateway owns the catalog now
     store: Any,
-    progress_sink: Callable[[dict], None],
-    model: str = "gpt-4o",
-    system_prompt: str = "",
-    max_iterations: int = 50,
+    progress_sink: Callable[[dict], None] | None = None,
+    model: Any = None,
+    system_prompt: str = "",  # composed in build_munin_supervisor (soul + policy)
+    max_iterations: int | None = None,
+    conversation_history: list[dict] | None = None,
+    thread_id: str | None = None,
 ) -> AsyncIterator[dict]:
+    """Run one Munin turn through the Deep Agents supervisor.
+
+    Yields translated Munin progress envelopes.  ``tools``/``system_prompt``
+    are accepted for backwards compatibility but the authoritative catalog and
+    prompt are assembled inside ``build_munin_supervisor`` (gateway + soul).
     """
-    Run a Munin agent turn through the LangGraph supervisor.
+    from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
-    Yields progress event dicts compatible with the SSE layer.
-    Caller is responsible for catching exceptions and emitting run_state=failed.
-    """
-    from munin.core.supervisor import build_supervisor
-    from munin.core.middleware import (
-        OperatorGuidanceMiddleware,
-        ProgressEmitMiddleware,
-        RepetitionGuardMiddleware,
-    )
+    from .supervisor import build_munin_supervisor  # noqa: PLC0415
 
-    emit = ProgressEmitMiddleware(progress_sink=progress_sink, run_id=run_id)
-    guidance = OperatorGuidanceMiddleware(run_id=run_id, store=store)
-    guard = RepetitionGuardMiddleware(window_size=6, min_unique=3)
-
-    supervisor = build_supervisor(
-        tools=tools,
+    supervisor = build_munin_supervisor(
+        state=store,
         model=model,
-        system_prompt=system_prompt,
-        extra_middleware=[emit, guidance, guard],
-        store=store,
         run_id=run_id,
-        max_iterations=max_iterations,
+        progress_sink=progress_sink,
     )
 
-    from langchain_core.messages import HumanMessage
+    messages = _history_to_messages(conversation_history)
+    messages.append(HumanMessage(content=prompt))
 
-    initial_state = {
-        "messages": [HumanMessage(content=prompt)],
-        "run_id": run_id,
-        "conversation_id": conversation_id,
+    config = {
+        "configurable": {"thread_id": thread_id or conversation_id or run_id},
+        "recursion_limit": max_iterations or DEFAULT_RECURSION_LIMIT,
     }
 
-    async for event in supervisor.astream_events(initial_state, version="v2"):
-        # ProgressEmitMiddleware already called progress_sink for known events.
-        # Yield raw events for callers that want the full LangGraph stream.
-        yield event
+    async for event in supervisor.astream_events(
+        {"messages": messages}, config=config, version="v2"
+    ):
+        envelope = translate_event(event, run_id=run_id)
+        if envelope is None:
+            continue
+        if progress_sink is not None:
+            try:
+                progress_sink(envelope)
+            except Exception:  # noqa: BLE001 - observability must not sink a run
+                pass
+        yield envelope

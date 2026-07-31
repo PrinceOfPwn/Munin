@@ -106,20 +106,49 @@ def drop_generated_graph(name: str, run_id: str = "") -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# WorkflowFactory integration (PR-09 / PR-10)
+# WorkflowFactory integration (PR-09 / PR-10) — real compile + invoke paths
 # ---------------------------------------------------------------------------
 
-async def create_workflow_tool(spec_json: str, *, run_id: str = "", tools: list | None = None) -> dict:
-    """Create a compiled LangGraph workflow from a JSON spec."""
-    from munin.core.autonomy.workflow_spec import WorkflowSpec
+async def create_workflow_tool(spec_json: str, *, run_id: str = "", tools: list | None = None, state: Any | None = None) -> dict:
+    """Compile a WorkflowSpec and persist it in the Workflow Registry."""
     from munin.core.autonomy.workflow_factory import create_workflow
+    from munin.core.autonomy.workflow_registry import WorkflowRegistry
+    from munin.core.autonomy.workflow_spec import WorkflowSpec
+
+    st = state or STATE
     spec = WorkflowSpec.from_json(spec_json)
-    create_workflow(spec, tools=tools or [])
-    return {"status": "created", "workflow_name": spec.name, "node_count": len(spec.nodes)}
+    create_workflow(spec, tools=tools or [])  # build-time validation (raises on bad spec)
+    registry = WorkflowRegistry(state=st)
+    workflow_id, version = registry.register_workflow(spec, parent_run=run_id or None)
+    return {
+        "status": "created",
+        "workflow_id": workflow_id,
+        "version": version,
+        "node_count": len(spec.nodes),
+    }
 
 
-async def invoke_workflow_tool(workflow_id: str, input_json: str, *, thread_id: str | None = None) -> dict:
-    """Invoke a registered workflow by ID."""
-    import json
-    data = json.loads(input_json) if isinstance(input_json, str) else input_json
-    return {"status": "invoked", "workflow_id": workflow_id, "input": data}
+async def invoke_workflow_tool(
+    workflow_id: str,
+    input_json: str,
+    *,
+    thread_id: str | None = None,
+    tools: list | None = None,
+    model: Any | None = None,
+    state: Any | None = None,
+) -> dict:
+    """Really invoke a registered workflow by ID (not a status echo)."""
+    import json as _json
+
+    from munin.core.autonomy.workflow_registry import WorkflowRegistry
+
+    st = state or STATE
+    registry = WorkflowRegistry(state=st)
+    compiled = registry.rebuild_workflow(workflow_id, tools=tools or [], model=model)
+    data = _json.loads(input_json) if isinstance(input_json, str) else (input_json or {})
+    data.setdefault("messages", [])
+    config = {"configurable": {"thread_id": thread_id}} if thread_id else {}
+    result = await compiled.ainvoke(data, config=config)
+    row = registry.inspect_registered_workflow(workflow_id)
+    registry.record_workflow_exec(workflow_id, row["version"], "invoked via invoke_workflow_tool")
+    return {"status": "invoked", "workflow_id": workflow_id, "result": result}

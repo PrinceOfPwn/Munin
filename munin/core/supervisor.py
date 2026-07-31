@@ -1,103 +1,190 @@
 """
-Munin Supervisor — LangGraph Deep Agents coordinator.
+Munin Supervisor — Deep Agents coordinator (issue #9 §1).
 
-Assembled from PRs 03, 05, 07, 11, 12:
-  PR-03: Core structure + 3 middleware classes
-  PR-05: Tool Gateway integration (wrap_all_tools)
-  PR-07: SubagentFactory registration as meta-tools
-  PR-11: AsyncSubAgent support + langgraph-sdk config
-  PR-12: Send fan-out workers + schedule_workers() meta-tool
+The supervisor is a ``deepagents.create_deep_agent`` graph:
 
-The compiled graph is exported as `supervisor` (used by langgraph.json).
+* ``system_prompt`` = Munin Soul (identity layer, unchanged) + runtime policy
+  + Autonomy Kernel usage instructions — see ``compose_munin_prompt``.
+* ``tools`` = Tool Gateway (every fixed MCP / domain / gen__* tool as
+  LangChain StructuredTools) + Autonomy Kernel meta-tools.
+* ``middleware`` = operator guidance, repetition guard, progress emission —
+  real LangChain 1.x AgentMiddleware hooks.
+* ``checkpointer`` = durable AsyncSqliteSaver on ``MUNIN_CHECKPOINT_DB`` so
+  threads survive runner restarts (resume / HITL interrupts).
+
+The module-level ``supervisor`` object (referenced by ``langgraph.json``) is
+built lazily via PEP 562 ``__getattr__`` so importing this module never
+performs I/O or requires credentials.
 """
 from __future__ import annotations
+
+import logging
 import os
 from typing import Any
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langgraph.graph import StateGraph, MessagesState
-from langgraph.prebuilt import ToolNode, create_react_agent
+logger = logging.getLogger(__name__)
+
+_KERNEL_INSTRUCTIONS = """
+## Autonomy Kernel
+
+You can create and use new capabilities at runtime:
+
+- `create_tool` + `invoke_registered_tool`: author Python tools and call them
+  in the SAME run. Persistent tools are discoverable via `list_registered_tools`.
+- `create_subagent` + `invoke_registered_agent`: invent a specialist for an
+  isolated task, run it, and (persist=true) keep it in the Agent Registry for
+  future runs. Generated agents may themselves use these factory tools.
+- `create_workflow` + `invoke_registered_workflow`: compile multi-node
+  LangGraph workflows (deterministic, agent and tool nodes; static,
+  conditional and Send fan-out edges) and run them as compiled subagents.
+- `schedule_workers`: fan out N parallel Send workers (one per host/URL/CVE);
+  individual failures do not abort the batch.
+
+Prefer existing catalog tools before forging new ones. Every real side effect
+still passes through Munin's scope/OPSEC/audit boundary — autonomy never
+widens the authorized scope.
+""".strip()
+
+
+def compose_munin_prompt(*, soul_prompt: str = "", extra: str = "") -> str:
+    """Compose the supervisor system prompt: Soul first, then runtime policy."""
+    parts: list[str] = []
+    if soul_prompt.strip():
+        parts.append(soul_prompt.strip())
+    else:
+        parts.append(
+            "You are Munin, an advanced offensive-security AI agent. Proceed "
+            "methodically, document findings, and respect the authorized scope."
+        )
+    parts.append(_KERNEL_INSTRUCTIONS)
+    if extra.strip():
+        parts.append(extra.strip())
+    return "\n\n".join(parts)
+
+
+def make_checkpointer() -> Any:
+    """Durable async checkpointer on MUNIN_CHECKPOINT_DB (loud MemorySaver fallback)."""
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
+
+        db = os.environ.get("MUNIN_CHECKPOINT_DB", "data/langgraph_checkpoints.sqlite")
+        if db != ":memory:":
+            os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
+        return AsyncSqliteSaver.from_conn_string(db)
+    except Exception as exc:  # noqa: BLE001
+        from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
+
+        logger.warning(
+            "supervisor: sqlite checkpointer unavailable (%s); using non-durable MemorySaver",
+            exc,
+        )
+        return MemorySaver()
 
 
 def build_supervisor(
     tools: list[Any],
     *,
-    model: str = "gpt-4o",
+    model: Any = None,
     system_prompt: str = "",
-    extra_middleware: list[Any] | None = None,
-    store: Any | None = None,
-    run_id: str = "",
-    max_iterations: int = 50,
-    async_subagents: list[Any] | None = None,
+    middleware: list[Any] | None = None,
+    meta_tools: list[Any] | None = None,
+    checkpointer: Any = None,
+    subagents: list[Any] | None = None,
 ) -> Any:
-    """
-    Build and compile the Munin supervisor graph.
+    """Build and compile the Munin supervisor graph.
 
     Args:
-        tools: LangChain StructuredTool list (from Tool Gateway)
-        model: LLM model identifier
-        system_prompt: System prompt for the supervisor
-        extra_middleware: [ProgressEmitMiddleware, OperatorGuidanceMiddleware, RepetitionGuardMiddleware]
-        store: ProductionStore instance (for guidance drain, HITL, etc.)
-        run_id: Current run identifier
-        max_iterations: Recursion limit for the graph (no hard cap)
-        async_subagents: List of AsyncSubAgent configs (unlocked by PR-11)
-
-    Returns:
-        Compiled LangGraph Pregel
+        tools: Gateway StructuredTools.
+        model: BaseChatModel (or model string resolved by the framework).
+        system_prompt: composed prompt (``compose_munin_prompt`` output) —
+            when empty, the default Munin policy prompt is composed.
+        middleware: LangChain 1.x AgentMiddleware instances.
+        meta_tools: Autonomy Kernel meta-tools (appended to ``tools``).
+        checkpointer: LangGraph checkpointer; defaults to durable sqlite.
+        subagents: native Deep Agents subagents (registry-loaded persistent
+            agents may be supplied here at build time).
     """
-    try:
-        from deepagents import create_deep_agent
-        USE_DEEP_AGENTS = True
-    except ImportError:
-        USE_DEEP_AGENTS = False
+    from deepagents import create_deep_agent  # noqa: PLC0415
 
-    # Add Send workers meta-tool
-    from munin.core.parallel.send_workers import fanout, MUNIN_SUGGESTED_WORKERS
+    prompt = system_prompt.strip() or compose_munin_prompt()
 
-    def schedule_workers_tool(task_list: list[dict], target: str = "tool_worker") -> dict:
-        """Schedule N parallel workers via LangGraph Send."""
-        sends = fanout(target, task_list)
-        return {"scheduled": len(sends), "target": target, "advisory_workers": MUNIN_SUGGESTED_WORKERS}
-
-    # Build the supervisor using create_react_agent or deep agent
-    sys_msg = system_prompt or (
-        "You are Munin, an advanced offensive-security AI agent. "
-        "You have access to a suite of tools for reconnaissance, exploitation, "
-        "lateral movement, and reporting. Proceed methodically and document your findings."
+    return create_deep_agent(
+        name="munin",
+        model=model,
+        tools=[*tools, *(meta_tools or [])],
+        system_prompt=prompt,
+        middleware=list(middleware or ()),
+        subagents=subagents or None,
+        checkpointer=checkpointer if checkpointer is not None else make_checkpointer(),
     )
 
-    if USE_DEEP_AGENTS:
-        from deepagents import create_deep_agent
-        graph = create_deep_agent(
-            name="munin_supervisor",
-            model=model,
-            tools=tools,
-            system_message=sys_msg,
-        )
-    else:
-        # Fallback: standard ReAct agent
-        from langchain_openai import ChatOpenAI
-        llm = ChatOpenAI(model=model, temperature=0)
-        graph = create_react_agent(llm, tools=tools, state_modifier=sys_msg)
 
-    return graph
+def build_munin_supervisor(
+    *,
+    state: Any,
+    model: Any = None,
+    run_id: str = "",
+    progress_sink: Any = None,
+    include_generated: bool = True,
+) -> Any:
+    """Full production assembly: gateway + kernel + middleware + soul.
 
+    This is the one authoritative builder used by the runtime adapter, the
+    CLI and ``munin_chat`` — no second runtime path exists.
+    """
+    from .autonomy.kernel import AutonomyKernel  # noqa: PLC0415
+    from .middleware import (  # noqa: PLC0415
+        OperatorGuidanceMiddleware,
+        ProgressEmitMiddleware,
+        RepetitionGuardMiddleware,
+    )
+    from .tool_gateway import gateway_tools  # noqa: PLC0415
 
-def _get_default_tools() -> list[Any]:
-    """Load default tools via Tool Gateway from the MCP registry."""
+    soul_prompt = ""
     try:
-        from munin.mcp.registry import ToolRegistry
-        from munin.core.tool_gateway import wrap_all_tools
-        registry = ToolRegistry()
-        return wrap_all_tools(registry)
-    except Exception:
-        return []
+        from .soul import SoulManager  # noqa: PLC0415
+
+        soul_prompt = SoulManager(
+            state.settings.munin_soul_path, state.settings.munin_data_path
+        ).as_system_prompt()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("supervisor: soul unavailable (%s); using fallback identity", exc)
+
+    middleware: list[Any] = [
+        OperatorGuidanceMiddleware(run_id=run_id, store=state),
+        RepetitionGuardMiddleware(),
+    ]
+    if progress_sink is not None:
+        middleware.append(ProgressEmitMiddleware(progress_sink=progress_sink, run_id=run_id))
+
+    kernel = AutonomyKernel(
+        state,
+        model=model,
+        run_id=run_id,
+        tools_provider=lambda: gateway_tools(state, include_generated=include_generated),
+    )
+
+    return build_supervisor(
+        tools=gateway_tools(state, include_generated=include_generated),
+        model=model,
+        system_prompt=compose_munin_prompt(soul_prompt=soul_prompt),
+        middleware=middleware,
+        meta_tools=kernel.meta_tools(),
+    )
 
 
-# Module-level compiled supervisor for langgraph.json
-_default_tools = _get_default_tools()
-supervisor = build_supervisor(
-    tools=_default_tools,
-    run_id="default",
-)
+# ---------------------------------------------------------------------------
+# langgraph.json entrypoint — lazy module attribute (PEP 562).
+# ---------------------------------------------------------------------------
+
+
+def __getattr__(name: str) -> Any:  # pragma: no cover - exercised by langgraph dev
+    if name == "supervisor":
+        from ..mcp.config import get_settings  # noqa: TID252, PLC0415
+        from ..mcp.shared_state import SharedStateStore  # noqa: TID252, PLC0415
+
+        state = SharedStateStore(get_settings())
+        graph = build_munin_supervisor(state=state, run_id="langgraph-server")
+        globals()["supervisor"] = graph
+        return graph
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

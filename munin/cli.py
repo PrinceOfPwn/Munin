@@ -32,11 +32,11 @@ def cli() -> None:
 @cli.command()
 @click.option("--max-iterations", default=8, show_default=True)
 def run(max_iterations: int) -> None:
-    """Interactive REPL. Each user line is one Munin turn (LangGraph supervisor)."""
+    """Interactive REPL. Each user line is one Munin turn (Deep Agents supervisor)."""
     import asyncio
 
+    from .core.llm_client import LLMClient
     from .core.runtime_adapter import supervisor_runner
-    from .mcp.tools import munin_tools as _munin_tools
 
     settings = get_settings()
     click.echo(f"Munin online — LLM={settings.llm_model or 'UNCONFIGURED'} base_url={settings.llm_base_url or 'UNCONFIGURED'}")
@@ -46,32 +46,33 @@ def run(max_iterations: int) -> None:
         sys.exit(2)
 
     store = SharedStateStore(settings)
-    tools = list(getattr(_munin_tools, "TOOLS", []))
+    llm_model = LLMClient(settings).make_langchain()
 
-    async def _one_turn(prompt: str) -> str:
+    async def _one_turn(prompt: str, turn: int) -> str:
         final_text = ""
-        async for event in supervisor_runner(
+
+        def _sink(event: dict) -> None:
+            kind = event.get("kind")
+            if kind == "tool_intent":
+                click.echo(f"  [tool] {event.get('tool_name')} {json.dumps(event.get('input', {}), default=str)[:120]}")
+            elif kind == "tool_failed":
+                click.echo(f"  [tool-failed] {event.get('error', '')[:160]}")
+
+        async for envelope in supervisor_runner(
             prompt,
-            run_id=f"cli-{id(prompt)}",
+            run_id=f"cli-turn-{turn}",
             conversation_id="cli",
-            tools=tools,
             store=store,
-            progress_sink=lambda e: None,
-            model=settings.llm_model,
-            system_prompt="",
+            progress_sink=_sink,
+            model=llm_model,
             max_iterations=max_iterations,
         ):
-            if isinstance(event, dict) and event.get("event") == "on_chain_end":
-                data = event.get("data", {})
-                out = data.get("output")
-                if isinstance(out, dict) and "messages" in out and out["messages"]:
-                    last = out["messages"][-1]
-                    content = getattr(last, "content", last if isinstance(last, str) else "")
-                    if content:
-                        final_text = content
+            if envelope.get("kind") == "run_state" and envelope.get("state") == "completed":
+                final_text = envelope.get("content", "") or final_text
         return final_text
 
     try:
+        turn = 0
         while True:
             user_line = click.prompt("you", type=str, default="", show_default=False)
             if not user_line.strip():
@@ -79,7 +80,8 @@ def run(max_iterations: int) -> None:
             if user_line.strip().lower() in {"exit", "quit"}:
                 click.echo("bye.")
                 return
-            reply = asyncio.run(_one_turn(user_line.strip()))
+            turn += 1
+            reply = asyncio.run(_one_turn(user_line.strip(), turn))
             click.echo(f"munin> {reply}")
     except (KeyboardInterrupt, EOFError):
         click.echo("\ninterrupted.")

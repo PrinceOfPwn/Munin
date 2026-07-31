@@ -1,57 +1,84 @@
+"""
+Operator guidance middleware — real LangChain 1.x ``AgentMiddleware``.
+
+Before every model call, drains pending operator guidance for this run from
+the store and injects it as operator-named ``HumanMessage``s.  This replaces
+the legacy dispatcher ``pre_iteration_hook`` coupling with the framework
+hook, and keeps guidance auditable (the store write is the audit record).
+
+The middleware is a no-op unless the store exposes ``drain_guidance(run_id)``
+(ProductionStore does); SharedStateStore-only contexts simply skip.
+"""
 from __future__ import annotations
-from typing import Any, Callable
+
+import inspect
+import logging
+from typing import Any
+
+from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger(__name__)
+
+try:
+    from langchain.agents.middleware import AgentMiddleware
+except ImportError:  # pragma: no cover
+    class AgentMiddleware:  # type: ignore[no-redef]
+        pass
 
 
-class OperatorGuidanceMiddleware:
-    """
-    Drains pending operator guidance from the store and injects it
-    as HumanMessage at the start of each graph iteration.
-    """
+class OperatorGuidanceMiddleware(AgentMiddleware):
+    """Inject pending operator guidance before each model call."""
 
     def __init__(self, run_id: str, store: Any):
         self.run_id = run_id
         self.store = store
 
-    async def __call__(self, state: dict, next_fn: Callable) -> dict:
-        """Called before each graph node execution to inject pending guidance."""
-        # Drain guidance from store
-        guidance_items = await self._drain_guidance()
-        if guidance_items:
-            # Inject as HumanMessage into messages
-            from langchain_core.messages import HumanMessage
-            injected = [
-                HumanMessage(content=f"[Operator guidance]: {item['text']}",
-                             name="operator")
-                for item in guidance_items
-            ]
-            state = {**state, "messages": state.get("messages", []) + injected}
-        return await next_fn(state)
+    # -- guidance drain ---------------------------------------------------
 
-    async def _drain_guidance(self) -> list[dict]:
-        """Drain all pending guidance for this run from the store."""
+    def _drain_sync(self) -> list[dict]:
+        drain = getattr(self.store, "drain_guidance", None)
+        if drain is None:
+            return []
         try:
-            # Try store method if available
-            if hasattr(self.store, 'drain_guidance'):
-                return await self.store.drain_guidance(self.run_id)
-            return []
-        except Exception:
+            result = drain(self.run_id)
+            if inspect.isawaitable(result):
+                # Sync hook cannot await; skip rather than corrupt the loop.
+                return []
+            return list(result or [])
+        except Exception:  # noqa: BLE001
+            logger.debug("guidance drain failed", exc_info=True)
             return []
 
-    def as_pre_iteration_hook(self) -> Callable:
-        """Return a synchronous pre_iteration_hook compatible callable."""
-        def hook(state: dict) -> dict:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                guidance = loop.run_until_complete(self._drain_guidance())
-            except Exception:
-                guidance = []
-            if guidance:
-                from langchain_core.messages import HumanMessage
-                injected = [
-                    HumanMessage(content=f"[Operator guidance]: {g['text']}", name="operator")
-                    for g in guidance
-                ]
-                return {**state, "messages": state.get("messages", []) + injected}
-            return state
-        return hook
+    async def _drain_async(self) -> list[dict]:
+        drain = getattr(self.store, "drain_guidance", None)
+        if drain is None:
+            return []
+        try:
+            result = drain(self.run_id)
+            if inspect.isawaitable(result):
+                result = await result
+            return list(result or [])
+        except Exception:  # noqa: BLE001
+            logger.debug("guidance drain failed", exc_info=True)
+            return []
+
+    @staticmethod
+    def _inject(state: dict, items: list[dict]) -> dict | None:
+        if not items:
+            return None
+        injected = [
+            HumanMessage(
+                content=f"[Operator guidance]: {item.get('text', item)}",
+                name="operator",
+            )
+            for item in items
+        ]
+        return {"messages": injected}
+
+    # -- LangChain hooks ---------------------------------------------------
+
+    def before_model(self, state: dict, runtime: Any) -> dict | None:
+        return self._inject(state, self._drain_sync())
+
+    async def abefore_model(self, state: dict, runtime: Any) -> dict | None:
+        return self._inject(state, await self._drain_async())

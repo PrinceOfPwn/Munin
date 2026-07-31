@@ -1,79 +1,87 @@
-"""Characterization tests for ProgressEmitMiddleware."""
+"""Characterization tests for ProgressEmitMiddleware + runtime event translation.
+
+Two channels, one envelope format:
+* middleware awrap_tool_call → tool_intent / tool_result / tool_failed
+* runtime_adapter.translate_event → reasoning / run_state (text + lifecycle)
+"""
 import pytest
 from unittest.mock import MagicMock
 
 pytest.importorskip("munin.core.middleware")
 
 from munin.core.middleware.progress_emit import ProgressEmitMiddleware
+from munin.core.runtime_adapter import translate_event
 
 
-def collect_events(events_input):
-    collected = []
-    middleware = ProgressEmitMiddleware(
-        progress_sink=collected.append,
-        run_id="run-test"
+def _request(name: str, args: dict, call_id: str = "call-1"):
+    req = MagicMock()
+    req.tool_call = {"name": name, "args": args, "id": call_id}
+    return req
+
+
+@pytest.mark.asyncio
+async def test_wrap_tool_call_emits_intent_and_result():
+    collected: list[dict] = []
+    middleware = ProgressEmitMiddleware(progress_sink=collected.append, run_id="run-t")
+
+    async def handler(request):
+        return "80/tcp open"
+
+    result = await middleware.awrap_tool_call(
+        _request("port_scan", {"host": "10.0.0.1"}), handler
     )
-
-    async def _run():
-        async def _stream():
-            for e in events_input:
-                yield e
-        async for _ in middleware.wrap_stream(_stream()):
-            pass
-
-    import asyncio
-    asyncio.run(_run())
-    return collected
+    assert result == "80/tcp open"
+    kinds = [e["kind"] for e in collected]
+    assert kinds == ["tool_intent", "tool_result"]
+    assert collected[0]["tool_name"] == "port_scan"
+    assert collected[0]["input"]["host"] == "10.0.0.1"
+    assert "80/tcp" in collected[1]["output"]
 
 
-def test_chat_model_stream_emits_reasoning():
+@pytest.mark.asyncio
+async def test_wrap_tool_call_emits_failure_and_reraises():
+    collected: list[dict] = []
+    middleware = ProgressEmitMiddleware(progress_sink=collected.append, run_id="run-t")
+
+    async def handler(request):
+        raise RuntimeError("nmap died")
+
+    with pytest.raises(RuntimeError):
+        await middleware.awrap_tool_call(_request("port_scan", {}), handler)
+    kinds = [e["kind"] for e in collected]
+    assert kinds == ["tool_intent", "tool_failed"]
+    assert "nmap died" in collected[1]["error"]
+
+
+# -- translate_event (runtime_adapter) ---------------------------------------
+
+
+def test_chat_model_stream_translates_to_reasoning():
     from langchain_core.messages import AIMessageChunk
-    chunk = AIMessageChunk(content="thinking about target")
-    events = [{"event": "on_chat_model_stream", "name": "ChatOpenAI", "data": {"chunk": chunk}}]
 
-    result = collect_events(events)
-    assert len(result) == 1
-    assert result[0]["kind"] == "reasoning"
-    assert "thinking about target" in result[0]["text"]
-
-
-def test_tool_start_emits_tool_intent():
-    events = [{
-        "event": "on_tool_start",
-        "name": "port_scan",
-        "run_id": "tool-run-1",
-        "data": {"input": {"host": "10.0.0.1", "ports": "80,443"}}
-    }]
-
-    result = collect_events(events)
-    assert len(result) == 1
-    assert result[0]["kind"] == "tool_intent"
-    assert result[0]["tool_name"] == "port_scan"
-    assert result[0]["input"]["host"] == "10.0.0.1"
+    event = {
+        "event": "on_chat_model_stream",
+        "name": "ChatOpenAI",
+        "data": {"chunk": AIMessageChunk(content="thinking about target")},
+    }
+    envelope = translate_event(event, run_id="run-t")
+    assert envelope["kind"] == "reasoning"
+    assert "thinking about target" in envelope["text"]
 
 
-def test_tool_end_emits_tool_result():
-    events = [{
-        "event": "on_tool_end",
-        "name": "port_scan",
-        "run_id": "tool-run-1",
-        "data": {"output": "80/tcp open, 443/tcp open"}
-    }]
+def test_root_chain_end_translates_to_run_state_with_content():
+    from langchain_core.messages import AIMessage
 
-    result = collect_events(events)
-    assert len(result) == 1
-    assert result[0]["kind"] == "tool_result"
-    assert "80/tcp" in result[0]["output"]
-
-
-def test_chain_end_emits_run_state_completed():
-    events = [{"event": "on_chain_end", "name": "LangGraph", "data": {}}]
-
-    result = collect_events(events)
-    assert any(e["kind"] == "run_state" and e["state"] == "completed" for e in result)
+    event = {
+        "event": "on_chain_end",
+        "name": "LangGraph",
+        "data": {"output": {"messages": [AIMessage(content="final answer")]}},
+    }
+    envelope = translate_event(event, run_id="run-t")
+    assert envelope["kind"] == "run_state"
+    assert envelope["state"] == "completed"
+    assert envelope["content"] == "final answer"
 
 
 def test_unknown_events_ignored():
-    events = [{"event": "on_something_unknown", "name": "X", "data": {}}]
-    result = collect_events(events)
-    assert result == []
+    assert translate_event({"event": "on_something_unknown", "name": "X", "data": {}}, run_id="r") is None

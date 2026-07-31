@@ -1,11 +1,15 @@
-import { createDataStreamResponse } from "ai";
+import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
+import type { UIMessageChunk } from "ai";
 import { NextRequest, NextResponse } from "next/server";
 
-const MUNIN_BACKEND_URL =
-  process.env.MUNIN_BACKEND_URL ?? "http://localhost:8000";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 14400;
+
+const BACKEND = (process.env.MUNIN_PRODUCTION_API_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
 
 // ---------------------------------------------------------------------------
-// Types
+// Backend envelope types (production run-event vocabulary)
 // ---------------------------------------------------------------------------
 
 export type BackendEnvelopeKind =
@@ -27,358 +31,335 @@ export type BackendEnvelopeKind =
 
 export interface BackendEnvelope {
   kind: BackendEnvelopeKind;
-  run_id: string;
-  // reasoning
+  run_id?: string;
+  sequence?: number;
   text?: string;
-  // tool_intent
   tool_name?: string;
   tool_call_id?: string;
   input?: Record<string, unknown>;
-  // tool_result
   output?: string;
-  // tool_failed
   error?: string;
-  // subagent_started / subagent_state
   subagent_id?: string;
   name?: string;
   state?: string;
-  // human_request
   request_id?: string;
   args?: Record<string, unknown>;
-  // human_resolved
   resolution?: "approved" | "rejected";
-  // artifact
   artifact_id?: string;
   mime_type?: string;
   uri?: string;
-  // heartbeat
   ts?: number;
+  elapsed_seconds?: number;
 }
 
-// AI SDK data-stream part shape (serialised as data: json lines by createDataStreamResponse)
-export type AiSdkPart =
-  | { type: "reasoning"; id: string; text: string }
-  | {
-      type: "tool-invocation";
-      toolCallId: string;
-      toolName: string;
-      args?: Record<string, unknown>;
-      state: "partial-call" | "call" | "result";
-      result?: unknown;
-    }
-  | { type: "custom"; id: string; [key: string]: unknown };
-
 // ---------------------------------------------------------------------------
-// Pure mapping function (exported for tests)
+// Envelope → AI SDK v5 UIMessageChunk translation (pure, exported for tests)
 // ---------------------------------------------------------------------------
 
-/**
- * Maps a single backend SSE envelope to an AI SDK data-stream part.
- * Returns null for envelopes that should be silently ignored,
- * or the special sentinel `{ __terminal: true }` for stream-ending events.
- */
-export function sseEnvelopeToPart(
-  envelope: BackendEnvelope
-): AiSdkPart | null | { __terminal: true } {
-  switch (envelope.kind) {
-    case "reasoning":
-      if (!envelope.text) return null;
-      return {
-        type: "reasoning",
-        id: `reasoning-${envelope.run_id}-${Date.now()}`,
-        text: envelope.text,
-      };
+export interface TranslatorState {
+  textId: string;
+  textStarted: boolean;
+  finished: boolean;
+}
 
-    case "tool_intent":
-      if (!envelope.tool_call_id || !envelope.tool_name) return null;
-      return {
-        type: "tool-invocation",
-        toolCallId: envelope.tool_call_id,
-        toolName: envelope.tool_name,
-        args: envelope.input ?? {},
-        state: "partial-call",
-      };
+export function createTranslator(runId: string): {
+  state: TranslatorState;
+  translate: (envelope: BackendEnvelope) => UIMessageChunk[];
+} {
+  const state: TranslatorState = {
+    textId: `text-${runId}`,
+    textStarted: false,
+    finished: false,
+  };
 
-    case "tool_started":
-      if (!envelope.tool_call_id) return null;
-      return {
-        type: "tool-invocation",
-        toolCallId: envelope.tool_call_id,
-        toolName: envelope.tool_name ?? "unknown",
-        state: "call",
-      };
-
-    case "tool_result":
-    case "tool_completed":
-      if (!envelope.tool_call_id) return null;
-      return {
-        type: "tool-invocation",
-        toolCallId: envelope.tool_call_id,
-        toolName: envelope.tool_name ?? "unknown",
-        state: "result",
-        result: envelope.output,
-      };
-
-    case "tool_failed":
-      if (!envelope.tool_call_id) return null;
-      return {
-        type: "tool-invocation",
-        toolCallId: envelope.tool_call_id,
-        toolName: envelope.tool_name ?? "unknown",
-        state: "result",
-        result: `ERROR: ${envelope.error ?? "unknown error"}`,
-      };
-
-    case "subagent_started":
-    case "subagent_state":
-      if (!envelope.subagent_id) return null;
-      return {
-        type: "custom",
-        id: "subagent-presence",
-        subagentId: envelope.subagent_id,
-        name: envelope.name ?? envelope.subagent_id,
-        state: envelope.state ?? (envelope.kind === "subagent_started" ? "started" : "unknown"),
-      };
-
-    case "human_request":
-      if (!envelope.request_id) return null;
-      return {
-        type: "custom",
-        id: "hitl-request",
-        requestId: envelope.request_id,
-        toolName: envelope.tool_name ?? "unknown",
-        args: envelope.args ?? {},
-      };
-
-    case "human_resolved":
-      if (!envelope.request_id) return null;
-      return {
-        type: "custom",
-        id: "hitl-request",
-        requestId: envelope.request_id,
-        resolution: envelope.resolution,
-      };
-
-    case "artifact":
-      if (!envelope.artifact_id) return null;
-      return {
-        type: "custom",
-        id: "artifact",
-        artifactId: envelope.artifact_id,
-        mimeType: envelope.mime_type ?? "application/octet-stream",
-        uri: envelope.uri ?? "",
-      };
-
-    case "run_state": {
-      const terminalStates = ["completed", "failed", "interrupted", "cancelled"];
-      if (terminalStates.includes(envelope.state ?? "")) {
-        return { __terminal: true };
-      }
-      // non-terminal run_state: emit as custom part
-      return {
-        type: "custom",
-        id: "run-state",
-        state: envelope.state,
-      };
+  function textDeltas(text: string): UIMessageChunk[] {
+    const chunks: UIMessageChunk[] = [];
+    if (!state.textStarted) {
+      state.textStarted = true;
+      chunks.push({ type: "text-start", id: state.textId });
     }
-
-    case "heartbeat":
-      return {
-        type: "custom",
-        id: "heartbeat",
-        ts: envelope.ts ?? Date.now(),
-      };
-
-    case "note":
-      if (!envelope.text) return null;
-      return {
-        type: "custom",
-        id: "note",
-        text: envelope.text,
-      };
-
-    case "guidance":
-      if (!envelope.text) return null;
-      return {
-        type: "custom",
-        id: "guidance",
-        text: envelope.text,
-      };
-
-    default:
-      return null;
+    chunks.push({ type: "text-delta", id: state.textId, delta: text });
+    return chunks;
   }
+
+  function closeText(): UIMessageChunk[] {
+    if (!state.textStarted) return [];
+    state.textStarted = false;
+    return [{ type: "text-end", id: state.textId }];
+  }
+
+  function translate(envelope: BackendEnvelope): UIMessageChunk[] {
+    switch (envelope.kind) {
+      case "reasoning":
+        // Assistant streamed text (never hidden chain-of-thought: the backend
+        // only forwards provider-explicit, policy-cleared content).
+        return envelope.text ? textDeltas(envelope.text) : [];
+
+      case "tool_intent": {
+        if (!envelope.tool_call_id || !envelope.tool_name) return [];
+        return [
+          { type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name, dynamic: true },
+          { type: "tool-input-available", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name, input: envelope.input ?? {}, dynamic: true },
+        ];
+      }
+
+      case "tool_started":
+        if (!envelope.tool_call_id) return [];
+        return [{ type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name ?? "unknown", dynamic: true }];
+
+      case "tool_result":
+      case "tool_completed":
+        if (!envelope.tool_call_id) return [];
+        return [{ type: "tool-output-available", toolCallId: envelope.tool_call_id, output: envelope.output ?? "", dynamic: true }];
+
+      case "tool_failed":
+        if (!envelope.tool_call_id) return [];
+        return [{ type: "tool-output-error", toolCallId: envelope.tool_call_id, errorText: envelope.error ?? "unknown error", dynamic: true }];
+
+      case "subagent_started":
+      case "subagent_state":
+        if (!envelope.subagent_id) return [];
+        return [{
+          type: "data-subagent",
+          id: `subagent-${envelope.subagent_id}`,
+          data: {
+            subagentId: envelope.subagent_id,
+            name: envelope.name ?? envelope.subagent_id,
+            state: envelope.state ?? (envelope.kind === "subagent_started" ? "started" : "unknown"),
+          },
+        }];
+
+      case "human_request":
+        if (!envelope.request_id) return [];
+        return [{
+          type: "data-hitl-request",
+          id: `hitl-${envelope.request_id}`,
+          data: { requestId: envelope.request_id, toolName: envelope.tool_name ?? "unknown", args: envelope.args ?? {}, resolved: false },
+        }];
+
+      case "human_resolved":
+        if (!envelope.request_id) return [];
+        return [{
+          type: "data-hitl-request",
+          id: `hitl-${envelope.request_id}`,
+          data: { requestId: envelope.request_id, resolved: true, resolution: envelope.resolution },
+        }];
+
+      case "artifact":
+        if (!envelope.artifact_id) return [];
+        return [{
+          type: "data-artifact",
+          id: `artifact-${envelope.artifact_id}`,
+          data: { artifactId: envelope.artifact_id, mimeType: envelope.mime_type ?? "application/octet-stream", uri: envelope.uri ?? "" },
+        }];
+
+      case "run_state": {
+        const runState = envelope.state ?? "unknown";
+        if (runState === "completed") {
+          if (state.finished) return [];
+          state.finished = true;
+          return [...closeText(), { type: "finish" }];
+        }
+        if (["failed", "cancelled", "interrupted"].includes(runState)) {
+          if (state.finished) return [];
+          state.finished = true;
+          return [...closeText(), { type: "error", errorText: envelope.error ?? `run ${runState}` }];
+        }
+        return [{ type: "data-run-state", id: "run-state", data: { state: runState } }];
+      }
+
+      case "heartbeat":
+        return [{
+          type: "data-heartbeat",
+          id: "heartbeat",
+          data: { ts: envelope.ts ?? Date.now(), elapsedSeconds: envelope.elapsed_seconds },
+          transient: true,
+        }];
+
+      case "note":
+        return envelope.text ? [{ type: "data-note", data: { text: envelope.text } }] : [];
+
+      case "guidance":
+        return envelope.text ? [{ type: "data-guidance", data: { text: envelope.text } }] : [];
+
+      default:
+        return [];
+    }
+  }
+
+  return { state, translate };
+}
+
+// ---------------------------------------------------------------------------
+// Backend SSE pump
+// ---------------------------------------------------------------------------
+
+async function pumpRunEvents(
+  runId: string,
+  writer: { write: (chunk: UIMessageChunk) => void },
+  forwardHeaders: Headers,
+  signal: AbortSignal,
+): Promise<void> {
+  const translator = createTranslator(runId);
+  writer.write({ type: "data-run-state", id: "run-state", data: { state: "started", runId } });
+
+  const upstream = await fetch(`${BACKEND}/api/runs/${encodeURIComponent(runId)}/events`, {
+    headers: { Accept: "text/event-stream", ...Object.fromEntries(forwardHeaders) },
+    cache: "no-store",
+    signal,
+    // @ts-expect-error — Node fetch extension for streaming request bodies
+    duplex: "half",
+  });
+  if (!upstream.ok || !upstream.body) {
+    writer.write({ type: "error", errorText: `backend events failed (${upstream.status})` });
+    return;
+  }
+
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line; an `event: close` frame ends
+      // the pump, `run-event` frames carry the JSON envelope in `data:`.
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        if (frame.includes("event: close")) return;
+        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+        if (!dataLine) continue;
+        const raw = dataLine.slice("data:".length).trim();
+        if (!raw || raw === "[DONE]") continue;
+        let envelope: BackendEnvelope;
+        try {
+          envelope = JSON.parse(raw) as BackendEnvelope;
+        } catch {
+          continue;
+        }
+        for (const chunk of translator.translate(envelope)) {
+          writer.write(chunk);
+        }
+        if (translator.state.finished) return;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function forwardAuthHeaders(request: NextRequest): Headers {
+  const headers = new Headers();
+  for (const name of ["cookie", "x-csrf-token", "idempotency-key"] as const) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  return headers;
 }
 
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
 
-function extractRunId(params: string[]): string | null {
-  // params from [[...path]] will be like ["runs", "<runId>", "events"]
-  // or ["runs", "<runId>", "message"]
-  if (params.length >= 2 && params[0] === "runs") {
-    return params[1];
+function extractUserText(messages: unknown[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as { role?: string; parts?: Array<{ type?: string; text?: string }> };
+    if (message?.role !== "user" || !Array.isArray(message.parts)) continue;
+    const text = message.parts
+      .filter((part) => part?.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (text) return text;
   }
-  return null;
+  return "";
 }
 
-/** GET /api/chat/runs/:runId/events — SSE fan-out */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { path?: string[] } }
-) {
-  const path = params.path ?? [];
-  const runId = extractRunId(path);
-
-  if (!runId) {
-    return NextResponse.json(
-      { error: "Missing runId in path. Expected /api/chat/runs/:runId/events" },
-      { status: 400 }
-    );
-  }
-
-  const lastEventId = request.headers.get("Last-Event-ID") ?? undefined;
-
-  const backendUrl = new URL(
-    `${MUNIN_BACKEND_URL}/api/runs/${runId}/events`
-  );
-  if (lastEventId) {
-    backendUrl.searchParams.set("last_event_id", lastEventId);
-  }
-
-  return createDataStreamResponse({
-    execute: async (dataStream) => {
-      let backendRes: Response;
-      try {
-        backendRes = await fetch(backendUrl.toString(), {
-          headers: {
-            Accept: "text/event-stream",
-            "Cache-Control": "no-cache",
-            ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}),
-          },
-        });
-      } catch (err) {
-        dataStream.writeData({
-          type: "custom",
-          id: "error",
-          message: `Failed to connect to backend: ${String(err)}`,
-        });
-        return;
-      }
-
-      if (!backendRes.ok || !backendRes.body) {
-        dataStream.writeData({
-          type: "custom",
-          id: "error",
-          message: `Backend returned ${backendRes.status}`,
-        });
-        return;
-      }
-
-      const reader = backendRes.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-
-            const raw = trimmed.slice("data:".length).trim();
-            if (!raw || raw === "[DONE]") continue;
-
-            let envelope: BackendEnvelope;
-            try {
-              envelope = JSON.parse(raw) as BackendEnvelope;
-            } catch {
-              continue; // malformed JSON, skip
-            }
-
-            const part = sseEnvelopeToPart(envelope);
-
-            if (part === null) continue;
-
-            if ("__terminal" in part) {
-              // Signal the stream is done
-              return;
-            }
-
-            // Write the part to the AI SDK data stream
-            if (part.type === "reasoning") {
-              dataStream.writeMessageAnnotation({
-                type: "reasoning",
-                id: part.id,
-                text: part.text,
-              });
-            } else if (part.type === "tool-invocation") {
-              dataStream.writeData(part);
-            } else {
-              // custom parts
-              dataStream.writeData(part);
-            }
-          }
-        }
-      } finally {
-        reader.releaseLock();
-      }
-    },
-    onError: (err) => {
-      console.error("[BFF] stream error:", err);
-      return `Stream error: ${String(err)}`;
-    },
-  });
-}
-
-/** POST /api/chat/runs/:runId/message — forward message to backend */
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { path?: string[] } }
-) {
-  const path = params.path ?? [];
-  const runId = extractRunId(path);
-
-  if (!runId) {
-    return NextResponse.json(
-      { error: "Missing runId in path. Expected /api/chat/runs/:runId/message" },
-      { status: 400 }
-    );
-  }
-
-  let body: unknown;
+/** POST /api/chat — AI SDK v5 DefaultChatTransport entrypoint. */
+export async function POST(request: NextRequest) {
+  let body: { id?: string; conversation_id?: string; messages?: unknown[]; messageId?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const backendUrl = `${MUNIN_BACKEND_URL}/api/runs/${runId}/message`;
-
-  let backendRes: Response;
-  try {
-    backendRes = await fetch(backendUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    return NextResponse.json(
-      { error: `Failed to forward message to backend: ${String(err)}` },
-      { status: 502 }
-    );
+  const conversationId = (body.conversation_id || body.id || "").trim();
+  const content = extractUserText(body.messages ?? []);
+  if (!conversationId) {
+    return NextResponse.json({ error: "conversation_id is required" }, { status: 400 });
+  }
+  if (!content) {
+    return NextResponse.json({ error: "last user message has no text" }, { status: 400 });
   }
 
-  const responseBody = await backendRes.text();
-  return new NextResponse(responseBody, {
-    status: backendRes.status,
-    headers: { "Content-Type": "application/json" },
+  const forwardHeaders = forwardAuthHeaders(request);
+  if (body.messageId && !forwardHeaders.has("idempotency-key")) {
+    forwardHeaders.set("idempotency-key", body.messageId);
+  }
+
+  // 1. Commit the turn in the authoritative backend (creates + dispatches the run).
+  let runId: string;
+  try {
+    const turnRes = await fetch(
+      `${BACKEND}/api/conversations/${encodeURIComponent(conversationId)}/turns`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...Object.fromEntries(forwardHeaders) },
+        body: JSON.stringify({ content }),
+        cache: "no-store",
+      },
+    );
+    const payload = await turnRes.json().catch(() => ({}));
+    if (!turnRes.ok || payload?.ok === false) {
+      const message = payload?.error?.message || `turn failed (${turnRes.status})`;
+      return NextResponse.json({ error: message }, { status: turnRes.ok ? 502 : turnRes.status });
+    }
+    runId = payload?.data?.run?.id;
+    if (!runId) throw new Error("missing run id in turn response");
+  } catch (err) {
+    return NextResponse.json({ error: `backend unreachable: ${String(err)}` }, { status: 502 });
+  }
+
+  // 2. Stream the run as an AI SDK v5 UI message stream.
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      try {
+        await pumpRunEvents(runId, writer, forwardHeaders, request.signal);
+      } catch (err) {
+        if (!request.signal.aborted) {
+          writer.write({ type: "error", errorText: String(err) });
+        }
+      }
+    },
   });
+  return createUIMessageStreamResponse({ stream });
+}
+
+/** GET /api/chat/runs/:runId/events — resume/replay an active run as a UI stream. */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { path?: string[] } },
+) {
+  const path = params.path ?? [];
+  const runId = path.length >= 2 && path[0] === "runs" ? path[1] : null;
+  if (!runId) {
+    return NextResponse.json({ error: "expected /api/chat/runs/:runId/events" }, { status: 400 });
+  }
+  const forwardHeaders = forwardAuthHeaders(request);
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      try {
+        await pumpRunEvents(runId, writer, forwardHeaders, request.signal);
+      } catch (err) {
+        if (!request.signal.aborted) {
+          writer.write({ type: "error", errorText: String(err) });
+        }
+      }
+    },
+  });
+  return createUIMessageStreamResponse({ stream });
 }

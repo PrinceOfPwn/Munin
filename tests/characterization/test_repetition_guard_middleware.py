@@ -1,81 +1,52 @@
-"""Characterization tests for RepetitionGuardMiddleware."""
+"""Characterization tests for RepetitionGuardMiddleware (LangChain hook API)."""
 import pytest
-from unittest.mock import AsyncMock
 
 pytest.importorskip("munin.core.middleware")
 
-from munin.core.middleware.repetition_guard import (
-    RepetitionGuardMiddleware, RepetitionGuardTripped
-)
 from langchain_core.messages import AIMessage
 
+from munin.core.middleware.repetition_guard import (
+    RepetitionGuardMiddleware,
+    RepetitionGuardTripped,
+)
 
-def make_state(messages):
-    return {"messages": messages}
 
-
-def ai_msg(content):
+def ai_msg(content: str) -> AIMessage:
     return AIMessage(content=content)
 
 
 @pytest.mark.asyncio
-async def test_no_repetition_passes_through():
-    """Non-repeating messages pass through without intervention."""
+async def test_no_repetition_returns_none():
     guard = RepetitionGuardMiddleware(window_size=4, min_unique=2)
-    next_fn = AsyncMock(return_value={"messages": []})
-
-    state = make_state([ai_msg("step 1"), ai_msg("step 2"), ai_msg("step 3")])
-    for _ in range(3):
-        await guard(state, next_fn)
-
+    state = {"messages": [ai_msg("step 1")]}
+    assert await guard.aafter_model(state, runtime=None) is None
     assert not guard._nudge_issued
 
 
 @pytest.mark.asyncio
 async def test_nudge_issued_once_on_repetition():
-    """A single nudge is injected on first repetition detection."""
     guard = RepetitionGuardMiddleware(window_size=4, min_unique=3)
+    guard._recent = ["same"] * 3  # one short of window; next push fills it
 
-    captured_states = []
-
-    async def capture(s):
-        captured_states.append(s)
-        return s
-
-    repeated_msg = ai_msg("I will scan the network")
-    state = make_state([repeated_msg] * 6)
-
-    # Force repetition detection
-    guard._recent_messages = ["same"] * 6
-    guard._iteration_count = 7
-
-    await guard(state, capture)
+    update = await guard.aafter_model({"messages": [ai_msg("same")]}, runtime=None)
     assert guard._nudge_issued
+    assert update is not None
+    assert "repeating yourself" in update["messages"][0].content
 
 
 @pytest.mark.asyncio
 async def test_repetition_guard_trips_after_nudge():
-    """RepetitionGuardTripped raised if repetition continues after nudge."""
     guard = RepetitionGuardMiddleware(window_size=4, min_unique=3)
-    guard._nudge_issued = True  # Already nudged
-    guard._recent_messages = ["same"] * 6
-    guard._iteration_count = 10
-
-    next_fn = AsyncMock(return_value={})
+    guard._nudge_issued = True
+    guard._recent = ["same"] * 3
 
     with pytest.raises(RepetitionGuardTripped):
-        await guard(make_state([ai_msg("same")] * 6), next_fn)
+        await guard.aafter_model({"messages": [ai_msg("same")]}, runtime=None)
 
 
 @pytest.mark.asyncio
-async def test_window_size_boundary():
-    """Guard does not trip before window_size iterations complete."""
+async def test_window_not_full_no_trip():
     guard = RepetitionGuardMiddleware(window_size=6, min_unique=3)
-    next_fn = AsyncMock(return_value={})
-
-    state = make_state([ai_msg("repeat")])
-    # Only 5 iterations — should NOT trip
-    for _ in range(5):
-        await guard(state, next_fn)
-
+    for _ in range(4):  # below window size
+        assert await guard.aafter_model({"messages": [ai_msg("repeat")]}, runtime=None) is None
     assert not guard._nudge_issued

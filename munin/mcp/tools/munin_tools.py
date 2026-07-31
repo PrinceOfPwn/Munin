@@ -530,39 +530,58 @@ def munin_chat(
             import asyncio  # noqa: PLC0415
             from ...core.runtime_adapter import supervisor_runner  # noqa: PLC0415
 
+            llm_model = None
+            try:
+                from ...core.llm_client import LLMClient  # noqa: PLC0415
+
+                llm_model = LLMClient(settings).make_langchain()
+            except Exception:
+                logger.warning("munin_chat: LangChain model unavailable; framework will resolve", exc_info=True)
+
             async def _run() -> tuple[str, list, int, str]:
                 content = ""
-                tool_calls: list = []
-                iterations = 0
                 stop_reason = "final_answer"
-                async for event in supervisor_runner(
+                pending: dict[str, dict] = {}
+                tool_calls: list = []
+
+                def _sink(event: dict) -> None:
+                    if progress is not None:
+                        progress(event)
+
+                async for envelope in supervisor_runner(
                     message.strip(),
-                    run_id=f"munin_chat-{id(message)}",
+                    run_id=f"munin_chat-{prepared.conversation_id}",
                     conversation_id=prepared.conversation_id,
                     conversation_history=prepared.history,
-                    tools=[t for t in globals().get("TOOLS", [])],
-                    store=conversation_service.store if hasattr(conversation_service, "store") else None,
-                    progress_sink=progress,
-                    model=settings.llm_model,
-                    system_prompt="",
-                    max_iterations=iterations or 40,
+                    store=STATE,
+                    progress_sink=_sink,
+                    model=llm_model,
+                    max_iterations=iterations,
                 ):
-                    if isinstance(event, dict):
-                        if event.get("event") == "on_chain_end":
-                            data = event.get("data", {})
-                            out = data.get("output")
-                            if isinstance(out, dict) and out.get("messages"):
-                                last = out["messages"][-1]
-                                c = getattr(last, "content", last if isinstance(last, str) else "")
-                                if c:
-                                    content = c
-                        elif event.get("event") == "tool_calls_log":
-                            tool_calls = event.get("data", {}).get("tool_calls", []) or tool_calls
-                        elif event.get("event") == "iteration":
-                            iterations = event.get("data", {}).get("iteration", iterations)
-                return content, tool_calls, iterations, stop_reason
+                    kind = envelope.get("kind")
+                    if kind == "tool_intent":
+                        call = {
+                            "id": envelope.get("tool_call_id") or f"call-{len(tool_calls)}",
+                            "name": envelope.get("tool_name", "unknown"),
+                            "arguments": envelope.get("input", {}),
+                            "status": "running",
+                        }
+                        pending[call["id"]] = call
+                        tool_calls.append(call)
+                    elif kind in {"tool_result", "tool_failed"}:
+                        call = pending.get(envelope.get("tool_call_id", ""))
+                        if call is not None:
+                            call["status"] = "failed" if kind == "tool_failed" else "completed"
+                            call["result"] = envelope.get("output") or envelope.get("error", "")
+                    elif kind == "run_state":
+                        if envelope.get("state") == "completed":
+                            content = envelope.get("content", "") or content
+                        elif envelope.get("state") in {"failed", "cancelled", "interrupted"}:
+                            stop_reason = envelope.get("state", stop_reason)
+                iterations_done = sum(1 for c in tool_calls)
+                return content, tool_calls, iterations_done, stop_reason
 
-            content, tool_calls, iterations, stop_reason = asyncio.run(_run())
+            content, tool_calls, iterations_done, stop_reason = asyncio.run(_run())
         except Exception as exc:
             logger.exception("munin_chat: agent error")
             error_message = f"Munin could not complete this turn: {exc}"
@@ -587,7 +606,7 @@ def munin_chat(
                 content=content,
                 tool_calls=tool_calls,
                 stop_reason=stop_reason,
-                iterations=iterations,
+                iterations=iterations_done,
             )
         except Exception as exc:
             logger.exception("munin_chat: unable to persist completed turn")
@@ -608,7 +627,7 @@ def munin_chat(
                 "content": content,
                 "artifacts": artifacts,
                 "tool_calls": tool_calls,
-                "iterations": iterations,
+                "iterations": iterations_done,
                 "stop_reason": stop_reason,
             },
         }

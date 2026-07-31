@@ -1,12 +1,16 @@
 import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+import { useMemo } from "react";
+
+import { currentCsrfToken, productionApi } from "@/lib/production-api";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface UseMuninChatOptions {
-  runId: string;
-  chatId: string;
+  /** Backend conversation (operation) id — doubles as the useChat id. */
+  conversationId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -14,98 +18,51 @@ export interface UseMuninChatOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * `useMuninChat` wraps Vercel AI SDK's `useChat` with Munin-specific defaults.
+ * `useMuninChat` — Vercel AI SDK v5 `useChat` wired to the Munin BFF.
  *
- * - Routes through the BFF SSE endpoint at `/api/chat/runs/:runId/events`
- * - Preserves the `chatId` for client-side deduplication
- * - Keeps the message history scoped to a single run
+ * The transport posts to `/api/chat` with the active conversation id and the
+ * operator's CSRF token; the BFF commits a turn in the authoritative
+ * production API and streams the run back as a v5 UI message stream
+ * (text deltas, dynamic tool parts, data-* operational parts).
  */
-export function useMuninChat({ runId, chatId }: UseMuninChatOptions) {
-  const chat = useChat({
-    api: `/api/chat/runs/${runId}/events`,
-    id: chatId,
-    // Send messages as POST to the same base path (BFF handles routing by method)
-    sendExtraMessageFields: true,
-    // Maintain partial streaming updates
-    experimental_throttle: 50,
+export function useMuninChat({ conversationId }: UseMuninChatOptions) {
+  const transport = useMemo(
+    () =>
+      new DefaultChatTransport({
+        api: "/api/chat",
+        body: { conversation_id: conversationId },
+        headers: () => {
+          const token = currentCsrfToken();
+          return token ? { "X-CSRF-Token": token } : {};
+        },
+      }),
+    [conversationId],
+  );
+
+  return useChat({
+    id: conversationId,
+    transport,
     onError: (err) => {
-      console.error(`[useMuninChat] run=${runId} error:`, err);
+      console.error(`[useMuninChat] conversation=${conversationId}:`, err);
     },
   });
-
-  return chat;
 }
 
 // ---------------------------------------------------------------------------
-// Standalone helpers
+// Standalone helpers (guidance + HITL resolutions go straight to production)
 // ---------------------------------------------------------------------------
 
-/**
- * Send guidance text to a run directly via the BFF without going through
- * the useChat hook (e.g., from a separate operator input field).
- */
-export async function sendGuidance(
-  runId: string,
-  text: string
-): Promise<void> {
-  const res = await fetch(`/api/chat/runs/${runId}/message`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind: "guidance", text }),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => res.statusText);
-    throw new Error(
-      `sendGuidance failed (${res.status}): ${detail}`
-    );
-  }
+/** Deliver operator guidance to a running execution (auditable server-side). */
+export async function sendGuidance(runId: string, text: string): Promise<void> {
+  await productionApi.guideRun(runId, text);
 }
 
-/**
- * Approve a human-in-the-loop request.
- */
-export async function approveHitlRequest(
-  runId: string,
-  requestId: string
-): Promise<void> {
-  const res = await fetch(`/api/chat/runs/${runId}/message`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      kind: "human_resolution",
-      request_id: requestId,
-      resolution: "approved",
-    }),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => res.statusText);
-    throw new Error(`approveHitlRequest failed (${res.status}): ${detail}`);
-  }
+/** Approve a human-in-the-loop request. */
+export async function approveHitlRequest(requestId: string): Promise<void> {
+  await productionApi.resolveHumanRequest(requestId, "approved");
 }
 
-/**
- * Reject a human-in-the-loop request with an optional reason.
- */
-export async function rejectHitlRequest(
-  runId: string,
-  requestId: string,
-  reason?: string
-): Promise<void> {
-  const res = await fetch(`/api/chat/runs/${runId}/message`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      kind: "human_resolution",
-      request_id: requestId,
-      resolution: "rejected",
-      reason: reason ?? "",
-    }),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => res.statusText);
-    throw new Error(`rejectHitlRequest failed (${res.status}): ${detail}`);
-  }
+/** Reject a human-in-the-loop request with an optional reason. */
+export async function rejectHitlRequest(requestId: string, reason?: string): Promise<void> {
+  await productionApi.resolveHumanRequest(requestId, "rejected", "", reason ?? "");
 }

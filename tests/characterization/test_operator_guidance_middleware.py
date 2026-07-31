@@ -1,4 +1,4 @@
-"""Characterization tests for OperatorGuidanceMiddleware."""
+"""Characterization tests for OperatorGuidanceMiddleware (LangChain hook API)."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,43 +8,31 @@ from munin.core.middleware.operator_guidance import OperatorGuidanceMiddleware
 
 
 @pytest.mark.asyncio
-async def test_no_guidance_passthrough():
-    """With empty guidance queue, state passes through unchanged."""
+async def test_no_guidance_returns_none():
+    """Empty guidance queue → no state update (framework contract: None)."""
     store = MagicMock()
     store.drain_guidance = AsyncMock(return_value=[])
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=store)
 
-    state = {"messages": []}
-    next_fn = AsyncMock(return_value={"messages": [], "done": True})
-
-    result = await middleware(state, next_fn)
-    next_fn.assert_called_once_with(state)
+    assert await middleware.abefore_model({"messages": []}, runtime=None) is None
 
 
 @pytest.mark.asyncio
 async def test_guidance_injected_as_human_message():
-    """Pending guidance is injected as HumanMessage before next_fn."""
     store = MagicMock()
     store.drain_guidance = AsyncMock(return_value=[{"text": "check port 80"}])
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=store)
 
-    captured_state = {}
-
-    async def capture_next(s):
-        captured_state.update(s)
-        return s
-
-    state = {"messages": []}
-    await middleware(state, capture_next)
-
-    messages = captured_state.get("messages", [])
+    update = await middleware.abefore_model({"messages": []}, runtime=None)
+    assert update is not None
+    messages = update["messages"]
     assert len(messages) == 1
     assert "check port 80" in messages[0].content
+    assert messages[0].name == "operator"
 
 
 @pytest.mark.asyncio
 async def test_multiple_guidance_injected_in_order():
-    """Multiple guidance items injected in FIFO order."""
     store = MagicMock()
     store.drain_guidance = AsyncMock(return_value=[
         {"text": "first guidance"},
@@ -52,15 +40,14 @@ async def test_multiple_guidance_injected_in_order():
     ])
     middleware = OperatorGuidanceMiddleware(run_id="run-1", store=store)
 
-    captured = {}
-
-    async def capture(s):
-        captured.update(s)
-        return s
-
-    await middleware({"messages": []}, capture)
-
-    messages = captured["messages"]
+    update = await middleware.abefore_model({"messages": []}, runtime=None)
+    messages = update["messages"]
     assert len(messages) == 2
     assert "first guidance" in messages[0].content
     assert "second guidance" in messages[1].content
+
+
+def test_store_without_drain_method_is_noop():
+    """SharedStateStore (no drain_guidance) → middleware silently skips."""
+    middleware = OperatorGuidanceMiddleware(run_id="run-1", store=object())
+    assert middleware.before_model({"messages": []}, runtime=None) is None
