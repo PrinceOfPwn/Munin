@@ -2,8 +2,8 @@
 # Munin — Mock LDAP toggle
 # Usage: ./scripts/ldap_mock.sh {up|down|status|logs}
 #
-# Levanta un OpenLDAP de prueba con usuarios, service accounts, grupos y OUs
-# pre-sembrados con escenarios ofensivos (Kerberoastable, AS-REP, Domain Admins).
+# Launches a test OpenLDAP server pre-seeded with users, service accounts, groups, and OUs
+# for offensive security scenarios (Kerberoastable accounts, AS-REP roasting, Domain Admins).
 
 set -euo pipefail
 
@@ -148,11 +148,11 @@ _print_env() {
     echo "    LDAP_BIND_DN=cn=admin,${LDAP_ROOT}"
     echo "    LDAP_PASSWORD=${ADMIN_PASS}"
     echo ""
-    echo "  Mock users:"
-    echo "    jdoe / asmith / rgarcia / mlopez — usuarios normales"
+    echo "  Mock accounts:"
+    echo "    jdoe / asmith / rgarcia / mlopez — standard domain users"
     echo "    administrator               — Domain Admin"
-    echo "    htarget                     — AS-REP Roastable (simulado)"
-    echo "    svc_backup / svc_mssql / svc_http / svc_jenkins — Kerberoastable"
+    echo "    htarget                     — AS-REP Roastable account"
+    echo "    svc_backup / svc_mssql / svc_http / svc_jenkins — Kerberoastable service accounts"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 

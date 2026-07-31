@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Abre un tunnel público hacia el MCP server local y exporta la URL.
-# Usa localhost.run (SSH, sin instalación) como primer intento,
-# cloudflared como fallback.
-# Escribe la URL en $GITHUB_ENV si la variable existe.
+# Opens a public tunnel to the local MCP server and exports the URL.
+# Uses localhost.run (SSH-only) as primary attempt, cloudflared as fallback.
+# Writes the URL to $GITHUB_ENV if present.
 
 set -euo pipefail
 
@@ -12,9 +11,9 @@ LOG="${3:-/tmp/tunnel.log}"
 
 log() { echo "[tunnel] $*" >&2; }
 
-# ── Intento 1: localhost.run (solo SSH, sin instalar nada) ───────────────────
+# ── Attempt 1: localhost.run (SSH-only, no installation) ───────────────────
 try_localhost_run() {
-    log "Intentando localhost.run..."
+    log "Attempting localhost.run..."
     ssh -o StrictHostKeyChecking=no \
         -o ServerAliveInterval=30 \
         -o ConnectTimeout=10 \
@@ -32,9 +31,9 @@ try_localhost_run() {
     return 1
 }
 
-# ── Intento 2: cloudflared Quick Tunnel ─────────────────────────────────────
+# ── Attempt 2: cloudflared Quick Tunnel ─────────────────────────────────────
 try_cloudflared() {
-    log "Intentando cloudflared Quick Tunnel..."
+    log "Attempting cloudflared Quick Tunnel..."
     local BIN="/usr/local/bin/cloudflared"
     if [ ! -f "$BIN" ]; then
         curl -fsSL \
@@ -65,12 +64,12 @@ if [ -z "$URL" ]; then
 fi
 
 if [ -z "$URL" ]; then
-    log "ERROR: no se pudo abrir tunnel. Ver $LOG"
+    log "ERROR: failed to open tunnel. See $LOG"
     cat "$LOG" >&2
     exit 1
 fi
 
-# Exportar para GitHub Actions
+# Export for GitHub Actions
 if [ -n "${GITHUB_ENV:-}" ]; then
     echo "${ENV_NAME}=${URL}" >> "$GITHUB_ENV"
 fi

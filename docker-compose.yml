@@ -1,7 +1,7 @@
 version: "3.9"
 
-# OpenLDAP + phpLDAPAdmin — target del challenge de AKATSUKI Offensive Security.
-# El servicio `munin` es opcional: útil si querés correr todo dentro de docker.
+# OpenLDAP + phpLDAPAdmin — target environment for AKATSUKI Offensive Security.
+# The munin service is optional: useful when running everything inside Docker.
 
 services:
   openldap:
