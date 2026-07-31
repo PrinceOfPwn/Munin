@@ -44,6 +44,10 @@ NON_TERMINAL_RUN_STATES = {"queued", "running", "waiting_for_human"}
 
 
 def _allowed_origins() -> set[str]:
+    """Re-read MUNIN_ALLOWED_ORIGINS on every call so runtime env updates
+    (e.g. a ngrok URL discovered after the server started) are honoured without
+    a restart.  The env var is a comma-separated list of origins.
+    """
     return {origin.rstrip("/") for origin in os.environ.get("MUNIN_ALLOWED_ORIGINS", "").split(",") if origin.strip()}
 
 
@@ -92,11 +96,15 @@ def _phase_from_events(reasoning_events: list[dict[str, Any]] | None, tool_event
 
 
 class SecurityHeaders:
-    """Small ASGI middleware compatible with the installed Starlette contract."""
+    """Small ASGI middleware compatible with the installed Starlette contract.
 
-    def __init__(self, app: Any, *, allowed_origins: set[str]) -> None:
+    ``MUNIN_ALLOWED_ORIGINS`` is re-read on every request via ``_allowed_origins()``
+    so that the set can be updated at runtime (e.g. by the CI workflow that
+    discovers the ngrok URL after the server has already started).
+    """
+
+    def __init__(self, app: Any) -> None:
         self.app = app
-        self.allowed_origins = allowed_origins
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -104,8 +112,9 @@ class SecurityHeaders:
             return
         headers = {bytes(key).lower(): bytes(value) for key, value in scope.get("headers", [])}
         origin = headers.get(b"origin", b"").decode("latin-1").rstrip("/")
+        allowed = _allowed_origins()  # re-read env on every request
         if scope.get("method") == "OPTIONS":
-            if origin not in self.allowed_origins:
+            if origin not in allowed:
                 await _error(403, "origin_denied", "origin is not allowed")(scope, receive, send)
                 return
             response = Response(status_code=204)
@@ -128,7 +137,7 @@ class SecurityHeaders:
                         (b"cross-origin-opener-policy", b"same-origin"),
                     ]
                 )
-                if origin in self.allowed_origins:
+                if origin in allowed:
                     response_headers.extend(
                         [
                             (b"access-control-allow-origin", origin.encode()),
@@ -151,7 +160,7 @@ def create_app(store: ProductionStore) -> Starlette:
     # extensions.  Idempotent — safe to call every boot.
     store = install_v3_1_extensions(store)
 
-    allowed_origins = _allowed_origins()
+    # allowed_origins is intentionally NOT captured at startup — see _allowed_origins().
 
     async def actor(request: Request, *, csrf: bool = False) -> dict[str, Any]:
         token = request.cookies.get("munin_session", "")
@@ -162,7 +171,9 @@ def create_app(store: ProductionStore) -> Starlette:
             origin = request.headers.get("origin", "").rstrip("/")
             fetch_site = request.headers.get("sec-fetch-site", "")
             provided = request.headers.get("x-csrf-token", "")
-            if not origin or origin not in allowed_origins or fetch_site not in {"same-origin", "same-site"}:
+            # Re-read allowed origins on every CSRF check so ngrok / tunnel
+            # URLs added after startup are accepted without a server restart.
+            if not origin or origin not in _allowed_origins() or fetch_site not in {"same-origin", "same-site"}:
                 raise PermissionError("cross-site request rejected")
             if not store.validate_csrf(session_id=result["session_id"], csrf_token=provided):
                 raise PermissionError("CSRF validation failed")
@@ -903,7 +914,7 @@ def create_app(store: ProductionStore) -> Starlette:
         Route("/api/conversations/{conversation_id}/presence", presence, methods=["POST"]),
         Route("/api/conversations/{conversation_id}/events", conversation_events, methods=["GET"]),
     ]
-    return SecurityHeaders(Starlette(debug=False, routes=routes), allowed_origins=allowed_origins)  # type: ignore[return-value]
+    return SecurityHeaders(Starlette(debug=False, routes=routes))  # type: ignore[return-value]
 
 
 def app_from_environment() -> Starlette:

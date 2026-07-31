@@ -492,6 +492,26 @@ jobs:
             fi
           done
 
+      - name: Inject tunnel URL into MUNIN_ALLOWED_ORIGINS
+        if: ${{ inputs.open_web_gui }}
+        run: |
+          # The Python API starts before the tunnel URL is known, so
+          # MUNIN_ALLOWED_ORIGINS only contains http://127.0.0.1:3000.
+          # SecurityHeaders and the CSRF guard now re-read the env var on
+          # every request, so we just need to update it in the runner env.
+          GUI_URL="${MUNIN_GUI_URL:-${MUNIN_GUI_NGROK_URL:-${MUNIN_GUI_CLOUDFLARED_URL:-${MUNIN_GUI_LOCALHOST_RUN_URL:-}}}}"
+          if [ -z "$GUI_URL" ]; then
+            echo "No public GUI tunnel URL found — MUNIN_ALLOWED_ORIGINS unchanged"
+            exit 0
+          fi
+          # Strip trailing slash for canonical comparison.
+          TUNNEL_ORIGIN="${GUI_URL%/}"
+          CURRENT="${MUNIN_ALLOWED_ORIGINS:-http://127.0.0.1:3000}"
+          UPDATED="${CURRENT},${TUNNEL_ORIGIN}"
+          echo "MUNIN_ALLOWED_ORIGINS=${UPDATED}" >> "$GITHUB_ENV"
+          echo "MUNIN_PRODUCTION_PROXY_ORIGIN=${TUNNEL_ORIGIN}" >> "$GITHUB_ENV"
+          echo "Allowed origins updated: ${UPDATED}"
+
       - name: Print connection info
         if: ${{ inputs.open_public_tunnel || inputs.open_web_gui }}
         run: |
