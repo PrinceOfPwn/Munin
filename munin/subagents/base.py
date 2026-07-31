@@ -30,9 +30,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ..core.prompting import subagent_runtime_prompt
 from ..mcp.audit import redact_secrets
 from ..mcp.shared_state import SharedStateStore, presence_metadata
-from ..mcp.tools import capabilities_tool, hugin_tool, ldap_tools, tavily_tool
+from ..mcp.tools import capabilities_tool, hugin_rag_tool, hugin_tool, ldap_tools, tavily_tool
 
 logger = logging.getLogger("munin.subagent")
 
@@ -445,6 +446,10 @@ SUBAGENT_TOOL_REGISTRY: list[dict[str, Any]] = [
             {"name": "tavily_search",  "desc": "Web search via Tavily API — general OSINT"},
             {"name": "hugin_search",   "desc": "CVE / exploit search against cached NVD + EPSS + CISA"},
             {"name": "hugin_refresh",  "desc": "Refresh the Hugin CVE cache from upstream feeds"},
+            {"name": "hugin_neighbors", "desc": "Traverse relationships around a Hugin node"},
+            {"name": "hugin_rag_search", "desc": "Retrieve scored Hugin evidence for a question"},
+            {"name": "hugin_plan_for", "desc": "Build an evidence-backed candidate plan"},
+            {"name": "hugin_node_detail", "desc": "Inspect one Hugin node and its sources"},
         ],
     },
     {
@@ -574,6 +579,9 @@ _STATIC_TOOLS: dict[str, Callable[..., Any]] = {
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
     "hugin_neighbors": hugin_tool.hugin_neighbors,
+    "hugin_rag_search": hugin_rag_tool.hugin_rag_search,
+    "hugin_plan_for": hugin_rag_tool.hugin_plan_for,
+    "hugin_node_detail": hugin_rag_tool.hugin_node_detail,
     "munin_capabilities": capabilities_tool.munin_capabilities,
 }
 
@@ -693,7 +701,12 @@ class ReActSubagentBase:
         specs = _tool_specs(catalog)
 
         context_text, context_meta = self._task_context(task)
-        system_prompt = self.system_prompt
+        system_prompt = "\n\n".join(
+            [
+                self.system_prompt,
+                subagent_runtime_prompt(self.name, self.role),
+            ]
+        )
         if context_text:
             system_prompt = f"{system_prompt}\n\n{context_text}"
         messages: list[dict[str, Any]] = [
