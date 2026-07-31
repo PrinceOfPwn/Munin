@@ -285,6 +285,43 @@ class SharedStateStore:
                     claimer_pid INTEGER
                 );
 
+                -- Persistent operator conversations. These records live in the
+                -- configured backend (Turso in production), never in runner
+                -- artifacts. The UI owns the conversation id and can therefore
+                -- resume the exact thread after a page reload or server restart.
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    summary_message_id INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    archived_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    filename TEXT NOT NULL,
+                    language TEXT NOT NULL DEFAULT 'text',
+                    media_type TEXT NOT NULL DEFAULT 'text/plain',
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                    FOREIGN KEY(message_id) REFERENCES conversation_messages(id)
+                );
+
                 -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_shared_intel_target ON shared_intel(target_ip);
                 CREATE INDEX IF NOT EXISTS idx_shared_intel_service ON shared_intel(service);
@@ -304,6 +341,9 @@ class SharedStateStore:
                 CREATE INDEX IF NOT EXISTS idx_generated_graphs_active ON generated_graphs(active);
                 CREATE INDEX IF NOT EXISTS idx_runtime_cache_expiry ON runtime_cache(expires_at_epoch);
                 CREATE INDEX IF NOT EXISTS idx_agent_wake_queue_target ON agent_wake_queue(target_agent, claimed_at);
+                CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(archived_at, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_conversation_messages_thread ON conversation_messages(conversation_id, id);
+                CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_thread ON conversation_artifacts(conversation_id, message_id);
                 """
             )
             # Existing Turso installations predate source_code. Keep generated
@@ -976,6 +1016,227 @@ class SharedStateStore:
             "generated_graphs_active": graphs_count,
             "by_severity": {row["severity"]: row["total"] for row in by_severity_rows},
         }
+
+    # ------------------------------------------------------------------
+    # persistent conversations (remote-authoritative in the public tools)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _conversation_id(value: str) -> str:
+        candidate = str(value or "").strip()
+        if not candidate or len(candidate) > 128:
+            raise ValueError("conversation_id must contain 1-128 characters")
+        if not all(char.isalnum() or char in {"-", "_"} for char in candidate):
+            raise ValueError("conversation_id may contain only letters, numbers, '-' and '_'")
+        return candidate
+
+    @staticmethod
+    def _conversation_row_to_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "summary_message_id": int(row["summary_message_id"] or 0),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "archived_at": row["archived_at"],
+            "message_count": int(row["message_count"] or 0) if "message_count" in row.keys() else 0,
+        }
+
+    @staticmethod
+    def _conversation_message_row_to_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "conversation_id": row["conversation_id"],
+            "role": row["role"],
+            "content": row["content"],
+            "metadata": _normalize_jsonish(row["metadata_json"] or "{}"),
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def _conversation_artifact_row_to_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "conversation_id": row["conversation_id"],
+            "message_id": int(row["message_id"]),
+            "filename": row["filename"],
+            "language": row["language"],
+            "media_type": row["media_type"],
+            "content": row["content"],
+            "created_at": row["created_at"],
+        }
+
+    def conversation_create(self, *, conversation_id: str, title: str = "") -> dict[str, Any]:
+        """Create a durable conversation or return the existing one.
+
+        Idempotence matters because the GUI creates its id before the first
+        network call and may retry after a transient tunnel failure.
+        """
+        conversation_id = self._conversation_id(conversation_id)
+        safe_title = " ".join(str(title or "").split())[:160]
+        now = _utc_now_db()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversations (id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (conversation_id, safe_title, now, now),
+            )
+            row = conn.execute(
+                """
+                SELECT c.*, COUNT(m.id) AS message_count
+                FROM conversations c
+                LEFT JOIN conversation_messages m ON m.conversation_id = c.id
+                WHERE c.id = ?
+                GROUP BY c.id
+                """,
+                (conversation_id,),
+            ).fetchone()
+        if row is None:  # pragma: no cover - database integrity guard
+            raise RuntimeError("conversation creation did not return a row")
+        return self._conversation_row_to_dict(row)
+
+    def conversation_list(self, *, limit: int = 50, include_archived: bool = False) -> list[dict[str, Any]]:
+        query = (
+            "SELECT c.*, COUNT(m.id) AS message_count "
+            "FROM conversations c "
+            "LEFT JOIN conversation_messages m ON m.conversation_id = c.id "
+        )
+        params: list[Any] = []
+        if not include_archived:
+            query += "WHERE c.archived_at = '' "
+        query += "GROUP BY c.id ORDER BY c.updated_at DESC LIMIT ?"
+        params.append(max(1, min(_coerce_int(limit, 50), 200)))
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._conversation_row_to_dict(row) for row in rows]
+
+    def conversation_get(self, *, conversation_id: str, message_limit: int = 500) -> dict[str, Any] | None:
+        conversation_id = self._conversation_id(conversation_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT c.*, COUNT(m.id) AS message_count
+                FROM conversations c
+                LEFT JOIN conversation_messages m ON m.conversation_id = c.id
+                WHERE c.id = ?
+                GROUP BY c.id
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            message_rows = conn.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE conversation_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (conversation_id, max(1, min(_coerce_int(message_limit, 500), 2000))),
+            ).fetchall()
+            artifact_rows = conn.execute(
+                """
+                SELECT * FROM conversation_artifacts
+                WHERE conversation_id = ?
+                ORDER BY id ASC
+                """,
+                (conversation_id,),
+            ).fetchall()
+        messages = [self._conversation_message_row_to_dict(item) for item in reversed(message_rows)]
+        artifacts = [self._conversation_artifact_row_to_dict(item) for item in artifact_rows]
+        return {"conversation": self._conversation_row_to_dict(row), "messages": messages, "artifacts": artifacts}
+
+    def conversation_append_message(
+        self,
+        *,
+        conversation_id: str,
+        role: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        conversation_id = self._conversation_id(conversation_id)
+        normalized_role = str(role or "").strip().lower()
+        if normalized_role not in {"user", "assistant", "system", "tool"}:
+            raise ValueError("conversation role must be user, assistant, system or tool")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("conversation content is required")
+        if len(content) > 1_000_000:
+            raise ValueError("conversation content exceeds 1,000,000 characters")
+        now = _utc_now_db()
+        with self._connect() as conn:
+            exists = conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+            if not exists:
+                raise ValueError("conversation_id does not exist")
+            cursor = conn.execute(
+                """
+                INSERT INTO conversation_messages (conversation_id, role, content, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (conversation_id, normalized_role, content, json.dumps(metadata or {}, ensure_ascii=True, default=str), now),
+            )
+            message_id = int(cursor.lastrowid)
+            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+            row = conn.execute("SELECT * FROM conversation_messages WHERE id = ?", (message_id,)).fetchone()
+        if row is None:  # pragma: no cover - database integrity guard
+            raise RuntimeError("conversation message creation did not return a row")
+        return self._conversation_message_row_to_dict(row)
+
+    def conversation_set_summary(self, *, conversation_id: str, summary: str, summary_message_id: int) -> None:
+        conversation_id = self._conversation_id(conversation_id)
+        if len(summary) > 24_000:
+            raise ValueError("conversation summary exceeds 24,000 characters")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE conversations
+                SET summary = ?, summary_message_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (summary, max(0, _coerce_int(summary_message_id, 0)), _utc_now_db(), conversation_id),
+            )
+
+    def conversation_add_artifact(
+        self,
+        *,
+        conversation_id: str,
+        message_id: int,
+        filename: str,
+        language: str,
+        media_type: str,
+        content: str,
+    ) -> dict[str, Any]:
+        conversation_id = self._conversation_id(conversation_id)
+        normalized_message_id = _coerce_int(message_id, 0)
+        if normalized_message_id < 1:
+            raise ValueError("message_id must be positive")
+        if not isinstance(content, str) or not content:
+            raise ValueError("artifact content is required")
+        if len(content) > 1_000_000:
+            raise ValueError("artifact content exceeds 1,000,000 characters")
+        safe_filename = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in filename)[:180]
+        if not safe_filename:
+            raise ValueError("artifact filename is required")
+        with self._connect() as conn:
+            belongs = conn.execute(
+                "SELECT 1 FROM conversation_messages WHERE id = ? AND conversation_id = ?",
+                (normalized_message_id, conversation_id),
+            ).fetchone()
+            if not belongs:
+                raise ValueError("message_id does not belong to conversation_id")
+            cursor = conn.execute(
+                """
+                INSERT INTO conversation_artifacts
+                    (conversation_id, message_id, filename, language, media_type, content)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (conversation_id, normalized_message_id, safe_filename, language[:48] or "text", media_type[:120] or "text/plain", content),
+            )
+            row = conn.execute("SELECT * FROM conversation_artifacts WHERE id = ?", (int(cursor.lastrowid),)).fetchone()
+        if row is None:  # pragma: no cover - database integrity guard
+            raise RuntimeError("conversation artifact creation did not return a row")
+        return self._conversation_artifact_row_to_dict(row)
 
     # ==================================================================
     # Munin extensions
