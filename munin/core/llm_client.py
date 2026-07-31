@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -109,16 +110,18 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
-        max_retries: int = 3,
+        max_retries: int | None = None,
+        on_retry: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """One chat/completions call with adaptive timeout + retry.
 
         Returns the OpenAI response as a dict (via .model_dump()).
         """
         effective_model = model or self.settings.llm_model
+        attempts = max(1, max_retries if max_retries is not None else self.settings.llm_retry_attempts)
         attempt = 0
         last_exc: Exception | None = None
-        while attempt < max_retries:
+        while attempt < attempts:
             attempt += 1
             timeout = self._compute_timeout()
             logger.debug("LLM call attempt=%d timeout=%.1fs model=%s", attempt, timeout, effective_model)
@@ -141,15 +144,47 @@ class LLMClient:
                 return response.model_dump()
             except APITimeoutError as exc:
                 last_exc = exc
-                logger.warning("LLM timeout attempt=%d elapsed=%.1fs; bumping ceiling and retrying", attempt, time.monotonic() - started)
+                logger.warning("LLM timeout attempt=%d/%d elapsed=%.1fs; bumping ceiling", attempt, attempts, time.monotonic() - started)
                 self._bump_ceiling()
-                time.sleep(min(30.0, 2**attempt))
+                if attempt < attempts:
+                    self._sleep_before_retry(attempt, attempts, "timeout", on_retry)
             except (APIConnectionError, APIStatusError) as exc:
                 last_exc = exc
-                logger.warning("LLM error attempt=%d: %s", attempt, exc)
-                time.sleep(min(30.0, 2**attempt))
+                status_code = getattr(exc, "status_code", None)
+                # Authentication, validation, and unknown-client errors are not
+                # transient. Retrying those would only make an operator wait.
+                if status_code is not None and status_code not in {408, 409, 429} and status_code < 500:
+                    raise
+                logger.warning("LLM transient error attempt=%d/%d status=%s: %s", attempt, attempts, status_code, exc)
+                if attempt < attempts:
+                    self._sleep_before_retry(attempt, attempts, f"HTTP {status_code or 'connection error'}", on_retry)
         assert last_exc is not None
         raise last_exc
+
+    def _sleep_before_retry(
+        self,
+        attempt: int,
+        attempts: int,
+        reason: str,
+        on_retry: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        delay = min(
+            self.settings.llm_retry_max_delay,
+            self.settings.llm_retry_base_delay * (2 ** (attempt - 1)),
+        )
+        event = {
+            "attempt": attempt,
+            "max_attempts": attempts,
+            "retry_in_seconds": delay,
+            "reason": reason,
+        }
+        if on_retry is not None:
+            try:
+                on_retry(event)
+            except Exception:
+                logger.debug("LLM retry observer failed", exc_info=True)
+        logger.info("LLM will retry in %.1fs after %s", delay, reason)
+        time.sleep(delay)
 
     def make_langchain(self) -> Any:
         """Return a ChatOpenAI instance wired to the same base_url/api_key/model.
