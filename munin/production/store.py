@@ -183,6 +183,57 @@ _DDL: tuple[str, ...] = (
 )
 MIGRATION_CHECKSUM = hashlib.sha256("\n".join(_DDL).encode()).hexdigest()
 
+# The MCP state store predates Production Suite and already owns generic names
+# such as ``conversations`` and ``messages`` in the operator's Turso database.
+# Production Suite is a separate aggregate, so it must never reuse or mutate
+# those legacy tables.  The adapter below namespaces only production SQL when
+# using the shared remote backend; local unit fixtures retain the concise names
+# in ``_DDL`` for readable assertions.
+_PRODUCTION_TABLE_NAMES = (
+    "schema_migrations",
+    "users",
+    "auth_sessions",
+    "auth_rate_limits",
+    "password_recovery_tokens",
+    "conversations",
+    "conversation_participants",
+    "messages",
+    "message_revisions",
+    "agent_runs",
+    "run_events",
+    "reasoning_events",
+    "tool_calls",
+    "subagent_runs",
+    "human_requests",
+    "conversation_artifacts",
+    "conversation_summaries",
+    "provider_profiles",
+    "audit_events",
+    "operation_snapshots",
+    "operation_branches",
+)
+_PRODUCTION_TABLE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(" + "|".join(sorted(_PRODUCTION_TABLE_NAMES, key=len, reverse=True)) + r")(?![A-Za-z0-9_])"
+)
+
+
+def _namespace_production_sql(sql: str) -> str:
+    """Map Production Suite's generic table identifiers to its Turso namespace."""
+    return _PRODUCTION_TABLE_PATTERN.sub(lambda match: f"production_{match.group(1)}", sql)
+
+
+class _NamespacedConnection:
+    """Small DB-API proxy that keeps Production Suite isolated from MCP tables."""
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        return self._connection.execute(_namespace_production_sql(sql), params)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
 
 class EnvelopeCipher:
     """Per-profile DEK envelope encryption with owner/profile/provider AAD."""
@@ -255,11 +306,13 @@ class ProductionStore:
         from ..mcp.persistence import open_connection
 
         def connect() -> Any:
-            return open_connection(
-                settings.db_url,
-                default_path=settings.shared_state_db,
-                auth_token=settings.db_auth_token,
-                authoritative=True,
+            return _NamespacedConnection(
+                open_connection(
+                    settings.db_url,
+                    default_path=settings.shared_state_db,
+                    auth_token=settings.db_auth_token,
+                    authoritative=True,
+                )
             )
 
         return cls(connect, master_key=master_key)
