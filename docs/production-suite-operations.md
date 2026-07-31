@@ -120,8 +120,10 @@ credentials, mutate production, or alter authentication.
    image, browser variable, log, or PR.
 3. Set the exact `MUNIN_ALLOWED_ORIGINS`, enable secure cookies, and keep the
    API private behind the Next.js same-origin proxy.
-4. Run `munin production-api --host 127.0.0.1 --port 8787`; configure the
-   server-only `MUNIN_PRODUCTION_API_URL` for the frontend.
+4. Run `munin production-api --host 127.0.0.1 --port 8787` **and** a separate
+   `munin production-worker`. The worker claims/heartbeats Turso leases even
+   when the browser/API request ends; configure the server-only
+   `MUNIN_PRODUCTION_API_URL` for the frontend.
 5. Set up an approved password-recovery delivery adapter before enabling the
    public recovery request UI.
 

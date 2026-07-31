@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -91,6 +92,20 @@ def production_api(host: str, port: int) -> None:
     from .production.asgi import app_from_environment
 
     uvicorn.run(app_from_environment(), host=host, port=port, log_level="info")
+
+
+@cli.command("production-worker")
+@click.option("--poll-seconds", default=2.0, show_default=True, type=float)
+def production_worker(poll_seconds: float) -> None:
+    """Run the Turso-leased worker independently of browser/API lifetimes."""
+    from .production.dispatcher import ProductionDispatcher
+    from .production.store import ProductionStore
+
+    settings = get_settings()
+    if not settings.db_url.startswith(("libsql://", "libsqls://")):
+        raise click.ClickException("production worker requires authoritative MUNIN_DB_URL=libsql://...")
+    store = ProductionStore.for_settings(settings, master_key=ProductionStore.master_key_from_environment())
+    ProductionDispatcher(store, settings, worker_id=f"worker-{os.getpid()}").run_forever(poll_seconds=poll_seconds)
 
 
 # ---------------------------------------------------------------------------
