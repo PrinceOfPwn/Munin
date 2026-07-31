@@ -15,6 +15,11 @@ async function proxy(request: Request, context: { params: { path?: string[] } })
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
+  // The browser is never allowed to address Production Suite directly.  The
+  // proxy supplies its stable internal origin so temporary tunnel hostnames
+  // (ngrok / trycloudflare) do not have to be accepted by the API.  The
+  // original Sec-Fetch-Site and CSRF token still travel with the request.
+  headers.set("origin", process.env.MUNIN_PRODUCTION_PROXY_ORIGIN || incoming.origin);
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
   try {
