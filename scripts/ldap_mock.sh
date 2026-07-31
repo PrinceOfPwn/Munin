@@ -14,6 +14,7 @@ LDAP_ROOT="dc=akatsuki,dc=com"
 ADMIN_PASS="itachi"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LDIF="$SCRIPT_DIR/ldap_mock.ldif"
+WEB_LAB_LDIF="$SCRIPT_DIR/ldap_seed/60-web-lab.ldif"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -61,9 +62,12 @@ _seed() {
         return 0
     fi
     log "Seeding mock data from $(basename $LDIF) ..."
-    ldapadd -c -H ldap://localhost:${HOST_PORT} -x \
-        -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
-        -f "$LDIF" 2>&1 | grep -v "^$" || true
+    for seed_file in "$LDIF" "$WEB_LAB_LDIF"; do
+        [ -f "$seed_file" ] || continue
+        ldapadd -c -H ldap://localhost:${HOST_PORT} -x \
+            -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
+            -f "$seed_file" 2>&1 | grep -v "^$" || true
+    done
     log "Seed complete."
 }
 
