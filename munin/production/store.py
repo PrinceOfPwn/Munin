@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import secrets
 import sqlite3
 import time
@@ -36,6 +37,12 @@ RUN_STATES = {"queued", "running", "waiting_for_human", "completed", "failed", "
 FINAL_RUN_STATES = {"completed", "failed", "interrupted", "cancelled"}
 ROLES = {"admin", "operator", "viewer"}
 _FENCED_ARTIFACT = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)[ \t]*\n(?P<content>[\s\S]*?)```")
+
+# How often at most (per session) the authenticate() idle-touch write fires.
+# A read-only validation path never takes the DB writer lock inside this window.
+# Configurable via env so operators can tune without code changes.
+_SESSION_TOUCH_LOCK = threading.Lock()
+_SESSION_TOUCH_INTERVAL_MS: int = int(os.environ.get("MUNIN_SESSION_TOUCH_INTERVAL_SECONDS", "120")) * 1000
 
 
 def _now_ms() -> int:
@@ -550,11 +557,20 @@ class ProductionStore:
         # The idle-rotation UPDATE is a 1-row write; keep it in its own short
         # transaction so it only takes the RESERVED lock for a single statement
         # instead of holding it across the password verify / SELECT above.
+        #
+        # Throttle: skip the write if we touched this session within the
+        # configured window.  The session is already validated above; skipping
+        # the bookkeeping write is safe and eliminates writer-lock contention
+        # from idle SSE connections and React-Query polling.
         try:
             with self._transaction() as conn:
                 conn.execute(
-                    "UPDATE auth_sessions SET last_seen_at_ms=?,idle_expires_at_ms=? WHERE id=? AND revoked_at_ms IS NULL",
-                    (now, min(now + 8 * 60 * 60 * 1000, absolute), session_id),
+                    "UPDATE auth_sessions"
+                    " SET last_seen_at_ms=?,idle_expires_at_ms=?"
+                    " WHERE id=? AND revoked_at_ms IS NULL"
+                    " AND last_seen_at_ms < ?",
+                    (now, min(now + 8 * 60 * 60 * 1000, absolute), session_id,
+                     now - _SESSION_TOUCH_INTERVAL_MS),
                 )
         except sqlite3.OperationalError:
             # Lock contention: the session is still valid, the next request will
@@ -880,7 +896,30 @@ class ProductionStore:
             return [{"id": row["id"], "run_id": row["run_id"], "sequence": int(row["sequence"]), "kind": row["kind"], "payload": json.loads(row["payload_json"]), "created_at_ms": int(row["created_at_ms"])} for row in rows]
 
     def run_events_after(self, *, run_id: str, after_sequence: int) -> list[dict[str, Any]]:
-        return [event for event in self.list_run_events(run_id) if event["sequence"] > max(0, after_sequence)]
+        """Return events with sequence > after_sequence, filtering in SQL.
+
+        Uses the existing ``idx_run_events_run_sequence`` index; avoids
+        deserialising the full run history on every SSE poll.
+        """
+        threshold = max(0, after_sequence)
+        with self._read_only() as conn:
+            rows = conn.execute(
+                "SELECT * FROM run_events"
+                " WHERE run_id=? AND sequence>?"
+                " ORDER BY sequence",
+                (run_id, threshold),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "sequence": int(row["sequence"]),
+                "kind": row["kind"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at_ms": int(row["created_at_ms"]),
+            }
+            for row in rows
+        ]
 
     def get_conversation(self, *, actor_id: str, conversation_id: str) -> dict[str, Any]:
         with self._read_only() as conn:

@@ -39,12 +39,16 @@ class ProductionDispatcher:
             payload={"run_id": claim["id"], "state": "running"},
         )
         stop = threading.Event()
+        lease_lost = threading.Event()  # set by heartbeat when renew_lease returns False
         tool_call_ids: dict[tuple[int, str], str] = {}
         tool_call_ids_by_use: dict[str, str] = {}
         assistant_stream: list[str] = []
         provider_stream: list[str] = []
         provider_reasoning_id: str | None = None
         last_refresh = 0.0
+        last_placeholder_flush = 0.0    # monotonic; controls DB write rate for placeholder
+        last_reasoning_flush = 0.0      # monotonic; controls DB write rate for reasoning
+        _FLUSH_INTERVAL = float(os.environ.get("MUNIN_STREAM_FLUSH_INTERVAL", "0.4"))  # seconds
         stream_lock = threading.RLock()
 
         def heartbeat() -> None:
@@ -52,6 +56,10 @@ class ProductionDispatcher:
                 if not self.store.renew_lease(
                     run_id=claim["id"], lease_token=claim["lease_token"], lease_seconds=60
                 ):
+                    # Signal the main thread so the agent loop can abort cleanly
+                    # rather than running indefinitely as a zombie and having its
+                    # final complete_run() silently rejected by fencing.
+                    lease_lost.set()
                     return
 
         heartbeat_thread = threading.Thread(
@@ -90,6 +98,22 @@ class ProductionDispatcher:
                     ),
                 )
 
+        def _flush_assistant_if_due(*, force: bool = False) -> None:
+            """Write accumulated assistant tokens to DB when the flush window expires.
+
+            Calling update_assistant_placeholder on every token produces O(n²)
+            join + hash + write cost.  We coalesce into at most one write per
+            _FLUSH_INTERVAL seconds so the DB write rate is bounded independently
+            of the provider's chunk granularity.
+            """
+            nonlocal last_placeholder_flush
+            if not assistant_stream:
+                return
+            if not force and time.monotonic() - last_placeholder_flush < _FLUSH_INTERVAL:
+                return
+            update_assistant_placeholder("".join(assistant_stream))
+            last_placeholder_flush = time.monotonic()
+
         def update_provider_reasoning(content: str, step: int) -> None:
             """Upsert one temporarily visible provider-reasoning row for this run."""
 
@@ -112,6 +136,16 @@ class ProductionDispatcher:
                     (content[-250_000:], provider_reasoning_id, claim["id"]),
                 )
 
+        def _flush_reasoning_if_due(step: int, *, force: bool = False) -> None:
+            """Coalesce provider reasoning writes behind the same flush window."""
+            nonlocal last_reasoning_flush
+            if not provider_stream:
+                return
+            if not force and time.monotonic() - last_reasoning_flush < _FLUSH_INTERVAL:
+                return
+            update_provider_reasoning("".join(provider_stream), step)
+            last_reasoning_flush = time.monotonic()
+
         def progress(event: dict[str, Any]) -> None:  # noqa: C901 - event adapter
             stage = str(event.get("stage", ""))
             tool_name = str(event.get("tool", ""))
@@ -123,7 +157,9 @@ class ProductionDispatcher:
                     return
                 with stream_lock:
                     assistant_stream.append(delta)
-                    update_assistant_placeholder("".join(assistant_stream))
+                    # Coalesce DB writes: flush at most every _FLUSH_INTERVAL seconds.
+                    # This eliminates the O(n²) join+hash+write cost on every token.
+                    _flush_assistant_if_due()
                     refresh_clients()
                 return
 
@@ -133,7 +169,7 @@ class ProductionDispatcher:
                     return
                 with stream_lock:
                     provider_stream.append(delta)
-                    update_provider_reasoning("".join(provider_stream), step)
+                    _flush_reasoning_if_due(step)
                     refresh_clients()
                 return
 
@@ -208,6 +244,15 @@ class ProductionDispatcher:
             refresh_clients(force=stage in {"model_stream_started", "model_stream_completed"})
 
         def pre_iteration_hook(step: int) -> str | None:
+            # Abort the agent loop cleanly if the heartbeat thread detected that
+            # our lease was claimed by another worker.  Without this check the
+            # agent would keep running, generate side effects, and have its
+            # complete_run() silently rejected by fencing, leaving state
+            # diverged between the DB and the broadcast.
+            if lease_lost.is_set():
+                raise RuntimeError(
+                    "run aborted: lease was not renewed — another worker has taken ownership"
+                )
             pending = self.store.consume_pending_guidance(
                 run_id=claim["id"], target_agent_id=None, delivered_at_step=step
             )
@@ -298,29 +343,48 @@ class ProductionDispatcher:
                     progress=progress,
                     pre_iteration_hook=pre_iteration_hook,
                 )
-            self.store.complete_run(
+            # Force a final placeholder flush so the last partial tokens are
+            # visible even if the _FLUSH_INTERVAL had not elapsed yet.
+            with stream_lock:
+                _flush_assistant_if_due(force=True)
+            accepted = self.store.complete_run(
                 run_id=claim["id"],
                 lease_token=claim["lease_token"],
                 content=str(result.get("content") or result.get("summary") or "(no response)"),
                 outcome="completed",
             )
-            self.store.append_conversation_broadcast(
-                conversation_id=context["conversation_id"],
-                kind="run-transition",
-                payload={"run_id": claim["id"], "state": "completed"},
-            )
+            if accepted:
+                self.store.append_conversation_broadcast(
+                    conversation_id=context["conversation_id"],
+                    kind="run-transition",
+                    payload={"run_id": claim["id"], "state": "completed"},
+                )
+            else:
+                # Fencing rejected the transition: another worker interrupted,
+                # cancelled, or claimed this run.  The DB state is authoritative.
+                # Do NOT emit a false "completed" broadcast.
+                self.store.append_reasoning_event(
+                    run_id=claim["id"],
+                    kind="operational_summary",
+                    content="completion rejected by fencing — run state was already modified by another actor",
+                    provider="",
+                    persistence_enabled=True,
+                    agent_name="munin",
+                    step=0,
+                )
         except Exception as exc:  # noqa: BLE001 - durable failure boundary
-            self.store.complete_run(
+            accepted = self.store.complete_run(
                 run_id=claim["id"],
                 lease_token=claim["lease_token"],
                 content=f"Operation failed: {exc}",
                 outcome="failed",
             )
-            self.store.append_conversation_broadcast(
-                conversation_id=context["conversation_id"],
-                kind="run-transition",
-                payload={"run_id": claim["id"], "state": "failed", "error": str(exc)},
-            )
+            if accepted:
+                self.store.append_conversation_broadcast(
+                    conversation_id=context["conversation_id"],
+                    kind="run-transition",
+                    payload={"run_id": claim["id"], "state": "failed", "error": str(exc)},
+                )
         finally:
             stop.set()
             heartbeat_thread.join(timeout=2)
