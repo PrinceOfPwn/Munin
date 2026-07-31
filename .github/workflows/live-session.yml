@@ -124,7 +124,11 @@ jobs:
       LLM_RETRY_MAX_DELAY:  "60"
       # Iteration budget — blank string means "no cap" (agent uses HARD_CEILING)
       MUNIN_MAX_ITERATIONS: ${{ inputs.munin_max_iterations }}
-      MUNIN_LOG_LEVEL:      "INFO"
+      # Logging — repo-level Actions variables (editable in repo settings):
+      # MUNIN_LOG_LEVEL=debug enables Munin call tracing; RUST_LOG=trace
+      # enables libsql (Turso client) trace logging.
+      MUNIN_LOG_LEVEL:      ${{ vars.MUNIN_LOG_LEVEL || 'INFO' }}
+      RUST_LOG:             ${{ vars.RUST_LOG || 'info' }}
       # Persistence knobs — auto-commit forged tools, open PR for soul edits.
       MUNIN_AUTO_COMMIT:  "1"
       MUNIN_AUTO_PR:      "1"

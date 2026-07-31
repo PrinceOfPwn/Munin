@@ -1,5 +1,21 @@
 # Changes
 
+## 2026-07-31 — Logging knobs for live-session debugging (repo Actions variables)
+
+- **Repo-level GitHub Actions variables created** (toggle from repo Settings →
+  Secrets and variables → Actions, no code change needed):
+  - `MUNIN_LOG_LEVEL=debug` — Munin call tracing (`munin/mcp/main.py` reads it)
+  - `RUST_LOG=trace` — libsql/Turso client trace logging (the Rust binding
+    initializes a `tracing_subscriber` from `RUST_LOG`; verified in
+    `tursodatabase/libsql-python` `src/lib.rs`)
+- **`.github/workflows/live-session.yml`** — job env now maps
+  `MUNIN_LOG_LEVEL: ${{ vars.MUNIN_LOG_LEVEL || 'INFO' }}` (was hardcoded
+  `"INFO"`) and adds `RUST_LOG: ${{ vars.RUST_LOG || 'info' }}`, so both
+  variables reach the MCP server, production API, worker, and GUI processes.
+- **`munin/cli.py`** — `munin production-api` no longer hardcodes
+  `log_level="info"` for uvicorn; it reads `MUNIN_LOG_LEVEL` (defaults to
+  `info`) so the operator API actually logs at debug when the variable is set.
+
 ## 2026-07-31 — PR #12: stop frontend hang cascade + unblock event loop under load
 
 Patch applied to `feat/issue9-deep-agents-migration` addressing the "OPENING

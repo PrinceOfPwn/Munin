@@ -121,7 +121,12 @@ def production_api(host: str, port: int) -> None:
 
     from .production.asgi import app_from_environment
 
-    uvicorn.run(app_from_environment(), host=host, port=port, log_level="info")
+    uvicorn.run(
+        app_from_environment(),
+        host=host,
+        port=port,
+        log_level=os.environ.get("MUNIN_LOG_LEVEL", "info").lower(),
+    )
 
 
 @cli.command("production-worker")
