@@ -137,6 +137,18 @@ function forwardAuthHeaders(request: NextRequest): Headers {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
+  // The Python backend's CSRF guard requires `origin` to be in MUNIN_ALLOWED_ORIGINS
+  // and `sec-fetch-site` to be "same-origin" or "same-site".
+  // When the Next.js BFF makes a server-to-server fetch those headers are absent,
+  // so we inject them explicitly — mirroring what the /api/production proxy does
+  // via MUNIN_PRODUCTION_PROXY_ORIGIN.
+  const proxyOrigin =
+    process.env.MUNIN_PRODUCTION_PROXY_ORIGIN ||
+    request.headers.get("origin") ||
+    new URL(request.url).origin;
+  headers.set("origin", proxyOrigin);
+  // A server-to-server call is always same-origin from the backend's perspective.
+  headers.set("sec-fetch-site", "same-origin");
   return headers;
 }
 

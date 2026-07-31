@@ -205,3 +205,125 @@ jobs:
             /tmp/munin-gui-e2e.log
             /tmp/munin-production-api.log
           retention-days: 7
+
+  live-llm-smoke:
+    name: Live LLM ReAct smoke (1 real turn)
+    # Same fork-safety gate as e2e_lab: never expose LLM_* secrets to PRs from forks.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      ldap:
+        image: osixia/openldap:1.5.0
+        env:
+          LDAP_ORGANISATION: "AKATSUKI"
+          LDAP_DOMAIN: "akatsuki.com"
+          LDAP_BASE_DN: "dc=akatsuki,dc=com"
+          LDAP_ADMIN_PASSWORD: "itachi"
+          LDAP_CONFIG_PASSWORD: "itachi"
+          LDAP_TLS: "false"
+        ports:
+          - 389:389
+      apache:
+        image: httpd:2.4.49
+        ports:
+          - 80:80
+    env:
+      MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
+      MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+      MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' }}
+      MUNIN_E2E_TEST_RUN_ID: llm_smoke_${{ github.run_id }}_deadbeef
+      MUNIN_MCP_AUTH_TOKEN: actions-e2e-lab-token
+      # Real LLM provider credentials — these drive MuninAgent.respond.
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LDAP_URI: ldap://127.0.0.1:389
+      LDAP_BASE_DN: dc=akatsuki,dc=com
+      LDAP_BIND_DN: cn=admin,dc=akatsuki,dc=com
+      LDAP_PASSWORD: itachi
+      PREFLIGHT_POLICY: off
+      MUNIN_SMOKE_LDAP_TARGET: 127.0.0.1
+      MUNIN_SMOKE_APACHE_TARGET: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Install Munin and lab probes
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ldap-utils nmap
+          GOBIN="$HOME/go/bin" go install github.com/projectdiscovery/httpx/cmd/httpx@v1.6.10
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: Require online Turso + LLM configuration
+        run: |
+          test -n "$MUNIN_DB_URL"
+          test -n "$MUNIN_DB_AUTH_TOKEN"
+          test -n "$LLM_BASE_URL"
+          test -n "$LLM_API_KEY"
+          test -n "$LLM_MODEL"
+          case "$MUNIN_DB_URL" in libsql://*|libsqls://*) ;; *) exit 1 ;; esac
+      - name: Verify Turso online persistence
+        run: python scripts/turso_smoke.py
+      - name: Wait for and seed LDAP + Apache lab
+        run: |
+          for i in $(seq 1 30); do
+            if ldapsearch -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -b "$LDAP_BASE_DN" "(objectClass=*)" dn 2>/dev/null | grep -q "result: 0"; then
+              break
+            fi
+            test "$i" -lt 30 || { echo "LDAP did not become ready" >&2; exit 1; }
+            sleep 1
+          done
+          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -f scripts/ldap_mock.ldif
+          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -f scripts/ldap_seed/60-web-lab.ldif
+          curl --fail --silent --show-error --retry 15 --retry-connrefused http://127.0.0.1:80/ >/dev/null
+      - name: Start MCP server (tools for the agent)
+        run: |
+          nohup munin mcp --transport streamable-http --host 127.0.0.1 --port 8890 \
+            </dev/null > /tmp/munin-e2e.log 2>&1 &
+          echo $! > /tmp/munin-e2e.pid
+      - name: Start authenticated Production Suite API (auto-dispatch ON)
+        env:
+          MUNIN_ALLOWED_ORIGINS: http://127.0.0.1:8787
+          MUNIN_COOKIE_SECURE: "0"
+          # The turn handler itself spawns the dispatcher thread that runs
+          # MuninAgent.respond — no separate worker process needed.
+          MUNIN_PRODUCTION_AUTO_DISPATCH: "1"
+        run: |
+          nohup munin production-api --host 127.0.0.1 --port 8787 \
+            </dev/null > /tmp/munin-production-api.log 2>&1 &
+          echo $! > /tmp/munin-production-api.pid
+          for i in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:8787/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat /tmp/munin-production-api.log
+          exit 1
+      - name: Exercise MCP against lab services (catalog sanity)
+        run: python scripts/ci_live_smoke.py --require-turso
+      - name: Live LLM ReAct smoke (1 turn, retry on provider transient)
+        env:
+          MUNIN_LIVE_SMOKE_ORIGIN: http://127.0.0.1:8787
+        run: python scripts/live_llm_smoke.py
+      - name: Cleanup exact Production Suite test namespace
+        if: always()
+        run: |
+          if [ -n "$MUNIN_DB_URL" ] && [ -n "$MUNIN_MASTER_KEY" ]; then
+            python scripts/production_fixture_janitor.py --test-run-id "$MUNIN_E2E_TEST_RUN_ID"
+          fi
+      - name: Upload live-LLM logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-llm-smoke-${{ github.run_id }}
+          path: |
+            /tmp/munin-e2e.log
+            /tmp/munin-production-api.log
+          retention-days: 7
