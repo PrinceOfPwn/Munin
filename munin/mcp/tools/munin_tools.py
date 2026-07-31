@@ -469,7 +469,7 @@ def conversation_create(conversation_id: str = "", title: str = "", run_id: str 
 @audited_tool("munin_chat", "passive", lambda *a, **k: str(k.get("mode", "sync")))
 def munin_chat(
     message: str,
-    max_iterations: int = 40,
+    max_iterations: int | None = None,
     mode: str = "sync",
     conversation_id: str = "",
     run_id: str = "",
@@ -478,8 +478,8 @@ def munin_chat(
     calls tools autonomously, and returns a response plus the tool-call log so the
     frontend can render each step as an inline card.
     Requires LLM_BASE_URL / LLM_API_KEY / LLM_MODEL to be configured.
-    Default budget is 40 iterations — raised from 6 to allow multi-stage
-    recon → intel → forge pipelines to complete.
+    It runs until natural completion unless ``max_iterations`` is explicitly
+    supplied. The runtime retains a 10,000-iteration safety ceiling.
     """
     if not message.strip():
         return {
@@ -511,7 +511,7 @@ def munin_chat(
             "error": {"code": "bad_input", "message": "mode must be sync or async"},
         }
 
-    iterations = max(1, min(_coerce_int(max_iterations, 40), 400))
+    iterations = None if max_iterations is None else max(1, min(_coerce_int(max_iterations, 40), 10_000))
     conversation_service = ConversationService(STATE)
     try:
         prepared = conversation_service.prepare_turn(

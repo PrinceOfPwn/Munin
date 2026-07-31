@@ -26,6 +26,9 @@ class Settings:
     llm_model: str = ""
     llm_timeout_floor: int = 40
     llm_timeout_ceiling: int = 240
+    llm_retry_attempts: int = 5
+    llm_retry_base_delay: float = 5.0
+    llm_retry_max_delay: float = 60.0
     operator_language: str = "auto"
 
     # --- Passive intel providers ---
@@ -139,6 +142,9 @@ def get_settings() -> Settings:
         llm_model=os.environ.get("LLM_MODEL", "").strip(),
         llm_timeout_floor=int(os.environ.get("LLM_TIMEOUT_FLOOR", "40")),
         llm_timeout_ceiling=int(os.environ.get("LLM_TIMEOUT_CEILING", "240")),
+        llm_retry_attempts=max(1, int(os.environ.get("LLM_RETRY_ATTEMPTS", "5"))),
+        llm_retry_base_delay=max(0.0, float(os.environ.get("LLM_RETRY_BASE_DELAY", "5"))),
+        llm_retry_max_delay=max(0.0, float(os.environ.get("LLM_RETRY_MAX_DELAY", "60"))),
         operator_language=os.environ.get("MUNIN_OPERATOR_LANGUAGE", "auto").strip() or "auto",
         # Intel providers
         tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip(),
