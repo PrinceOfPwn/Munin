@@ -61,7 +61,7 @@ _seed() {
         return 0
     fi
     log "Seeding mock data from $(basename $LDIF) ..."
-    ldapadd -H ldap://localhost:${HOST_PORT} -x \
+    ldapadd -c -H ldap://localhost:${HOST_PORT} -x \
         -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
         -f "$LDIF" 2>&1 | grep -v "^$" || true
     log "Seed complete."

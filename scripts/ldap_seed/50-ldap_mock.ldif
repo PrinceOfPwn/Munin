@@ -4,15 +4,6 @@
 # Coherent DNs, explicit root node, realistic SSHA password hashes, nested group delegations,
 # structured Kerberoasting SPNs, and AS-REP roastable markers.
 
-# ── Root Node & Base Domain ───────────────────────────────────────────────────
-
-dn: dc=akatsuki,dc=com
-objectClass: top
-objectClass: dcObject
-objectClass: organization
-o: Akatsuki Corporation
-dc: akatsuki
-
 # ── Legacy & Compatibility Containers ─────────────────────────────────────────
 
 dn: ou=users,dc=akatsuki,dc=com

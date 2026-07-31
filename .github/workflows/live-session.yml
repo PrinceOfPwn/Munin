@@ -228,7 +228,7 @@ jobs:
 
       - name: Seed mock LDAP data
         run: |
-          ldapadd -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
               -f scripts/ldap_mock.ldif 2>&1 | tail -20 || true
 
       - name: Start Munin MCP server
