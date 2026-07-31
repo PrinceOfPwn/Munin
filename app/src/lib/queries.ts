@@ -14,6 +14,25 @@ import {
 } from "./production-api";
 import { isTerminalRun } from "./utils";
 
+type CreatedConversation = Partial<Conversation> & {
+  id: string;
+  title: string;
+  created_at_ms?: number;
+};
+
+function normalizeCreatedConversation(raw: CreatedConversation): Conversation {
+  const now = raw.last_activity_at_ms || raw.created_at_ms || Date.now();
+  return {
+    id: raw.id,
+    title: raw.title || "New operation",
+    status: raw.status || "active",
+    tags: Array.isArray(raw.tags) ? raw.tags : [],
+    last_activity_at_ms: now,
+    message_count: Number(raw.message_count || 0),
+    version: Number(raw.version || 1),
+  };
+}
+
 /** Base list of conversations, filtered by an optional server-side query. */
 export function useConversations(query = "") {
   return useQuery({
@@ -27,7 +46,7 @@ export function useConversations(query = "") {
 /**
  * One conversation with its message timeline + runs.
  *
- * SSE is the fast path, but it is deliberately not the only path.  A short
+ * SSE is the fast path, but it is deliberately not the only path. A short
  * polling fallback remains active while a run is non-terminal so a tunnel or
  * Turso stream hiccup cannot leave an empty assistant placeholder on screen.
  */
@@ -121,7 +140,7 @@ export function useSendTurn() {
           conversation: {
             ...previous.conversation,
             last_activity_at_ms: now,
-            message_count: previous.conversation.message_count + 1,
+            message_count: Number(previous.conversation.message_count || 0) + 1,
           },
           messages: [...previous.messages, optimistic],
         });
@@ -130,7 +149,7 @@ export function useSendTurn() {
       qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) =>
         items?.map((item) =>
           item.id === variables.conversationId
-            ? { ...item, last_activity_at_ms: now, message_count: item.message_count + 1 }
+            ? { ...item, last_activity_at_ms: now, message_count: Number(item.message_count || 0) + 1 }
             : item,
         ),
       );
@@ -212,7 +231,10 @@ export function useArchiveConversation() {
 export function useCreateConversation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (title?: string) => productionApi.createConversation(title),
+    mutationFn: async (title?: string) =>
+      normalizeCreatedConversation(
+        (await productionApi.createConversation(title)) as CreatedConversation,
+      ),
     onSuccess: (conversation) => {
       qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) => {
         if (!items) return [conversation];
