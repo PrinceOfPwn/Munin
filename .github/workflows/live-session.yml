@@ -77,9 +77,9 @@ jobs:
       ldap:
         image: osixia/openldap:1.5.0
         env:
-          LDAP_ORGANISATION: "MELI"
-          LDAP_DOMAIN: "meli.com"
-          LDAP_BASE_DN: "dc=meli,dc=com"
+          LDAP_ORGANISATION: "AKATSUKI"
+          LDAP_DOMAIN: "akatsuki.com"
+          LDAP_BASE_DN: "dc=akatsuki,dc=com"
           LDAP_ADMIN_PASSWORD: "itachi"
           LDAP_CONFIG_PASSWORD: "itachi"
           LDAP_TLS: "false"
@@ -95,8 +95,8 @@ jobs:
       MUNIN_MCP_AUTH_TOKEN: ${{ secrets.MUNIN_MCP_AUTH_TOKEN }}
       # LDAP — the service container is reachable as hostname `ldap` on the job network
       LDAP_URI:      "ldap://ldap:389"
-      LDAP_BASE_DN:  "dc=meli,dc=com"
-      LDAP_BIND_DN:  "cn=admin,dc=meli,dc=com"
+      LDAP_BASE_DN:  "dc=akatsuki,dc=com"
+      LDAP_BIND_DN:  "cn=admin,dc=akatsuki,dc=com"
       LDAP_PASSWORD: "itachi"
       # OPSEC + timeouts
       PREFLIGHT_POLICY:     ${{ inputs.preflight_policy }}
