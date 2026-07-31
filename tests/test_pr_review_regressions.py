@@ -458,12 +458,13 @@ def _bare_munin_agent(llm, catalog):
     return agent
 
 
-def test_munin_agent_propagates_llm_failure_to_mcp(store, monkeypatch):
-    from dataclasses import replace
+def test_munin_agent_respond_raises_on_llm_failure():
+    """Direct characterization: MuninAgent.respond() wraps provider errors as RuntimeError.
 
-    from munin.core import munin_agent
-    from munin.mcp.tools import munin_tools
-
+    This assertion is required by tests/characterization/test_coord_respond_loop_parity.py
+    (issue #9 §12 step 1 parity baseline) and must stay green for the duration of the
+    migration; MuninAgent.respond() is kept alive for the rest of the roadmap.
+    """
     class FailingLlm:
         def chat(self, **kwargs):
             raise TimeoutError("provider timeout")
@@ -472,27 +473,15 @@ def test_munin_agent_propagates_llm_failure_to_mcp(store, monkeypatch):
     with pytest.raises(RuntimeError, match="LLM call failed"):
         agent.respond("hello", max_iterations=1)
 
-    class FailingAgent:
-        def __init__(self, settings):
-            pass
 
-        def respond(self, *args, **kwargs):
-            raise RuntimeError("LLM call failed at step 0")
-
-    settings = replace(
-        store.settings,
-        llm_base_url="https://llm.invalid/v1",
-        llm_api_key="configured",
-        llm_model="test",
-    )
-    monkeypatch.setattr(munin_agent, "MuninAgent", FailingAgent)
-    monkeypatch.setattr(munin_tools, "STATE", store)
-    monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
-    monkeypatch.setattr(munin_tools, "_conversation_backend_error", lambda _settings: None)
-
-    result = munin_tools.munin_chat("hello")
-    assert result["ok"] is False
-    assert result["error"]["code"] == "agent_error"
+# test_munin_agent_propagates_llm_failure_to_mcp (munin_chat MCP path) was
+# removed: the second half of the original test characterised the pre-issue-#9
+# munin_chat path that dispatched via MuninAgent.respond() through the MCP
+# tool surface (munin_tools.munin_chat → FailingAgent.respond → agent_error).
+# The supervisor_runner / Deep Agents runtime replaced that dispatch path on
+# this PR; error propagation from the new coordinator is exercised by the
+# runtime_adapter integration tests. The direct MuninAgent.respond() assertion
+# above remains intact per the parity baseline contract.
 
 
 def test_graph_diagnostics_imports_the_top_level_subagent_catalog(store, monkeypatch):

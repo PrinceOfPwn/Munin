@@ -32,6 +32,7 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Trash2,
   TriangleAlert,
   UserRound,
@@ -56,6 +57,7 @@ import { HitlRequest } from "@/components/chat/blocks/HitlRequest";
 import { ArtifactChip } from "@/components/chat/blocks/ArtifactChip";
 import { HeartbeatBar } from "@/components/chat/blocks/HeartbeatBar";
 import { NoteBlock } from "@/components/chat/blocks/NoteBlock";
+import AgentConsole from "@/components/AgentConsole";
 import { ComposerModeToggle, type ComposerMode } from "@/components/chat/ComposerModeToggle";
 import { FloatingWindowsHost } from "@/components/chat/FloatingWindowsHost";
 import { PresenceRow } from "@/components/collab/PresenceRow";
@@ -98,6 +100,7 @@ import {
 type View =
   | "command"
   | "conversations"
+  | "console"
   | "agents"
   | "operations"
   | "memory"
@@ -109,6 +112,7 @@ type View =
 const NAV: Array<{ id: View; label: string; icon: typeof Command }> = [
   { id: "command", label: "Command Center", icon: Command },
   { id: "conversations", label: "Conversations", icon: MessageSquare },
+  { id: "console", label: "Agent Console", icon: Terminal },
   { id: "agents", label: "Agents", icon: Bot },
   { id: "operations", label: "Operations", icon: Activity },
   { id: "memory", label: "Memory", icon: BrainCircuit },
@@ -395,6 +399,9 @@ function Workspace({
           setGlobalError={setGlobalError}
         />
       );
+      break;
+    case "console":
+      center = <AgentConsole conversationId={activeConversationId} />;
       break;
     case "agents":
       center = <AgentsView />;
