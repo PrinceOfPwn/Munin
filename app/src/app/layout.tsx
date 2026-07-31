@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Providers } from "@/components/Providers";
 
 export const metadata: Metadata = {
   title: "Munin — Autonomous Threat Intelligence & AI Security Agent",
@@ -19,7 +20,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark">
-      <body className="bg-bg text-body min-h-screen">{children}</body>
+      <body className="bg-bg text-body min-h-screen font-sans antialiased">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }
