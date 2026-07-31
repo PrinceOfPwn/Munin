@@ -46,9 +46,19 @@ _wait_ldap() {
     err "LDAP did not become ready after 30s — check: docker logs ${CONTAINER}"
 }
 
+_verify_populated() {
+    ldapsearch -H ldap://localhost:${HOST_PORT} -x \
+        -D "cn=admin,${LDAP_ROOT}" -w "${ADMIN_PASS}" \
+        -b "${LDAP_ROOT}" "(ou=users)" dn 2>/dev/null | grep -q "ou=users"
+}
+
 _seed() {
     if [ ! -f "$LDIF" ]; then
         err "LDIF file not found: $LDIF"
+    fi
+    if _verify_populated; then
+        log "Directory structure '${LDAP_ROOT}' already populated."
+        return 0
     fi
     log "Seeding mock data from $(basename $LDIF) ..."
     ldapadd -H ldap://localhost:${HOST_PORT} -x \
@@ -63,27 +73,30 @@ cmd_up() {
     _require_docker
 
     if _container_running; then
-        log "Container '${CONTAINER}' is already running on port ${HOST_PORT}."
-        _print_env
-        return 0
+        if _verify_populated; then
+            log "Container '${CONTAINER}' is running and populated on port ${HOST_PORT}."
+            _print_env
+            return 0
+        else
+            log "Existing container lacks valid '${LDAP_ROOT}' base DN or entries. Recreating..."
+            docker rm -f "$CONTAINER" &>/dev/null || true
+        fi
+    elif _container_exists; then
+        log "Removing stale container before recreation..."
+        docker rm -f "$CONTAINER" &>/dev/null || true
     fi
 
-    if _container_exists; then
-        log "Restarting existing container..."
-        docker start "$CONTAINER"
-    else
-        log "Pulling ${IMAGE} and starting container..."
-        docker run -d \
-            --name "$CONTAINER" \
-            -p "${HOST_PORT}:389" \
-            -e LDAP_ORGANISATION="AKATSUKI" \
-            -e LDAP_DOMAIN="akatsuki.com" \
-            -e LDAP_BASE_DN="${LDAP_ROOT}" \
-            -e LDAP_ADMIN_PASSWORD="${ADMIN_PASS}" \
-            -e LDAP_CONFIG_PASSWORD="${ADMIN_PASS}" \
-            -e LDAP_TLS="false" \
-            "$IMAGE"
-    fi
+    log "Pulling ${IMAGE} and starting fresh container..."
+    docker run -d \
+        --name "$CONTAINER" \
+        -p "${HOST_PORT}:389" \
+        -e LDAP_ORGANISATION="AKATSUKI" \
+        -e LDAP_DOMAIN="akatsuki.com" \
+        -e LDAP_BASE_DN="${LDAP_ROOT}" \
+        -e LDAP_ADMIN_PASSWORD="${ADMIN_PASS}" \
+        -e LDAP_CONFIG_PASSWORD="${ADMIN_PASS}" \
+        -e LDAP_TLS="false" \
+        "$IMAGE"
 
     _wait_ldap
     _seed
