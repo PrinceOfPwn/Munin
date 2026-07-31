@@ -136,6 +136,13 @@ jobs:
       # libsql cloud database for true persistent multi-session state.
       MUNIN_DB_URL:       ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+      # Isolated test key when no deployment KEK is configured. It encrypts
+      # only the temporary Production Suite namespace used by this session.
+      MUNIN_MASTER_KEY:   ${{ secrets.MUNIN_MASTER_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' }}
+      MUNIN_ALLOWED_ORIGINS: "http://127.0.0.1:3000"
+      MUNIN_COOKIE_SECURE: "1"
+      MUNIN_PRODUCTION_API_URL: "http://127.0.0.1:8787"
+      MUNIN_PRODUCTION_PROXY_ORIGIN: "http://127.0.0.1:3000"
       NGROK_AUTH_TOKEN:   ${{ secrets.NGROK_AUTH_TOKEN }}
       MUNIN_TUNNEL_PROVIDER: ${{ inputs.tunnel_provider }}
       # DEBIAN_FRONTEND avoids interactive prompts during apt-get inside Kali
@@ -399,6 +406,28 @@ jobs:
 
       - name: Exercise full MCP lab contract
         run: poetry run python scripts/ci_live_smoke.py --require-turso
+
+      - name: Start Production Suite API and worker
+        if: ${{ inputs.open_web_gui }}
+        run: |
+          nohup poetry run munin production-api --host 127.0.0.1 --port 8787 \
+            </dev/null > /tmp/munin-production-api.log 2>&1 &
+          echo $! > /tmp/munin-production-api.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/munin-production-api.pid)" 2>/dev/null; then
+              echo "::error::Production Suite API exited during startup"
+              cat /tmp/munin-production-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/health >/dev/null
+          nohup poetry run munin production-worker --poll-seconds 2 \
+            </dev/null > /tmp/munin-production-worker.log 2>&1 &
+          echo $! > /tmp/munin-production-worker.pid
 
       - name: Build and start Munin web GUI
         if: ${{ inputs.open_web_gui }}
