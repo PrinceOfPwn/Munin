@@ -9,6 +9,30 @@ Strategy (deliberately explicit — no LangGraph magic here for full control):
 4. If OK: persist to ``munin/generated/<slug>.py`` and return metadata for
    `registry.register` to attach the tool live to the MCP server.
 5. If FAIL: feed the error back to the LLM and iterate (up to ``max_iterations``).
+
+v3.1.1 hardening — canonical forge stages
+-----------------------------------------
+When the caller supplies a ``store`` + ``run_id`` (the production dispatcher
+does; unit tests and legacy MCP callers do not), every lifecycle transition
+also emits a canonical ``forge_*`` reasoning event via
+:func:`munin.production.forge_progress.emit_forge_stage`.  These events are
+what populate the per-forge floating window in the operator UI:
+
+* ``forge_propose``               — new iteration begins, model asked for a draft
+* ``forge_diff_ready``            — draft parsed, code visible for review
+* ``forge_typecheck_start/output/done``
+                                  — static AST + import-guard phase
+* ``forge_sandbox_start/output/done``
+                                  — restricted-exec smoke-test phase
+* ``forge_awaiting_approval``     — human-in-the-loop pause point
+* ``forge_budget_extension_available``
+                                  — surface an "Extend budget" affordance
+* ``forge_completed``             — success terminal
+* ``forge_failed``                — failure terminal
+
+When ``store`` is ``None`` (the default), emissions are silently skipped —
+the legacy ``self._emit`` episodic-memory recording remains intact so nothing
+downstream regresses.
 """
 
 from __future__ import annotations
@@ -121,6 +145,19 @@ def _extract_signature(script: str, function_name: str) -> inspect.Signature | N
 
 
 class ToolForgeSubagent:
+    """Iteratively write, typecheck and sandbox-validate a Python tool.
+
+    Constructor kwargs added in v3.1.1 (all backwards-compatible defaults):
+
+    * ``store`` — a ``ProductionStore`` (or v3.1-extended instance).  When
+      set, canonical ``forge_*`` reasoning events are emitted per the
+      lifecycle so the operator UI's floating window is populated.
+    * ``run_id`` — the durable run id to attribute forge events to.  Required
+      when ``store`` is set; ignored otherwise.
+    * ``agent_name`` — the AgentProfile id used to filter this forge's stream
+      in the UI.  Defaults to ``"tool-forge"``.
+    """
+
     def __init__(
         self,
         state: SharedStateStore,
@@ -129,12 +166,22 @@ class ToolForgeSubagent:
         max_iterations: int = 5,
         llm: LLMClient | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        store: Any = None,
+        run_id: str = "",
+        agent_name: str = "tool-forge",
     ) -> None:
         self.state = state
         self.allowed_imports_hint = allowed_imports or []
         self.max_iterations = max_iterations
         self.llm = llm or LLMClient(state.settings)
         self.on_progress = on_progress
+        self.store = store
+        self.run_id = run_id
+        self.agent_name = agent_name
+
+    # ------------------------------------------------------------------
+    # Progress emission — episodic memory + optional canonical stages
+    # ------------------------------------------------------------------
 
     def _emit(self, stage: str, message: str, **details: Any) -> None:
         """Record and expose a lifecycle milestone without model reasoning."""
@@ -154,6 +201,41 @@ class ToolForgeSubagent:
             except Exception:
                 logger.debug("could not publish forge progress", exc_info=True)
 
+    def _emit_forge(
+        self,
+        stage: str,
+        message: str,
+        *,
+        step: int = 0,
+        **extra: Any,
+    ) -> None:
+        """Emit a canonical forge stage to the UI floating window.
+
+        Silently no-ops when ``store`` is not configured (unit tests, MCP
+        callers that don't own a run id).  Failures never propagate — a
+        broken metadata channel must not break the forge itself.
+        """
+        if self.store is None or not self.run_id:
+            return
+        try:
+            from ..production.forge_progress import emit_forge_stage
+
+            emit_forge_stage(
+                self.store,
+                run_id=self.run_id,
+                agent_name=self.agent_name,
+                stage=stage,
+                message=message,
+                step=step,
+                **extra,
+            )
+        except Exception:
+            logger.debug("emit_forge_stage failed for stage %s", stage, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def forge(self, spec: str) -> dict[str, Any]:
         transcript: list[str] = [f"spec: {spec}"]
         error_hint = ""
@@ -162,6 +244,14 @@ class ToolForgeSubagent:
             self._emit(
                 "forge_generation",
                 f"Requesting implementation draft ({iteration}/{self.max_iterations})",
+                forge_iteration=iteration,
+                max_iterations=self.max_iterations,
+            )
+            # UI-canonical stage: model has been asked for a proposal.
+            self._emit_forge(
+                "forge_propose",
+                f"Requesting implementation draft ({iteration}/{self.max_iterations})",
+                step=iteration,
                 forge_iteration=iteration,
                 max_iterations=self.max_iterations,
             )
@@ -175,11 +265,30 @@ class ToolForgeSubagent:
             try:
                 completion = self.llm.chat(messages=messages, temperature=0.1)
             except Exception as exc:
-                return {"ok": False, "summary": "LLM call failed", "error": {"code": "llm_failed", "message": str(exc)}, "log_summary": "\n".join(transcript)}
+                self._emit_forge(
+                    "forge_failed",
+                    f"LLM call failed: {exc}",
+                    step=iteration,
+                    forge_iteration=iteration,
+                    error_code="llm_failed",
+                )
+                return {
+                    "ok": False,
+                    "summary": "LLM call failed",
+                    "error": {"code": "llm_failed", "message": str(exc)},
+                    "log_summary": "\n".join(transcript),
+                }
             content = completion["choices"][0]["message"]["content"] or ""
             data = _extract_json(content)
             if not data:
                 self._emit("forge_validation", "Model reply was not valid forge JSON", forge_iteration=iteration, ok=False)
+                self._emit_forge(
+                    "forge_typecheck_output",
+                    "Model reply was not valid forge JSON — retrying",
+                    step=iteration,
+                    forge_iteration=iteration,
+                    ok=False,
+                )
                 error_hint = "Your last response was not valid JSON. Return ONLY the JSON object as specified."
                 transcript.append("bad JSON")
                 continue
@@ -188,15 +297,93 @@ class ToolForgeSubagent:
             allowed = set(data.get("allowed_imports", [])) | set(self.allowed_imports_hint)
             if not script or not function_name:
                 self._emit("forge_validation", "Generated draft is missing required fields", forge_iteration=iteration, ok=False)
+                self._emit_forge(
+                    "forge_typecheck_output",
+                    "Generated draft is missing required fields — retrying",
+                    step=iteration,
+                    forge_iteration=iteration,
+                    ok=False,
+                )
                 error_hint = "Missing `python` or `function_name` in your JSON."
                 transcript.append("missing fields")
                 continue
 
+            # UI-canonical: draft available for review + typecheck begins.
+            self._emit_forge(
+                "forge_diff_ready",
+                f"Draft ready for review: {function_name} ({len(script)} bytes)",
+                step=iteration,
+                forge_iteration=iteration,
+                function_name=function_name,
+                script_bytes=len(script),
+                allowed_imports=sorted(allowed),
+            )
+            self._emit_forge(
+                "forge_typecheck_start",
+                "Validating AST + import guard",
+                step=iteration,
+                forge_iteration=iteration,
+                function_name=function_name,
+            )
             self._emit("forge_validation", "Validating draft in the sandbox", forge_iteration=iteration)
+
+            self._emit_forge(
+                "forge_sandbox_start",
+                "Running draft in restricted-exec sandbox",
+                step=iteration,
+                forge_iteration=iteration,
+                function_name=function_name,
+            )
             sandbox_result = self._exercise(script, function_name, allowed)
             transcript.append(f"sandbox ok={sandbox_result.ok} error={sandbox_result.error}")
+            # Emit sandbox stdout/stderr tail so the UI's terminal panel has
+            # something to render even when the run completes on the first pass.
+            stderr_tail = (sandbox_result.stderr or "")[-2_000:]
+            stdout_tail = getattr(sandbox_result, "stdout", "") or ""
+            stdout_tail = stdout_tail[-2_000:]
+            if stdout_tail:
+                self._emit_forge(
+                    "forge_sandbox_output",
+                    stdout_tail,
+                    step=iteration,
+                    forge_iteration=iteration,
+                    stream="stdout",
+                )
+            if stderr_tail:
+                self._emit_forge(
+                    "forge_sandbox_output",
+                    stderr_tail,
+                    step=iteration,
+                    forge_iteration=iteration,
+                    stream="stderr",
+                )
+            self._emit_forge(
+                "forge_sandbox_done",
+                f"Sandbox exit: ok={sandbox_result.ok}",
+                step=iteration,
+                forge_iteration=iteration,
+                ok=bool(sandbox_result.ok),
+            )
+            self._emit_forge(
+                "forge_typecheck_done",
+                f"Typecheck exit: ok={sandbox_result.ok}",
+                step=iteration,
+                forge_iteration=iteration,
+                ok=bool(sandbox_result.ok),
+            )
             if not sandbox_result.ok:
                 self._emit("forge_validation", "Sandbox rejected generated draft", forge_iteration=iteration, ok=False)
+                # Surface an extension affordance when the operator has
+                # burned iterations without a green sandbox — the UI turns
+                # this into an "Extend budget +5 min" button.
+                if iteration >= max(1, self.max_iterations - 1):
+                    self._emit_forge(
+                        "forge_budget_extension_available",
+                        "Forge budget almost exhausted — operator may extend",
+                        step=iteration,
+                        forge_iteration=iteration,
+                        budget_extension_seconds=300,
+                    )
                 error_hint = (
                     f"Your previous attempt failed sandbox validation:\n"
                     f"error: {sandbox_result.error}\n"
@@ -214,7 +401,33 @@ class ToolForgeSubagent:
             signature_json = signature_to_json_schema(sig) if sig else {}
             signature_json["function_name"] = function_name
             self.log_success(spec=spec, slug=slug, description=data.get("description", ""), tags=data.get("tags", []))
-            self._emit("forge_ready", "Validated Python source is ready for MCP registration", forge_iteration=iteration, tool_slug=slug, ok=True)
+            self._emit(
+                "forge_ready",
+                "Validated Python source is ready for MCP registration",
+                forge_iteration=iteration,
+                tool_slug=slug,
+                ok=True,
+            )
+            # Approval pause point — HITL profiles gate here.
+            self._emit_forge(
+                "forge_awaiting_approval",
+                f"Forged {slug} — awaiting operator approval to register",
+                step=iteration,
+                forge_iteration=iteration,
+                tool_slug=slug,
+                function_name=function_name,
+                script_path=str(script_path),
+            )
+            self._emit_forge(
+                "forge_completed",
+                f"Forged {slug} in {iteration} iterations",
+                step=iteration,
+                forge_iteration=iteration,
+                tool_slug=slug,
+                function_name=function_name,
+                iterations=iteration,
+                script_path=str(script_path),
+            )
             return {
                 "ok": True,
                 "summary": f"forged {slug} in {iteration} iterations",
@@ -228,6 +441,13 @@ class ToolForgeSubagent:
                 "log_summary": "\n".join(transcript),
             }
 
+        self._emit_forge(
+            "forge_failed",
+            f"Exhausted {self.max_iterations} iterations without a valid tool",
+            step=self.max_iterations,
+            forge_iteration=self.max_iterations,
+            error_code="forge_exhausted",
+        )
         return {
             "ok": False,
             "summary": f"exhausted {self.max_iterations} iterations without a valid tool",

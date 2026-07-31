@@ -79,6 +79,43 @@ services:
     networks:
       - munin
 
+  munin-production-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: munin-production-api
+    profiles: ["runtime"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MUNIN_MCP_HOST: 0.0.0.0
+      MUNIN_MCP_PORT: 8890
+      MUNIN_ALLOWED_ORIGINS: ${MUNIN_ALLOWED_ORIGINS:?set_MUNIN_ALLOWED_ORIGINS}
+      MUNIN_MASTER_KEY: ${MUNIN_MASTER_KEY:?set_MUNIN_MASTER_KEY}
+    command: ["munin", "production-api", "--host", "0.0.0.0", "--port", "8787"]
+    depends_on:
+      munin:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8787:8787"
+    networks:
+      - munin
+
+  munin-production-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: munin-production-worker
+    profiles: ["runtime"]
+    restart: unless-stopped
+    env_file: .env
+    command: ["munin", "production-worker", "--poll-seconds", "2"]
+    depends_on:
+      munin-production-api:
+        condition: service_started
+    networks:
+      - munin
+
 volumes:
   openldap_data:
   openldap_config:

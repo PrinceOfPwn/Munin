@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Session duration in minutes (max 55)"
+        description: "Session duration in minutes (max 240 — 4h on paid runners, 55 free)"
         required: true
-        default: "30"
+        default: "60"
         type: number
       preflight_policy:
         description: "OPSEC preflight policy"
@@ -75,7 +75,11 @@ jobs:
   munin:
     name: "Munin session (${{ inputs.duration_minutes }}min · Kali)"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # v3: bumped to 4h so an operator can drive a long-running investigation.
+    # The runner still self-caps below to duration_minutes; this is only the
+    # outer safety ceiling.  Free-tier runners are hard-capped at 6h anyway,
+    # so 240min leaves head-room for teardown/artifact upload.
+    timeout-minutes: 240
 
     # We run as root inside the container (Kali's default) so installed
     # offensive binaries can bind raw sockets when a graph authorizes it.
@@ -136,6 +140,18 @@ jobs:
       # libsql cloud database for true persistent multi-session state.
       MUNIN_DB_URL:       ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+      # Isolated test key when no deployment KEK is configured. It encrypts
+      # only the temporary Production Suite namespace used by this session.
+      MUNIN_MASTER_KEY:   ${{ secrets.MUNIN_MASTER_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' }}
+      MUNIN_ALLOWED_ORIGINS: "http://127.0.0.1:3000"
+      MUNIN_COOKIE_SECURE: "1"
+      MUNIN_PRODUCTION_API_URL: "http://127.0.0.1:8787"
+      MUNIN_PRODUCTION_PROXY_ORIGIN: "http://127.0.0.1:3000"
+      # v3: long-running run stream configuration.
+      # * MAX_SECONDS bounds a single SSE connection lifetime (4h).
+      # * HEARTBEAT_SECONDS keeps the pipe warm through idle proxies.
+      MUNIN_SSE_MAX_SECONDS: "14400"
+      MUNIN_SSE_HEARTBEAT_SECONDS: "20"
       NGROK_AUTH_TOKEN:   ${{ secrets.NGROK_AUTH_TOKEN }}
       MUNIN_TUNNEL_PROVIDER: ${{ inputs.tunnel_provider }}
       # DEBIAN_FRONTEND avoids interactive prompts during apt-get inside Kali
@@ -400,6 +416,28 @@ jobs:
       - name: Exercise full MCP lab contract
         run: poetry run python scripts/ci_live_smoke.py --require-turso
 
+      - name: Start Production Suite API and worker
+        if: ${{ inputs.open_web_gui }}
+        run: |
+          nohup poetry run munin production-api --host 127.0.0.1 --port 8787 \
+            </dev/null > /tmp/munin-production-api.log 2>&1 &
+          echo $! > /tmp/munin-production-api.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/munin-production-api.pid)" 2>/dev/null; then
+              echo "::error::Production Suite API exited during startup"
+              cat /tmp/munin-production-api.log
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/health >/dev/null
+          nohup poetry run munin production-worker --poll-seconds 2 \
+            </dev/null > /tmp/munin-production-worker.log 2>&1 &
+          echo $! > /tmp/munin-production-worker.pid
+
       - name: Build and start Munin web GUI
         if: ${{ inputs.open_web_gui }}
         working-directory: app
@@ -501,11 +539,33 @@ jobs:
           SUMMARY
 
       - name: Keep session alive
-        # Self-cap at 55 min for safety
+        # v3: self-cap at 240 minutes (matches timeout-minutes above).  A
+        # heartbeat is emitted every 5 minutes so GitHub Actions doesn't
+        # mark the job as "no output for 60m" and kill it prematurely.
+        # Long-running: the runner has 4h wall clock.  The Turso store
+        # persists across runner restarts.  If a run needs longer, reconnect
+        # a new tunnel and rehydrate — no data is lost.
         run: |
           MINS=${{ inputs.duration_minutes }}
-          if [ "$MINS" -gt 55 ]; then MINS=55; fi
-          sleep $((MINS * 60))
+          if [ "$MINS" -gt 240 ]; then MINS=240; fi
+          END=$(( $(date +%s) + MINS * 60 ))
+          # Background keep-alive so GHA sees output every 5 minutes.
+          (
+            while [ "$(date +%s)" -lt "$END" ]; do
+              echo "[munin][keep-alive] $(date -u +%FT%TZ) — $(( (END - $(date +%s)) / 60 ))m remaining"
+              # Also poll the production API health so a silent crash surfaces fast.
+              if ! curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+                echo "::warning::production API health check failed"
+              fi
+              sleep 300
+            done
+          ) &
+          KEEPALIVE_PID=$!
+          # Foreground wait — sleep releases when the whole duration elapses.
+          while [ "$(date +%s)" -lt "$END" ]; do
+            sleep 30
+          done
+          kill "$KEEPALIVE_PID" 2>/dev/null || true
 
       - name: Munin server logs (tail)
         if: always()
@@ -514,10 +574,16 @@ jobs:
           tail -100 /tmp/munin.log 2>/dev/null || echo "(no log)"
           echo "── /tmp/munin-gui.log (tail 100) ──"
           tail -100 /tmp/munin-gui.log 2>/dev/null || echo "(no GUI log)"
+          echo "── /tmp/munin-production-api.log (tail 100) ──"
+          tail -100 /tmp/munin-production-api.log 2>/dev/null || echo "(no production API log)"
+          echo "── /tmp/munin-production-worker.log (tail 100) ──"
+          tail -100 /tmp/munin-production-worker.log 2>/dev/null || echo "(no worker log)"
           echo "── /tmp/mcp-tunnel.log ──"
           cat /tmp/mcp-tunnel.log 2>/dev/null || echo "(no MCP tunnel log)"
           echo "── /tmp/gui-tunnel.log ──"
           cat /tmp/gui-tunnel.log 2>/dev/null || echo "(no GUI tunnel log)"
+          echo "── production API health snapshot ──"
+          curl -fsS http://127.0.0.1:8787/health 2>&1 || echo "(production API unreachable)"
 
       # Runners are detached process-group leaders. Stop and await them before
       # MCP flushes git/Turso and before SQLite artifacts are snapshotted.
