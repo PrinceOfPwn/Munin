@@ -19,6 +19,14 @@ docker compose logs -f munin
 The service uses `restart: unless-stopped`. It is an operator interface, not an
 authorization bypass: active tools still use the existing scope and OPSEC gates.
 
+### 24/7 via GitHub Actions (Cloud)
+
+While GitHub-hosted runners have a maximum execution limit of 6 hours per job, you can simulate a 24/7 Discord operation entirely in the cloud without local infrastructure by leveraging **Turso** for durable persistence and scheduled workflows.
+
+1. **Configure Secrets**: Set `MUNIN_DISCORD_TOKEN`, `MUNIN_DISCORD_CHANNEL_ID`, `MUNIN_DISCORD_ALLOWED_USER_IDS`, and your `MUNIN_DB_URL` (Turso) in your repository secrets.
+2. **Cron Scheduler**: Create a GitHub Actions workflow (e.g., `.github/workflows/discord-24x7.yml`) that runs on a schedule (e.g., `cron: '0 */5 * * *'`) to restart the agent just before the 6-hour limit expires.
+3. **Stateless Reconnection**: Because the Discord connection is stateless and all memory (semantic, episodic, procedural tools) is safely stored in Turso, the bot will briefly disconnect and instantly reconnect when the new runner spins up, resuming its operations exactly where it left off.
+
 ## Local LDAP + Apache fixture
 
 The Docker lab contains a richer AKATSUKI directory and `WEB01`, represented by

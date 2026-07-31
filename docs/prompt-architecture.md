@@ -94,7 +94,8 @@ the new `gen__*` tool is registered, invoked, validated, and persisted.
 
 - English `name`, `purpose`, JSON keys, and tool names;
 - a Simplified Chinese specialist system prompt;
-- a whitelist no broader than the requested tools;
+- an effective whitelist derived from the requested tools and any additional
+  already-registered capabilities required by the declared purpose;
 - explicit evidence rules, human checkpoints, parent handoff, and termination.
 
 Hugin, LDAP, and active-tool rules are included only when the corresponding
