@@ -111,16 +111,6 @@ function saveStoredConfig(url: string, token: string) {
   }
 }
 
-function loadStoredConversationId(): string {
-  if (typeof window === "undefined") return "";
-  try { return String(window.localStorage.getItem("munin.activeConversation") || ""); } catch { return ""; }
-}
-
-function saveStoredConversationId(conversationId: string) {
-  if (typeof window === "undefined") return;
-  try { window.localStorage.setItem("munin.activeConversation", conversationId); } catch { /* cache is optional */ }
-}
-
 const initialLive: LiveState = {
   mcpConnected: false,
   toolCount: 0,
@@ -156,7 +146,7 @@ export const useMuninStore = create<MuninState>((set, get) => ({
 
   init: () => {
     const { url, token } = loadStoredConfig();
-    set({ mcpUrl: url, mcpToken: token, activeConversationId: loadStoredConversationId() });
+    set({ mcpUrl: url, mcpToken: token });
     L.info("store.init — triggering initial fetches");
     // Fire and forget — errors are caught inside each fn
     get().refreshTools();
@@ -373,7 +363,6 @@ export const useMuninStore = create<MuninState>((set, get) => ({
       chatInput: "",
       view: "chat",
     });
-    saveStoredConversationId(id);
   },
 
   loadConversations: async () => {
@@ -388,9 +377,8 @@ export const useMuninStore = create<MuninState>((set, get) => ({
       const conversations = Array.isArray(data?.conversations) ? data.conversations : [];
       set({ conversations, conversationsLoading: false });
       const active = get().activeConversationId;
-      const requested = active && conversations.some((item) => item.id === active) ? active : conversations[0]?.id;
-      if (requested) {
-        await get().selectConversation(requested);
+      if (!active && conversations.length > 0) {
+        await get().selectConversation(conversations[0].id);
       }
     } catch (e: any) {
       // Chat persistence is deliberately Turso-only. Keep the compose surface
@@ -420,8 +408,6 @@ export const useMuninStore = create<MuninState>((set, get) => ({
         conversationsLoading: false,
         view: "chat",
       });
-      saveStoredConversationId(conversationId);
-      void resumePersistedConversationRuns(conversationId, data?.messages || [], set, get);
     } catch (e: any) {
       L.warn("selectConversation failed", { conversationId, error: e?.message || String(e) });
       set({ conversationsLoading: false });
@@ -457,7 +443,6 @@ export const useMuninStore = create<MuninState>((set, get) => ({
       chatInput: "",
       activeConversationId: conversationId,
     }));
-    saveStoredConversationId(conversationId);
 
     // Slash command -> direct tool call
     if (text.startsWith("/")) {
@@ -579,21 +564,7 @@ function conversationMessagesToChat(rows: any[], artifacts: ConversationArtifact
     .map((row) => {
       const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
       const timestamp = Date.parse(String(row.created_at || ""));
-      const trace = Array.isArray(metadata.trace) ? metadata.trace : [];
-      const runStatus = String(metadata.run_status || "");
-      const runCall: ToolCall | undefined = trace.length || metadata.job_id
-        ? {
-            id: `run-${row.id}`,
-            name: "munin_chat",
-            arguments: {},
-            status: /queued|running/.test(runStatus) ? "running" : runStatus === "failed" ? "error" : "success",
-            startTime: Number.isFinite(timestamp) ? timestamp : Date.now(),
-            endTime: /queued|running/.test(runStatus) ? undefined : (Number.isFinite(timestamp) ? timestamp : Date.now()),
-            result: { job_id: metadata.job_id, status: runStatus, progress: trace },
-            error: runStatus === "failed" ? { code: "conversation_run_failed", message: String(metadata.error || "Conversation did not complete") } : undefined,
-          }
-        : undefined;
-      const completedToolCalls = Array.isArray(metadata.tool_calls)
+      const toolCalls = Array.isArray(metadata.tool_calls)
         ? metadata.tool_calls.map((call: any, index: number) => ({
             id: `persisted-${row.id}-${index}`,
             name: String(call?.name || "tool"),
@@ -603,72 +574,17 @@ function conversationMessagesToChat(rows: any[], artifacts: ConversationArtifact
             endTime: Number.isFinite(timestamp) ? timestamp : Date.now(),
             result: call?.result,
             error: call?.error,
-        }))
+          }))
         : undefined;
       return {
         id: String(row.id),
         role: row.role,
         content: String(row.content || ""),
-        toolCalls: [...(runCall ? [runCall] : []), ...(completedToolCalls || [])],
+        toolCalls,
         artifacts: artifactsByMessage.get(String(row.id)) || [],
-        executionTrace: trace,
-        runStatus,
-        jobId: typeof metadata.job_id === "string" ? metadata.job_id : "",
-        thinking: /queued|running/.test(runStatus),
         timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
       } as ChatMessage;
     });
-}
-
-/**
- * Reattach a browser that reloaded while a server-side ReAct job was running.
- * Turso owns the durable trace and final answer; browser storage only remembers
- * the selected thread. If the server itself was restarted, preserve the pending
- * operator message and surface a recoverable status instead of silently losing it.
- */
-async function resumePersistedConversationRuns(
-  conversationId: string,
-  rows: any[],
-  set: (fn: (s: MuninState) => Partial<MuninState>) => void,
-  get: () => MuninState
-) {
-  const activeRuns = rows
-    .filter((row) => /queued|running/.test(String(row?.metadata?.run_status || "")) && row?.metadata?.job_id)
-    .map((row) => ({ messageId: String(row.id), jobId: String(row.metadata.job_id) }));
-  for (const run of activeRuns) {
-    const client = getMcpClient({ baseUrl: get().mcpUrl, token: get().mcpToken });
-    const deadline = Date.now() + 55 * 60_000;
-    while (Date.now() < deadline) {
-      await sleep(1_500);
-      try {
-        const response = await client.callTool("job_status", { job_id: run.jobId, include_result: true });
-        const { json, text, isError } = extractToolResultContent(response);
-        if (isError) throw new Error(text || "Job no longer exists on this server");
-        const data = json?.data || json || {};
-        const progress = Array.isArray(data.progress) ? data.progress : [];
-        get().updateToolCall(run.messageId, `run-${run.messageId}`, {
-          result: { job_id: run.jobId, status: data.status || "running", progress },
-        });
-        if (data.status === "queued" || data.status === "running") continue;
-        // The worker writes the final content and trace to Turso. Reload the
-        // thread rather than reconstructing a second assistant message locally.
-        await get().selectConversation(conversationId);
-        break;
-      } catch (error: any) {
-        set((state) => ({
-          messages: state.messages.map((message) => message.id === run.messageId
-            ? {
-                ...message,
-                thinking: false,
-                runStatus: "interrupted",
-                content: "Munin's server no longer has this in-flight job. Your request and its last observable trace remain in Turso; retry this turn when the runner is available.",
-              }
-            : message),
-        }));
-        break;
-      }
-    }
-  }
 }
 
 function parseSlashCommand(input: string): {
