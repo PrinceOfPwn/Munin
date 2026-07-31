@@ -9,12 +9,12 @@ def test_langgraph_command_exists():
     except ImportError:
         pytest.skip("langgraph.types.Command not in this version")
 
-def test_swarm_member_route(monkeypatch):
+def test_swarm_member_route(monkeypatch, fake_chat_model_factory):
     monkeypatch.delenv("MUNIN_LANGGRAPH_URL", raising=False)
     pytest.importorskip("munin.core.autonomy.subagent_factory")
     from munin.core.autonomy.spec import SubagentSpec
     from munin.core.autonomy.subagent_factory import SubagentFactory
-    factory = SubagentFactory(tools=[])
+    factory = SubagentFactory(tools=[], model=fake_chat_model_factory())
     spec = SubagentSpec(name="swarm_test", purpose="test", runtime_type="swarm_member")
     try:
         agent = factory.create_subagent(spec)

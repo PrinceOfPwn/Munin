@@ -135,12 +135,14 @@ class ToolFactory:
         # 2. Optional sandbox smoke test.
         validation: dict[str, Any] = {"ast_guard": "pass"}
         if test_args is not None:
+            sandbox_dir = Path(settings.munin_data_path) / "sandbox_runs"
+            sandbox_dir.mkdir(parents=True, exist_ok=True)
             harness = f"{source}\nresult = {fn_name}(**{test_args!r})\n"
             outcome = run_code(
                 harness,
                 allowed_imports=set(allowed_imports) if allowed_imports else None,
                 timeout_seconds=20,
-                workspace_dir=Path(settings.munin_data_path) / "sandbox_runs",
+                workspace_dir=sandbox_dir,
             )
             validation["sandbox"] = {
                 "ok": outcome.ok,

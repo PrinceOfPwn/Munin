@@ -16,8 +16,8 @@ def test_fanout_preserves_indices():
     items = ["a", "b", "c"]
     sends = fanout("worker", items)
     for i, send in enumerate(sends):
-        # Send(name, state_dict) — args is the WorkerState payload dict
-        assert send.args["worker_index"] == i
+        # Send(node, arg) — arg is the WorkerState payload dict
+        assert send.arg["worker_index"] == i
 
 
 def test_fanout_empty_list():
@@ -26,4 +26,4 @@ def test_fanout_empty_list():
 
 def test_fanout_wraps_non_dict_items():
     sends = fanout("worker", ["plain_string"])
-    assert sends[0].args["task_args"] == {"payload": "plain_string"}
+    assert sends[0].arg["task_args"] == {"payload": "plain_string"}
