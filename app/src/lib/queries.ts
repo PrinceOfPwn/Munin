@@ -50,7 +50,7 @@ export function useConversations(query = "") {
  * polling fallback remains active while a run is non-terminal so a tunnel or
  * Turso stream hiccup cannot leave an empty assistant placeholder on screen.
  */
-export function useConversation(id: string | null, _sseHealthy = false) {
+export function useConversation(id: string | null, sseHealthy = false) {
   return useQuery({
     queryKey: ["conversation", id],
     queryFn: () => (id ? productionApi.conversation(id) : Promise.resolve<ConversationDetail | null>(null)),
@@ -59,7 +59,8 @@ export function useConversation(id: string | null, _sseHealthy = false) {
     refetchInterval: (query) => {
       const data = query.state.data as ConversationDetail | null | undefined;
       if (!data) return 5_000;
-      return data.runs.some((run) => !isTerminalRun(run.state)) ? 5_000 : false;
+      if (!data.runs.some((run) => !isTerminalRun(run.state))) return false;
+      return sseHealthy ? 10_000 : 5_000;
     },
   });
 }
@@ -124,6 +125,7 @@ export function useSendTurn() {
       const key = ["conversation", variables.conversationId] as const;
       await qc.cancelQueries({ queryKey: key });
       const previous = qc.getQueryData<ConversationDetail | null>(key);
+      const previousLists = qc.getQueriesData<Conversation[]>({ queryKey: ["conversations"] });
       const now = Date.now();
 
       if (previous) {
@@ -154,16 +156,16 @@ export function useSendTurn() {
         ),
       );
 
-      return { previous };
+      return { previous, previousLists };
     },
     onError: (_error, variables, context) => {
       if (context?.previous) {
         qc.setQueryData(["conversation", variables.conversationId], context.previous);
       }
+      context?.previousLists?.forEach(([key, data]) => qc.setQueryData(key, data));
     },
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: ["conversation", variables.conversationId] });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     },
     onSettled: (_data, _error, variables) => {
       qc.invalidateQueries({ queryKey: ["conversation", variables.conversationId] });
@@ -177,8 +179,8 @@ export function useCancelRun() {
     mutationFn: (runId: string) => productionApi.cancelRun(runId),
     onSuccess: (run) => {
       qc.invalidateQueries({ queryKey: ["run", run.id, "detail"] });
-      qc.invalidateQueries({ queryKey: ["conversation"] });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+      qc.invalidateQueries({ queryKey: ["conversation"], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     },
   });
 }
@@ -187,9 +189,10 @@ export function useRetryRun() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (runId: string) => productionApi.retryRun(runId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["conversation"] });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+    onSuccess: (run) => {
+      qc.invalidateQueries({ queryKey: ["run", run.id, "detail"] });
+      qc.invalidateQueries({ queryKey: ["conversation"], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     },
   });
 }
@@ -207,8 +210,8 @@ export function useResolveHumanRequest() {
     mutationFn: (input: { requestId: string; choice: string; nonce?: string; guidance?: string }) =>
       productionApi.resolveHumanRequest(input.requestId, input.choice, input.nonce, input.guidance),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["conversations"] });
-      qc.invalidateQueries({ queryKey: ["run"] });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
+      qc.invalidateQueries({ queryKey: ["run"], refetchType: "active" });
     },
   });
 }
@@ -223,7 +226,7 @@ export function useArchiveConversation() {
         variables.archived ? items?.filter((item) => item.id !== variables.id) : items,
       );
       qc.invalidateQueries({ queryKey: ["conversation", variables.id] });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     },
   });
 }
@@ -241,7 +244,7 @@ export function useCreateConversation() {
         if (items.some((item) => item.id === conversation.id)) return items;
         return [conversation, ...items];
       });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     },
   });
 }
