@@ -1,21 +1,18 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
-import { hydrateMuninQueryCache, subscribeMuninQueryCache } from "@/lib/query-cache";
 
 /**
  * App-wide client providers.
  *
- * Turso remains authoritative, but successful read models are mirrored into
- * IndexedDB.  We hydrate that cache before mounting the flight deck so changing
- * tabs, reconnecting a tunnel, or reloading the page never replaces an existing
- * conversation with an empty screen while a remote request is in flight.
+ * The authenticated flight deck owns cache hydration because the persisted
+ * snapshot is scoped to an actor.  The QueryClient still lives here so login,
+ * workspace navigation, and logout all share one in-memory read model.
  */
 export function Providers({ children }: { children: ReactNode }) {
-  const [ready, setReady] = useState(false);
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -32,33 +29,9 @@ export function Providers({ children }: { children: ReactNode }) {
       }),
   );
 
-  useEffect(() => {
-    let disposed = false;
-    let unsubscribe: (() => void) | undefined;
-
-    void hydrateMuninQueryCache(queryClient).finally(() => {
-      if (disposed) return;
-      unsubscribe = subscribeMuninQueryCache(queryClient);
-      setReady(true);
-    });
-
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-    };
-  }, [queryClient]);
-
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider delayDuration={200}>
-        {ready ? (
-          children
-        ) : (
-          <div className="grid min-h-screen place-items-center bg-bg font-mono text-xs uppercase tracking-widest text-secondary">
-            Restoring the Raven&apos;s local cache…
-          </div>
-        )}
-      </TooltipProvider>
+      <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
       <Toaster />
     </QueryClientProvider>
   );
