@@ -58,6 +58,7 @@ on:
           - "ngrok"
           - "cloudflared"
           - "localhost-run"
+          - "all"
       open_web_gui:
         description: "Launch the Next.js GUI and expose a temporary website"
         required: true
@@ -401,10 +402,11 @@ jobs:
         working-directory: app
         env:
           NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN: "1"
+          MUNIN_GUI_SERVER_AUTH_PROXY: "1"
         run: |
           npm ci --no-audit
           npm run build
-          nohup env RUNNER_TRACKING_ID="" NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN=1 \
+          nohup env RUNNER_TRACKING_ID="" NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN=1 MUNIN_GUI_SERVER_AUTH_PROXY=1 \
               npm run start -- --hostname 0.0.0.0 --port 3000 \
               </dev/null > /tmp/munin-gui.log 2>&1 &
           echo $! > /tmp/munin-gui.pid
@@ -428,18 +430,36 @@ jobs:
 
       - name: Open MCP public tunnel
         if: ${{ inputs.open_public_tunnel }}
-        run: bash scripts/open_tunnel.sh 8890 MUNIN_PUBLIC_URL /tmp/mcp-tunnel.log
+        run: |
+          PROVIDER="${{ inputs.tunnel_provider }}"
+          if [ "$PROVIDER" = "all" ]; then PROVIDER="ngrok"; fi
+          MUNIN_TUNNEL_PROVIDER="$PROVIDER" bash scripts/open_tunnel.sh 8890 MUNIN_PUBLIC_URL /tmp/mcp-tunnel.log
 
-      - name: Open GUI public tunnel
+      - name: Open GUI public tunnel(s)
         if: ${{ inputs.open_web_gui }}
-        run: bash scripts/open_tunnel.sh 3000 MUNIN_GUI_URL /tmp/gui-tunnel.log
+        run: |
+          PROVIDER="${{ inputs.tunnel_provider }}"
+          if [ "$PROVIDER" != "all" ]; then
+            MUNIN_TUNNEL_PROVIDER="$PROVIDER" bash scripts/open_tunnel.sh 3000 MUNIN_GUI_URL /tmp/gui-tunnel.log
+            exit 0
+          fi
+          for candidate in ngrok cloudflared localhost-run; do
+            suffix=$(echo "$candidate" | tr '[:lower:]-' '[:upper:]_')
+            env_name="MUNIN_GUI_${suffix}_URL"
+            if ! MUNIN_TUNNEL_PROVIDER="$candidate" bash scripts/open_tunnel.sh 3000 "$env_name" "/tmp/gui-${candidate}.log"; then
+              echo "::warning::${candidate} GUI tunnel was unavailable; continuing with the other providers"
+            fi
+          done
 
       - name: Print connection info
         if: ${{ inputs.open_public_tunnel || inputs.open_web_gui }}
         run: |
-          GUI_URL="${MUNIN_GUI_URL:-not requested}"
+          GUI_URL="${MUNIN_GUI_URL:-${MUNIN_GUI_NGROK_URL:-${MUNIN_GUI_CLOUDFLARED_URL:-${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}}}}"
           MCP_URL="${MUNIN_PUBLIC_URL:-${MUNIN_GUI_URL:-http://localhost:8890}}"
           echo "GUI URL: ${GUI_URL}"
+          echo "GUI ngrok URL: ${MUNIN_GUI_NGROK_URL:-not requested}"
+          echo "GUI Cloudflare URL: ${MUNIN_GUI_CLOUDFLARED_URL:-not requested}"
+          echo "GUI localhost.run URL: ${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}"
           echo "MCP URL: ${MCP_URL}"
           echo "Token: configured as repository secret (not printed)"
           cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
@@ -448,8 +468,12 @@ jobs:
           | | |
           |---|---|
           | **Web GUI** | \`${GUI_URL}\` |
+          | **GUI via ngrok** | \`${MUNIN_GUI_NGROK_URL:-not requested}\` |
+          | **GUI via Cloudflare** | \`${MUNIN_GUI_CLOUDFLARED_URL:-not requested}\` |
+          | **GUI via localhost.run** | \`${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}\` |
           | **MCP URL** | \`${MCP_URL}\` |
-          | **Authentication** | Bearer token from the \`MUNIN_MCP_AUTH_TOKEN\` repository secret |
+          | **GUI authentication** | Server-side proxy enabled for this temporary session; the browser never receives the token |
+          | **MCP authentication** | Bearer token from the \`MUNIN_MCP_AUTH_TOKEN\` repository secret |
           | **Duration** | ${{ inputs.duration_minutes }} min |
           | **Preflight** | \`${{ inputs.preflight_policy }}\` |
           | **Max iterations** | \`${MUNIN_MAX_ITERATIONS:-unbounded}\` |
@@ -556,7 +580,10 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload full logs as artifact
-        if: always()
+        # A Turso-only live session must leave no conversation or tool output in
+        # an Actions artifact. GitHub's own job log remains available for the
+        # operator while the run is retained.
+        if: always() && inputs.persist_state
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
