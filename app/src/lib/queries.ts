@@ -1,7 +1,17 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { productionApi, type ConversationDetail } from "./production-api";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import {
+  productionApi,
+  type Conversation,
+  type ConversationDetail,
+  type TimelineMessage,
+} from "./production-api";
 import { isTerminalRun } from "./utils";
 
 /** Base list of conversations, filtered by an optional server-side query. */
@@ -9,44 +19,48 @@ export function useConversations(query = "") {
   return useQuery({
     queryKey: ["conversations", query],
     queryFn: () => productionApi.conversations(query),
-    staleTime: 15_000,
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
   });
 }
 
 /**
- * One conversation with its message timeline + runs.  Polling is a fallback
- * for when SSE is degraded — pass `sseHealthy=true` and this stops polling
- * entirely.  Consumers wire this to the status returned by
- * :file:`useConversationEvents`.
+ * One conversation with its message timeline + runs.
+ *
+ * SSE is the fast path, but it is deliberately not the only path.  A short
+ * polling fallback remains active while a run is non-terminal so a tunnel or
+ * Turso stream hiccup cannot leave an empty assistant placeholder on screen.
  */
-export function useConversation(id: string | null, sseHealthy = false) {
+export function useConversation(id: string | null, _sseHealthy = false) {
   return useQuery({
     queryKey: ["conversation", id],
     queryFn: () => (id ? productionApi.conversation(id) : Promise.resolve<ConversationDetail | null>(null)),
     enabled: !!id,
+    staleTime: 10_000,
     refetchInterval: (query) => {
-      if (sseHealthy) return false;
       const data = query.state.data as ConversationDetail | null | undefined;
-      if (!data) return false;
-      return data.runs.some((run) => !isTerminalRun(run.state)) ? 15_000 : false;
+      if (!data) return 5_000;
+      return data.runs.some((run) => !isTerminalRun(run.state)) ? 5_000 : false;
     },
   });
 }
 
-/** Fine-grained run detail — SSE keeps this alive, no polling. */
+/** Fine-grained run detail. SSE updates this cache and polling repairs gaps. */
 export function useRunDetail(id: string | null) {
   return useQuery({
     queryKey: ["run", id, "detail"],
     queryFn: () => (id ? productionApi.runDetail(id) : null),
     enabled: !!id,
-    staleTime: 30_000,
+    staleTime: 5_000,
+    refetchInterval: (query) => {
+      const data = query.state.data as Awaited<ReturnType<typeof productionApi.runDetail>> | null | undefined;
+      if (!data) return 5_000;
+      return isTerminalRun(data.run.state) ? false : 5_000;
+    },
   });
 }
 
-/**
- * Queued + delivered operator guidance for a run.  Invalidated by the
- * conversation SSE stream on `guidance-delivered`.
- */
+/** Queued + delivered operator guidance for a run. */
 export function useRunGuidance(id: string | null) {
   return useQuery({
     queryKey: ["run", id, "guidance"],
@@ -80,16 +94,60 @@ export function useArtifact(id: string | null) {
   });
 }
 
-// ── Mutations with cache invalidation ─────────────────────────────────────
+// ── Mutations with optimistic cache updates ────────────────────────────────
 
 export function useSendTurn() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: { conversationId: string; content: string; idempotencyKey: string }) =>
       productionApi.turn(input.conversationId, input.content, input.idempotencyKey),
+    onMutate: async (variables) => {
+      const key = ["conversation", variables.conversationId] as const;
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<ConversationDetail | null>(key);
+      const now = Date.now();
+
+      if (previous) {
+        const lastSequence = previous.messages.at(-1)?.sequence || 0;
+        const optimistic: TimelineMessage = {
+          id: `optimistic-${variables.idempotencyKey}`,
+          kind: "user",
+          status: "pending",
+          content: variables.content,
+          sequence: lastSequence + 1,
+        };
+        qc.setQueryData<ConversationDetail>(key, {
+          ...previous,
+          conversation: {
+            ...previous.conversation,
+            last_activity_at_ms: now,
+            message_count: previous.conversation.message_count + 1,
+          },
+          messages: [...previous.messages, optimistic],
+        });
+      }
+
+      qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) =>
+        items?.map((item) =>
+          item.id === variables.conversationId
+            ? { ...item, last_activity_at_ms: now, message_count: item.message_count + 1 }
+            : item,
+        ),
+      );
+
+      return { previous };
+    },
+    onError: (_error, variables, context) => {
+      if (context?.previous) {
+        qc.setQueryData(["conversation", variables.conversationId], context.previous);
+      }
+    },
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: ["conversation", variables.conversationId] });
       qc.invalidateQueries({ queryKey: ["conversations"] });
+    },
+    onSettled: (_data, _error, variables) => {
+      qc.invalidateQueries({ queryKey: ["conversation", variables.conversationId] });
     },
   });
 }
@@ -100,6 +158,7 @@ export function useCancelRun() {
     mutationFn: (runId: string) => productionApi.cancelRun(runId),
     onSuccess: (run) => {
       qc.invalidateQueries({ queryKey: ["run", run.id, "detail"] });
+      qc.invalidateQueries({ queryKey: ["conversation"] });
       qc.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
@@ -110,6 +169,7 @@ export function useRetryRun() {
   return useMutation({
     mutationFn: (runId: string) => productionApi.retryRun(runId),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["conversation"] });
       qc.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
@@ -139,7 +199,11 @@ export function useArchiveConversation() {
   return useMutation({
     mutationFn: (input: { id: string; version: number; archived: boolean }) =>
       productionApi.archiveConversation(input.id, input.version, input.archived),
-    onSuccess: () => {
+    onSuccess: (_conversation, variables) => {
+      qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) =>
+        variables.archived ? items?.filter((item) => item.id !== variables.id) : items,
+      );
+      qc.invalidateQueries({ queryKey: ["conversation", variables.id] });
       qc.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
@@ -149,6 +213,13 @@ export function useCreateConversation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (title?: string) => productionApi.createConversation(title),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["conversations"] }),
+    onSuccess: (conversation) => {
+      qc.setQueriesData<Conversation[]>({ queryKey: ["conversations"] }, (items) => {
+        if (!items) return [conversation];
+        if (items.some((item) => item.id === conversation.id)) return items;
+        return [conversation, ...items];
+      });
+      qc.invalidateQueries({ queryKey: ["conversations"] });
+    },
   });
 }
