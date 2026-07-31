@@ -211,7 +211,7 @@ jobs:
     # Same fork-safety gate as e2e_lab: never expose LLM_* secrets to PRs from forks.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     services:
       ldap:
         image: osixia/openldap:1.5.0
