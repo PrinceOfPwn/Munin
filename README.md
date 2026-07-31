@@ -71,25 +71,25 @@ flowchart TD
     GUI --> MCP_Bus[MCP Server / FastMCP]
     DiscordBridge --> MCP_Bus
 
-    subgraph Munin Core
+    subgraph Core ["Munin Core"]
         MCP_Bus --> Agent[Munin Agent]
         Agent <--> LLM[LLM Client / OpenAI-compat]
         Agent <--> Soul[SoulManager]
         Agent <--> Orchestrator[Orchestrator]
     end
 
-    subgraph Registries & Tools
+    subgraph Registries ["Registries & Tools"]
         MCP_Bus --> NativeTools[Native Tools]
         MCP_Bus --> GenTools[Generated Tools / tool_forge]
     end
 
-    subgraph Subagents (Wake Queue)
+    subgraph WakeQueueSub ["Subagents (Wake Queue)"]
         Orchestrator --> |munin_wake| WakeQueue[(Wake Queue)]
         WakeQueue --> |spawn| Subagent1[Graph Forge Subagent]
         WakeQueue --> |spawn| Subagent2[Specialist Subagent]
     end
 
-    subgraph Persistence (SQLite / Turso)
+    subgraph Persistence ["Persistence (SQLite / Turso)"]
         Agent --> |memory_remember| Semantic[(Semantic DB)]
         Agent --> |episodic_log| Episodic[(Episodic Trace)]
         Agent --> |publish| SharedIntel[(Shared Intel)]
