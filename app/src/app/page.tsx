@@ -1,5 +1,5 @@
-import FlightDeck from "@/components/FlightDeck";
+import FlightDeckStable from "@/components/FlightDeckStable";
 
 export default function Page() {
-  return <FlightDeck />;
+  return <FlightDeckStable />;
 }
