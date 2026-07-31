@@ -33,7 +33,9 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
         body: { conversation_id: conversationId },
         headers: () => {
           const token = currentCsrfToken();
-          return token ? { "X-CSRF-Token": token } : {};
+          const headers: Record<string, string> = {};
+          if (token) headers["X-CSRF-Token"] = token;
+          return headers;
         },
       }),
     [conversationId],
