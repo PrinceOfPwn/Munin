@@ -19,14 +19,14 @@ import threading
 import time
 from typing import Any
 
-from ..mcp.config import get_settings
 from ..mcp.audit import redact_secrets
-from ..mcp.tools import hugin_tool
+from ..mcp.config import get_settings
 from ..mcp.shared_state import (
     PRESENCE_LEASE_SECONDS,
     SharedStateStore,
     presence_metadata,
 )
+from ..mcp.tools import hugin_tool
 from .base import ReActSubagentBase
 
 logging.basicConfig(level=logging.INFO, format="[munin-runner] %(levelname)s %(message)s")
@@ -198,13 +198,12 @@ class _ForgedGraphRunner(ReActSubagentBase):
         sections = delivery.get("sections", ["Summary", "Evidence", "Next steps"]) if isinstance(delivery, dict) else []
         self.system_prompt = (
             graph.get("system_prompt", "Complete the task using your tools.")
-            + "\n\n## Evidence Mesh execution contract\n"
-            + "Use the evidence capsule supplied at task start as leads, not unquestioned fact. "
-            + "Cite the relevant evidence in your final answer. If scope is unclear or an active/irreversible "
-            + "step is needed, post an approval request to the parent and wait for guidance. "
-            + "Finish with these sections: "
+            + "\n\n## Evidence Mesh 执行合同\n"
+            + "任务开始时提供的 evidence capsule 只是带来源的线索，不是无需验证的事实。"
+            + "在交接中引用相关 evidence。若范围不清楚，或需要 active/irreversible step，"
+            + "用简体中文向父代理请求批准并等待。完成后按以下语义章节交付："
             + ", ".join(str(section) for section in sections)
-            + ". Do not poll indefinitely after you have delivered the requested result."
+            + "。交付 evidence-backed result 或精确 blocker 后立即停止，不得无限轮询。"
         )
         self.allowed_tools = set(graph.get("tool_whitelist") or [])
         # Always give forged graphs messaging tools so they can talk to munin
@@ -257,8 +256,8 @@ class _ForgedGraphRunner(ReActSubagentBase):
             "hugin_count": len(packet["hugin"]),
         }
         return (
-            "## Evidence Mesh context (source-labelled; validate before acting)\n"
-            + json.dumps(packet, ensure_ascii=True, default=str)[:12_000],
+            "## Evidence Mesh context / 上下文（已标注来源；行动前验证）\n"
+            + json.dumps(packet, ensure_ascii=False, default=str)[:12_000],
             meta,
         )
 

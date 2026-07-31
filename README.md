@@ -98,6 +98,8 @@ tests/                 Unit, integration, and persistence regression tests
 
 - 🚀 [GitHub Actions Live Session Tutorial](docs/github-actions-tutorial.md)
 - 📘 [Operator & User Guide](docs/operator-guide.md)
+- 🧠 [Prompt Architecture](docs/prompt-architecture.md)
+- 🇨🇳 [LLM Providers & Chinese-First Runtime](docs/llm-providers.md)
 - 🏛️ [Architecture & Persistence Specification](docs/architecture-persistence.md)
 - 🛠️ [Tools Reference Inventory](docs/tools_reference.md)
 - 🔒 [Operational Security Notes](docs/security-notes.md)
