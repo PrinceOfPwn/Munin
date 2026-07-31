@@ -4,7 +4,7 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
-## 2026-08-01 - CI gates, canonical MCP endpoints, and provider reasoning replay
+## 2026-07-31 18:26 ART — CI gates, canonical MCP endpoints, and provider reasoning replay
 
 This follow-up closes the remaining CI failures without adding a second
 application-specific agent loop:
@@ -78,7 +78,7 @@ application-specific agent loop:
   exposing the API key to the browser. The selected profile applies to the
   next turn; the conversation id and durable history remain unchanged.
 
-## 2026-08-01 — Durable chat recovery after process restart
+## 2026-07-31 18:18 ART — Durable chat recovery after process restart
 
 The AI SDK replay endpoint already persisted operator-visible run events, but
 the detached executor itself was process-local: a crash left a `running` row
@@ -111,7 +111,7 @@ with `Command`. `tests/test_chat_recovery.py` covers fenced crash recovery,
 HITL non-autostart and approved-command recovery; the focused backend suite is
 green (19 passed) and the full backend suite is green (222 passed, 4 skipped).
 
-## 2026-08-01 — CI repair Part 2: fix double `/mcp` mount prefix + session-manager lifespan
+## 2026-07-31 03:58 ART — CI repair Part 2: fix double `/mcp` mount prefix + session-manager lifespan
 
 The Fase 3 unification (`munin serve` mounting the FastMCP streamable-http
 sub-app under `Mount("/mcp")`) shipped two latent bugs that made every
@@ -161,7 +161,7 @@ Validation: `python -m munin.server.create_app` builds; a uvicorn run on
 `event: message` JSON-RPC, `GET /health` -> 200; `tests/test_production_foundation.py`
 11/11 green.
 
-## 2026-08-01 — CI repair: tests + smoke + workflow aligned with the Fase 2-4 contract
+## 2026-07-31 03:50 ART — CI repair: tests + smoke + workflow aligned with the Fase 2-4 contract
 
 The migration (issue #9) removed `claim_next_run` (replaced by the direct
 claim in `POST /api/chat`) and the `/turns` + `/api/runs/*` two-hop, and
@@ -219,7 +219,7 @@ Validation: `tests/test_production_foundation.py` 11/11 pass locally
 (Windows venv); full-suite failures elsewhere are local-env artifacts
 (stale `langchain` without `create_agent`, LLM-dependent tests). YAML parses.
 
-## 2026-07-31 — Fleet integration: bug fixes, singleton graph, delta sync, browser cache
+## 2026-07-30 22:38 ART — Fleet integration: bug fixes, singleton graph, delta sync, browser cache
 
 Hand-off log for the Deep Agents + AI SDK v5 migration follow-up (issue #9).
 All changes landed on `feat/issue9-deep-agents-migration`. Validation:

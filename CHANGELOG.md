@@ -1,8 +1,11 @@
 # Munin — Changelog
 
 Only the load-bearing changes. For architectural detail see `ARCHITECTURE.md`.
+This is a historical release record; it can describe superseded implementation
+details. The current operating contracts live in `README.md`, `ARCHITECTURE.md`
+and `docs/`.
 
-## Unreleased — the persistent-multi-agent rewrite
+## 2026-07-31 18:30 ART — persistent-multi-agent rewrite
 
 **58 bugs fixed** across 4 adversarial review rounds. The system is
 ready to ship for either free-tier (artifact roundtrip) or Turso persistence.
