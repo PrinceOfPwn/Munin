@@ -6,7 +6,8 @@
  * The stream accelerates cache invalidation, but it must never suppress the
  * polling repair path merely because an EventSource object was constructed.
  * We only report `live` after an actual open/event/heartbeat signal and mark
- * server warnings as `stale` so React Query can repair the read model.
+ * server warnings as `stale` so React Query can repair the read model. The
+ * stream is also closed whenever the operator leaves the Conversations view.
  */
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -24,9 +25,13 @@ export function useConversationEvents({ conversationId }: Options): {
   const qc = useQueryClient();
   const [status, setStatus] = useState<ConversationStreamStatus>("connecting");
   const staleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamEnabled =
+    typeof window !== "undefined" &&
+    window.localStorage.getItem("munin.activeView") === "conversations";
 
   useEffect(() => {
-    if (!conversationId) {
+    if (!conversationId || !streamEnabled) {
+      if (staleTimer.current) clearTimeout(staleTimer.current);
       setStatus("closed");
       return;
     }
@@ -91,7 +96,7 @@ export function useConversationEvents({ conversationId }: Options): {
         /* ignore malformed */
       }
       qc.invalidateQueries({ queryKey: ["conversation", conversationId] });
-      qc.invalidateQueries({ queryKey: ["conversations"] });
+      qc.invalidateQueries({ queryKey: ["conversations"], refetchType: "active" });
     });
 
     es.addEventListener("guidance-delivered", (msg) => {
@@ -133,7 +138,7 @@ export function useConversationEvents({ conversationId }: Options): {
       if (staleTimer.current) clearTimeout(staleTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId]);
+  }, [conversationId, streamEnabled]);
 
   return { status };
 }
