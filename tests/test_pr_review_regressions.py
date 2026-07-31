@@ -506,53 +506,13 @@ def test_graph_diagnostics_imports_the_top_level_subagent_catalog(store, monkeyp
     assert result["total_active"] == 0
 
 
-def test_munin_chat_async_returns_job_and_operator_safe_progress(store, monkeypatch):
-    """Long chat work must outlive a single HTTP request and be pollable."""
-    from dataclasses import replace
-
-    from munin.core import munin_agent
-    from munin.mcp.tools import munin_tools
-
-    class FinalLlm:
-        def chat(self, **kwargs):
-            return {"choices": [{"message": {"role": "assistant", "content": "hello operator"}}]}
-
-    bare_agent = _bare_munin_agent(FinalLlm(), {})
-
-    class FakeAgent:
-        def __init__(self, settings):
-            self._agent = bare_agent
-
-        def respond(self, *args, **kwargs):
-            return self._agent.respond(*args, **kwargs)
-
-    settings = replace(
-        store.settings,
-        llm_base_url="https://llm.invalid/v1",
-        llm_api_key="configured",
-        llm_model="test",
-    )
-    monkeypatch.setattr(munin_agent, "MuninAgent", FakeAgent)
-    monkeypatch.setattr(munin_tools, "STATE", store)
-    monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
-    monkeypatch.setattr(munin_tools, "_conversation_backend_error", lambda _settings: None)
-
-    submitted = munin_tools.munin_chat("hello", mode="async")
-    assert submitted["ok"] is True
-    assert submitted["mode"] == "async"
-    job_id = submitted["job_id"]
-
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        status = munin_tools.JOBS.status(job_id, include_result=True)
-        if status["data"]["status"] not in {"queued", "running"}:
-            break
-        time.sleep(0.01)
-
-    assert status["data"]["status"] == "succeeded"
-    assert status["data"]["result"]["data"]["content"] == "hello operator"
-    stages = {event["stage"] for event in status["data"]["progress"]}
-    assert {"queued", "reasoning", "completed"} <= stages
+# test_munin_chat_async_returns_job_and_operator_safe_progress was removed:
+# it characterised the pre-issue-#9 munin_chat async path (mode="async"
+# dispatching to MuninAgent.respond() in a JOBS thread). The supervisor_runner
+# / Deep Agents runtime replaced that path on this PR; async execution +
+# operator-safe progress is now exercised by the runtime_adapter integration
+# tests, and the JOBS subsystem remains covered by other job_* regression
+# tests in this file.
 
 
 def test_repetition_nudge_accepts_one_changed_next_call():

@@ -75,7 +75,7 @@ def _make_deterministic_node(node):
     AST-validated once at build time and executed per invocation through the
     restricted-builtins sandbox.
     """
-    from ..subagents.sandbox import _validate_ast, run_code  # noqa: TID252, PLC0415
+    from ...subagents.sandbox import _validate_ast, run_code  # noqa: TID252, PLC0415
 
     if not node.python_code:
         def passthrough(state: dict) -> dict:
@@ -222,22 +222,13 @@ def create_workflow(
 
 
 def _default_sqlite_checkpointer() -> Any:
-    """Durable async checkpointer on MUNIN_CHECKPOINT_DB (falls back loudly)."""
-    import os
+    """Default checkpointer for generated workflows.
 
-    try:
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
+    Mirrors ``supervisor.make_checkpointer``: ``AsyncSqliteSaver.from_conn_string``
+    returns an async context manager, not a ``BaseCheckpointSaver``, so we use
+    ``MemorySaver`` for now. Truly durable cross-workflow checkpointing belongs
+    to a follow-up PR (see IMPLEMENTATION_ROADMAP.md).
+    """
+    from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
 
-        db = os.environ.get("MUNIN_CHECKPOINT_DB", "data/langgraph_checkpoints.sqlite")
-        if db != ":memory:":
-            os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
-        return AsyncSqliteSaver.from_conn_string(db)
-    except Exception as exc:  # noqa: BLE001
-        from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
-
-        logger.warning(
-            "workflow_factory: sqlite checkpointer unavailable (%s); "
-            "falling back to non-durable MemorySaver",
-            exc,
-        )
-        return MemorySaver()
+    return MemorySaver()

@@ -103,8 +103,11 @@ class ToolFactory:
         by the AST guard, optionally exercised in the sandbox with
         ``test_args``, then persisted (active=1) in the procedural table.
         """
-        from ..mcp import registry  # noqa: TID252, PLC0415
-        from ..subagents.sandbox import run_code, validate_source_file  # noqa: TID252, PLC0415
+        from ...mcp import registry  # noqa: TID252, PLC0415
+        from ...subagents.sandbox import (  # noqa: TID252, PLC0415
+            run_code,
+            validate_source_file,
+        )
 
         tool_name, slug = _normalize_tool_name(name)
         fn_name = function_name or slug
@@ -196,7 +199,7 @@ class ToolFactory:
     # ------------------------------------------------------------------
 
     def _load_from_registry(self, name: str) -> Callable[..., Any]:
-        from ..mcp import registry  # noqa: TID252, PLC0415
+        from ...mcp import registry  # noqa: TID252, PLC0415
 
         row = self._state.procedural_get(name)
         if row is None:

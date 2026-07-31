@@ -63,22 +63,26 @@ def compose_munin_prompt(*, soul_prompt: str = "", extra: str = "") -> str:
 
 
 def make_checkpointer() -> Any:
-    """Durable async checkpointer on MUNIN_CHECKPOINT_DB (loud MemorySaver fallback)."""
-    try:
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
+    """Default checkpointer for the supervisor.
 
-        db = os.environ.get("MUNIN_CHECKPOINT_DB", "data/langgraph_checkpoints.sqlite")
-        if db != ":memory:":
-            os.makedirs(os.path.dirname(db) or ".", exist_ok=True)
-        return AsyncSqliteSaver.from_conn_string(db)
-    except Exception as exc:  # noqa: BLE001
-        from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
+    Historically Munin tried to ship a durable ``AsyncSqliteSaver`` here, but
+    ``AsyncSqliteSaver.from_conn_string`` returns an async context manager,
+    not a ``BaseCheckpointSaver`` instance, and the synchronous variant has
+    the same shape. ``create_deep_agent(checkpointer=...)`` needs an actual
+    saver before the graph runs, so the durable path would require wrapping
+    the entire build+invoke lifecycle in an ``async with`` — which conflicts
+    with Munin's build-once / invoke-many-times model.
 
-        logger.warning(
-            "supervisor: sqlite checkpointer unavailable (%s); using non-durable MemorySaver",
-            exc,
-        )
-        return MemorySaver()
+    For now we default to ``MemorySaver``: per-thread state inside a single
+    supervisor process (enough for HITL interrupts and resume within one
+    session — the use case issue #9 §3 actually calls out). Truly durable
+    cross-session checkpointing belongs to a follow-up PR (see
+    IMPLEMENTATION_ROADMAP.md) and will wrap the supervisor invocation in an
+    ``async with AsyncSqliteSaver.from_conn_string(MUNIN_CHECKPOINT_DB)``.
+    """
+    from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
+
+    return MemorySaver()
 
 
 def build_supervisor(

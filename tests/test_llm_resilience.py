@@ -47,32 +47,8 @@ def test_llm_client_retries_transient_500_with_observable_backoff(store, monkeyp
     assert all(event["reason"] == "HTTP 500" for event in events)
 
 
-def test_munin_chat_default_iteration_budget_is_unbounded(store, monkeypatch):
-    from munin.core import munin_agent
-    from munin.mcp.tools import munin_tools
-
-    captured: dict = {}
-
-    class FinalAgent:
-        def __init__(self, _settings):
-            pass
-
-        def respond(self, *_args, **kwargs):
-            captured.update(kwargs)
-            return {"content": "done", "tool_calls": [], "iterations": 1, "stop_reason": "final_answer"}
-
-    settings = replace(
-        store.settings,
-        llm_base_url="https://llm.example/v1",
-        llm_api_key="configured",
-        llm_model="test",
-    )
-    monkeypatch.setattr(munin_agent, "MuninAgent", FinalAgent)
-    monkeypatch.setattr(munin_tools, "STATE", store)
-    monkeypatch.setattr(munin_tools, "_get_settings", lambda: settings)
-    monkeypatch.setattr(munin_tools, "_conversation_backend_error", lambda _settings: None)
-
-    result = munin_tools.munin_chat("evaluate LDAP", conversation_id="unbounded_budget")
-
-    assert result["ok"] is True
-    assert captured["max_iterations"] is None
+# test_munin_chat_default_iteration_budget_is_unbounded was removed: it
+# characterised the pre-issue-#9 munin_chat path that dispatched via
+# munin.core.munin_agent.MuninAgent.respond(). The supervisor_runner /
+# Deep Agents runtime replaced that path on this PR; iteration budget policy
+# is now exercised by the runtime_adapter integration tests.

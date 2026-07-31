@@ -11,4 +11,6 @@ def test_persisted_dict_invocable():
     spec = SubagentSpec(name="recon_specialist", purpose="Perform reconnaissance", runtime_type="persisted_subagent_dict")
     result = factory.create_subagent(spec)
     assert result["name"] == "recon_specialist"
-    assert result["purpose"] == "Perform reconnaissance"
+    # Deep Agents SubAgent dict shape: description (carried from spec.purpose), not purpose
+    assert result["description"] == "Perform reconnaissance"
+    assert result["system_prompt"].startswith("You are recon_specialist")
