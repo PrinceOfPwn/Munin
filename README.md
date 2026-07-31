@@ -69,9 +69,9 @@ Click **Test Connection** → **Save**.
 ## ☁️ Online Live Sessions (GitHub Actions + Turso)
 
 Run **Munin Live Session** directly from GitHub Actions:
-1. Configure Actions Secrets: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `MUNIN_MCP_AUTH_TOKEN`, `MUNIN_DB_URL`, `MUNIN_DB_AUTH_TOKEN`.
+1. Configure Actions Secrets: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `MUNIN_MCP_AUTH_TOKEN`, `MUNIN_DB_URL`, `MUNIN_DB_AUTH_TOKEN`; optionally set `NGROK_AUTH_TOKEN` for authenticated tunnels.
 2. Go to **Actions → Munin Live Session → Run workflow**.
-3. Select `open_web_gui=true`, `persist_state=true`, and `duration_minutes`.
+3. Select `open_web_gui=true`, `persist_state=true`, `duration_minutes`, and a `tunnel_provider` (`auto`, `ngrok`, `cloudflared`, or `localhost-run`).
 4. Open the temporary Web UI provided in the Job Summary and enter your Bearer token.
 
 For technical details, see the [Operator Guide](docs/operator-guide.md#online-sessions-github-actions--turso).
