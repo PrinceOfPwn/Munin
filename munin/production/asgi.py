@@ -29,6 +29,7 @@ from typing import Any
 log = logging.getLogger("munin.production.asgi")
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
@@ -361,17 +362,19 @@ def create_app(store: ProductionStore) -> Starlette:
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))
         if request.method == "GET":
+            data = await run_in_threadpool(
+                store.list_conversations,
+                actor_id=current["id"],
+                query=request.query_params.get("q", ""),
+                status=request.query_params.get("status", ""),
+                include_archived=request.query_params.get("archived") == "true",
+                limit=int(request.query_params.get("limit", "50")),
+                cursor_ms=int(request.query_params["cursor"]) if request.query_params.get("cursor") else None,
+            )
             return JSONResponse(
                 {
                     "ok": True,
-                    "data": store.list_conversations(
-                        actor_id=current["id"],
-                        query=request.query_params.get("q", ""),
-                        status=request.query_params.get("status", ""),
-                        include_archived=request.query_params.get("archived") == "true",
-                        limit=int(request.query_params.get("limit", "50")),
-                        cursor_ms=int(request.query_params["cursor"]) if request.query_params.get("cursor") else None,
-                    ),
+                    "data": data,
                 }
             )
         data = await _payload(request)
@@ -383,7 +386,10 @@ def create_app(store: ProductionStore) -> Starlette:
             current = await actor(request, csrf=request.method in {"PATCH", "DELETE"})
             conversation_id = request.path_params["conversation_id"]
             if request.method == "GET":
-                return JSONResponse({"ok": True, "data": store.get_conversation(actor_id=current["id"], conversation_id=conversation_id)})
+                data = await run_in_threadpool(
+                    store.get_conversation, actor_id=current["id"], conversation_id=conversation_id
+                )
+                return JSONResponse({"ok": True, "data": data})
             if request.method == "DELETE":
                 data = await _payload(request)
                 store.soft_delete_conversation(actor_id=current["id"], conversation_id=conversation_id, expected_version=int(data["version"]))
@@ -413,7 +419,9 @@ def create_app(store: ProductionStore) -> Starlette:
     async def artifact(request: Request) -> Response:
         try:
             current = await actor(request)
-            result = store.get_artifact(actor_id=current["id"], artifact_id=request.path_params["artifact_id"])
+            result = await run_in_threadpool(
+                store.get_artifact, actor_id=current["id"], artifact_id=request.path_params["artifact_id"]
+            )
             if request.query_params.get("download") == "true":
                 return Response(result["content"], media_type=result["media_type"], headers={"Content-Disposition": f"attachment; filename={result['filename']}"})
             return JSONResponse({"ok": True, "data": result})
@@ -433,7 +441,9 @@ def create_app(store: ProductionStore) -> Starlette:
             # must be disabled by the client, but we defend on the server so
             # a stale tab cannot interrupt an active run.
             try:
-                aggregate = store.get_conversation(actor_id=current["id"], conversation_id=conversation_id)
+                aggregate = await run_in_threadpool(
+                    store.get_conversation, actor_id=current["id"], conversation_id=conversation_id
+                )
                 for run in aggregate.get("runs", []):
                     if run.get("state") in NON_TERMINAL_RUN_STATES:
                         return _error(
@@ -460,7 +470,9 @@ def create_app(store: ProductionStore) -> Starlette:
     async def run(request: Request) -> Response:
         try:
             current = await actor(request)
-            result = store.get_run_for_actor(actor_id=current["id"], run_id=request.path_params["run_id"])
+            result = await run_in_threadpool(
+                store.get_run_for_actor, actor_id=current["id"], run_id=request.path_params["run_id"]
+            )
             return JSONResponse({"ok": True, "data": result})
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))
@@ -470,7 +482,10 @@ def create_app(store: ProductionStore) -> Starlette:
     async def run_detail(request: Request) -> Response:
         try:
             current = await actor(request)
-            return JSONResponse({"ok": True, "data": store.get_run_detail_for_actor(actor_id=current["id"], run_id=request.path_params["run_id"])})
+            data = await run_in_threadpool(
+                store.get_run_detail_for_actor, actor_id=current["id"], run_id=request.path_params["run_id"]
+            )
+            return JSONResponse({"ok": True, "data": data})
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))
         except KeyError:

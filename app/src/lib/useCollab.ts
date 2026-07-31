@@ -99,6 +99,9 @@ export function usePresence(conversationId: string | null) {
  */
 const TYPING_IDLE_MS = 3_000;
 const HEARTBEAT_MS = 15_000;
+/** After this many consecutive failed beats we stop the interval entirely.
+ * The next mount / conversation change re-arms it. */
+const HEARTBEAT_MAX_FAILURES = 3;
 
 export function usePresenceHeartbeat(conversationId: string | null): {
   onKeystroke: () => void;
@@ -107,18 +110,51 @@ export function usePresenceHeartbeat(conversationId: string | null): {
   const qc = useQueryClient();
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const typingRef = useRef(false);
+  // Guard against pile-up: if the previous beat is still in flight, skip
+  // the tick. Fixes 20+ concurrent presence POSTs when the backend takes
+  // longer than HEARTBEAT_MS to respond.
+  const inFlightRef = useRef(false);
+  // Circuit breaker: stop the interval after N consecutive failures so a
+  // dead backend does not generate 4 req/min per open tab.
+  const failStreakRef = useRef(0);
+  const stoppedRef = useRef(false);
 
   useEffect(() => {
     if (!conversationId) return;
     let cancelled = false;
+    stoppedRef.current = false;
+    inFlightRef.current = false;
+    failStreakRef.current = 0;
+
     const beat = async (typing: boolean) => {
-      const presence = await productionApi.presenceHeartbeat(conversationId, typing);
-      if (!cancelled) {
-        qc.setQueryData(["conversation-presence", conversationId], presence);
+      if (cancelled || stoppedRef.current) return;
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      try {
+        const presence = await productionApi.presenceHeartbeat(conversationId, typing);
+        failStreakRef.current = 0;
+        if (!cancelled) {
+          qc.setQueryData(["conversation-presence", conversationId], presence);
+        }
+      } catch (err) {
+        failStreakRef.current += 1;
+        if (failStreakRef.current >= HEARTBEAT_MAX_FAILURES) {
+          stoppedRef.current = true;
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[presence] backing off after ${HEARTBEAT_MAX_FAILURES} failures on conv=${conversationId}`,
+            err,
+          );
+        }
+      } finally {
+        inFlightRef.current = false;
       }
     };
     void beat(false);
-    const handle = setInterval(() => void beat(typingRef.current), HEARTBEAT_MS);
+    const handle = setInterval(() => {
+      if (stoppedRef.current) return;
+      void beat(typingRef.current);
+    }, HEARTBEAT_MS);
     return () => {
       cancelled = true;
       clearInterval(handle);
@@ -128,7 +164,7 @@ export function usePresenceHeartbeat(conversationId: string | null): {
 
   return {
     onKeystroke: () => {
-      if (!conversationId) return;
+      if (!conversationId || stoppedRef.current) return;
       const wasTyping = typingRef.current;
       typingRef.current = true;
       // Only POST on the transition (idle → typing).  Subsequent keystrokes
@@ -136,23 +172,26 @@ export function usePresenceHeartbeat(conversationId: string | null): {
       if (!wasTyping) {
         void productionApi
           .presenceHeartbeat(conversationId, true)
-          .then((p) => qc.setQueryData(["conversation-presence", conversationId], p));
+          .then((p) => qc.setQueryData(["conversation-presence", conversationId], p))
+          .catch(() => { /* silent — the interval loop tracks failures */ });
       }
       if (idleTimer.current) clearTimeout(idleTimer.current);
       idleTimer.current = setTimeout(() => {
         typingRef.current = false;
         void productionApi
           .presenceHeartbeat(conversationId, false)
-          .then((p) => qc.setQueryData(["conversation-presence", conversationId], p));
+          .then((p) => qc.setQueryData(["conversation-presence", conversationId], p))
+          .catch(() => { /* silent */ });
       }, TYPING_IDLE_MS);
     },
     onIdle: () => {
       typingRef.current = false;
       if (idleTimer.current) clearTimeout(idleTimer.current);
-      if (conversationId) {
+      if (conversationId && !stoppedRef.current) {
         void productionApi
           .presenceHeartbeat(conversationId, false)
-          .then((p) => qc.setQueryData(["conversation-presence", conversationId], p));
+          .then((p) => qc.setQueryData(["conversation-presence", conversationId], p))
+          .catch(() => { /* silent */ });
       }
     },
   };

@@ -14,6 +14,15 @@ import {
 } from "./production-api";
 import { isTerminalRun } from "./utils";
 
+/** Grow the refetch interval when the query is failing, so a slow/broken
+ * backend does not accumulate concurrent in-flight requests. Capped at 60s
+ * so recovery is snappy once the backend returns. */
+function backoffMs(failureCount: number, baseMs: number): number {
+  if (failureCount <= 0) return baseMs;
+  const grown = baseMs * 2 ** failureCount;
+  return Math.min(60_000, grown);
+}
+
 type CreatedConversation = Partial<Conversation> & {
   id: string;
   title: string;
@@ -56,7 +65,12 @@ export function useConversation(id: string | null, sseHealthy = false) {
     queryFn: () => (id ? productionApi.conversation(id) : Promise.resolve<ConversationDetail | null>(null)),
     enabled: !!id,
     staleTime: 10_000,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(15_000, 1_000 * 2 ** attempt),
+    refetchIntervalInBackground: false,
     refetchInterval: (query) => {
+      const failures = query.state.errorUpdateCount;
+      if (failures > 0) return backoffMs(failures, 5_000);
       const data = query.state.data as ConversationDetail | null | undefined;
       if (!data) return 5_000;
       if (!data.runs.some((run) => !isTerminalRun(run.state))) return false;
@@ -72,7 +86,12 @@ export function useRunDetail(id: string | null) {
     queryFn: () => (id ? productionApi.runDetail(id) : null),
     enabled: !!id,
     staleTime: 5_000,
+    retry: 2,
+    retryDelay: (attempt) => Math.min(15_000, 1_000 * 2 ** attempt),
+    refetchIntervalInBackground: false,
     refetchInterval: (query) => {
+      const failures = query.state.errorUpdateCount;
+      if (failures > 0) return backoffMs(failures, 5_000);
       const data = query.state.data as Awaited<ReturnType<typeof productionApi.runDetail>> | null | undefined;
       if (!data) return 5_000;
       return isTerminalRun(data.run.state) ? false : 5_000;

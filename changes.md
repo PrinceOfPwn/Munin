@@ -1,5 +1,44 @@
 # Changes
 
+## 2026-07-31 — PR #12: stop frontend hang cascade + unblock event loop under load
+
+Patch applied to `feat/issue9-deep-agents-migration` addressing the "OPENING
+THE RAVEN'S MEMORY" infinite spinner + missing traces diagnosed from HAR
+captures (trycloudflare 160s waits, ngrok 300s timeouts, 2000+ request
+pile-up in 7 min).
+
+- **`app/src/lib/production-api.ts`** — `request()` now aborts via
+  AbortController after `DEFAULT_TIMEOUT_MS` (15s) instead of dangling until
+  the tunnel proxy kills it (100s CF / 300s ngrok). 401 responses throw a
+  typed `AuthError` (csrfToken cleared) so query handlers can distinguish
+  session expiry from transient failure. AbortError is rethrown as an
+  explicit timeout error. Caller-provided signals are respected
+  (`init.signal ?? controller.signal`).
+- **`app/src/lib/queries.ts`** — `useConversation` / `useRunDetail` now
+  retry 2x with exponential delay (1s→2s→4s, cap 15s), stop polling in
+  background tabs (`refetchIntervalInBackground: false`), and grow the
+  refetch interval on failure (`backoffMs`, cap 60s) so a slow backend can't
+  accumulate concurrent in-flight requests per conversation.
+- **`app/src/lib/useCollab.ts`** — `usePresenceHeartbeat` gained an
+  in-flight guard (skip tick if previous beat still running), a circuit
+  breaker that stops the interval after 3 consecutive failures
+  (`HEARTBEAT_MAX_FAILURES`, re-armed on next mount), and `.catch()` on the
+  keystroke/idle fire-and-forget beats (previously lost unhandled
+  rejections).
+- **`munin/production/asgi.py`** — CPU-bound sync store calls (AES-GCM
+  per-row decrypt) now run in a threadpool via `run_in_threadpool`:
+  `list_conversations`, `get_conversation` (detail + turn preflight),
+  `get_artifact`, `get_run_for_actor`, `get_run_detail_for_actor`. One heavy
+  request no longer blocks all others — previously froze SSE traces too.
+
+Not touched (already correct in the branch): `_read_only()` / `_transaction()`
+split exists in `store.py`, `busy_timeout` already 2000ms, SSE client uses
+EventSource (bypasses the fetch timeout).
+
+Verification: `python -m py_compile` on `asgi.py`; `npx tsc --noEmit` clean
+in `app/`; pytest on the host is not runnable (argon2/pytest-asyncio not
+installed here — runner is authoritative per CLAUDE.md).
+
 ## 2026-07-31 — Auth lock contention fix + PR #12 CI typecheck fix
 
 ### `munin/production/store.py` — auth/lock throughput (operator-reported auth taking minutes)

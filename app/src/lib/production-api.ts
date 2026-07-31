@@ -206,25 +206,61 @@ export type ArtifactContent = ArtifactRef & { content?: string };
 
 let csrfToken = "";
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`/api/production/${path.replace(/^\/+/, "")}`, {
-    ...init,
-    credentials: "same-origin",
-    headers: {
-      Accept: "application/json",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...(csrfToken && !["GET", "HEAD"].includes((init.method || "GET").toUpperCase())
-        ? { "X-CSRF-Token": csrfToken }
-        : {}),
-      ...(init.headers || {}),
-    },
-    cache: "no-store",
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload?.ok === false) {
-    throw new Error(payload?.error?.message || `Request failed (${response.status})`);
+/** Typed error thrown when the backend rejects with 401. React Query error
+ * handlers use `instanceof AuthError` to differentiate expired session from
+ * transient failure — the former must stop polling, the latter must not. */
+export class AuthError extends Error {
+  constructor(message = "unauthenticated") {
+    super(message);
+    this.name = "AuthError";
   }
-  return payload as T;
+}
+
+/** Request timeout. Long enough for one Turso round-trip + AES-GCM decrypt
+ * of a normal conversation, short enough that a stuck request fails before
+ * Cloudflare/ngrok proxies kill it (100s / 300s respectively). Streaming
+ * endpoints must NOT go through this helper — use EventSource / raw fetch. */
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  { timeoutMs = DEFAULT_TIMEOUT_MS }: { timeoutMs?: number } = {},
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`/api/production/${path.replace(/^\/+/, "")}`, {
+      ...init,
+      credentials: "same-origin",
+      signal: init.signal ?? controller.signal,
+      headers: {
+        Accept: "application/json",
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...(csrfToken && !["GET", "HEAD"].includes((init.method || "GET").toUpperCase())
+          ? { "X-CSRF-Token": csrfToken }
+          : {}),
+        ...(init.headers || {}),
+      },
+      cache: "no-store",
+    });
+    if (response.status === 401) {
+      csrfToken = "";
+      throw new AuthError();
+    }
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(payload?.error?.message || `Request failed (${response.status})`);
+    }
+    return payload as T;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs}ms: ${path}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const productionApi = {
