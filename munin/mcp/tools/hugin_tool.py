@@ -30,6 +30,7 @@ _FALLBACK_URLS = (
     "https://princeofpwn.github.io/Hugin/data/public-graph.json",
     "https://princeofpwn.github.io/Hugin/data/entities.json",
 )
+_WINDOWS_PATH_WITH_LONE_SEPARATORS = re.compile(r'(?<!\\)\b[A-Za-z]:(?:\\[^"\\\r\n]+)+')
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -81,13 +82,53 @@ def _candidate_urls(primary: str) -> list[str]:
     return urls
 
 
+def _decode_payload(text: str, *, source_url: str) -> Any:
+    """Decode an upstream Hugin payload, repairing only invalid JSON escapes.
+
+    Hugin's graph includes source snippets.  A malformed upstream snippet such
+    as ``C:\\Temp`` can leave a lone ``\\T`` in an otherwise valid graph.  The
+    graph is data only (never executed); preserving that literal backslash is
+    safer and more useful than dropping the complete passive-intel cache.
+    """
+    def escape_windows_path(match: re.Match[str]) -> str:
+        return match.group(0).replace("\\", "\\\\")
+
+    # Repair a complete Windows-style path first.  Some valid JSON escapes
+    # such as ``\\n`` otherwise decode as a newline even though the upstream
+    # source intended ``\\notes`` as part of a path.
+    repaired_paths, path_count = _WINDOWS_PATH_WITH_LONE_SEPARATORS.subn(escape_windows_path, text)
+    repaired_count = 0
+    try:
+        parsed = json.loads(repaired_paths)
+    except json.JSONDecodeError as original_error:
+        # JSON permits only " \\ / b f n r t u after a backslash.  Repair a
+        # *single* malformed escape by making the backslash literal.  Existing
+        # escaped backslashes stay untouched, and a second decode is still the
+        # authority for all remaining JSON structure.
+        repaired, repaired_count = re.subn(r'(?<!\\)\\(?!["\\\\/bfnrtu])', r"\\\\", repaired_paths)
+        if not repaired_count:
+            raise original_error
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError as repaired_error:
+            raise original_error from repaired_error
+    if path_count or repaired_count:
+        logger.warning(
+            "Recovered Hugin graph from %s by escaping %d Windows path(s) and %d malformed JSON sequence(s)",
+            source_url,
+            path_count,
+            repaired_count,
+        )
+    return parsed
+
+
 def _download_from(url: str) -> Any:
     error = _validate_url(url)
     if error:
         raise RuntimeError(error)
     response = _SESSION.get(url, timeout=(5, 20))
     response.raise_for_status()
-    return response.json()
+    return _decode_payload(response.text, source_url=url)
 
 
 def _normalise_payload(raw: Any) -> dict[str, Any]:
