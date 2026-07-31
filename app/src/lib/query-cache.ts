@@ -12,6 +12,7 @@ const DB_VERSION = 1;
 const STORE_NAME = "query-snapshots";
 const SNAPSHOT_ID = "operator-cache-v1";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const ACTOR_MARKER = "munin.cacheActorId";
 const PERSISTABLE_ROOTS = new Set([
   "conversations",
   "conversation",
@@ -25,6 +26,7 @@ const PERSISTABLE_ROOTS = new Set([
 
 type StoredSnapshot = {
   id: string;
+  actorId?: string;
   savedAt: number;
   state: DehydratedState;
 };
@@ -37,6 +39,11 @@ type RunLike = {
 
 function canUseIndexedDb(): boolean {
   return typeof window !== "undefined" && "indexedDB" in window;
+}
+
+function currentActorMarker(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(ACTOR_MARKER);
 }
 
 function openDatabase(): Promise<IDBDatabase> {
@@ -116,7 +123,8 @@ function sanitizedState(client: QueryClient): DehydratedState {
     ...state,
     queries: state.queries.map((query) => {
       const root = String(query.queryKey[0] || "");
-      if (root !== "run") return query;
+      const leaf = String(query.queryKey[2] || "");
+      if (root !== "run" || leaf !== "detail") return query;
       return {
         ...query,
         state: {
@@ -128,18 +136,31 @@ function sanitizedState(client: QueryClient): DehydratedState {
   };
 }
 
-function buildSnapshot(client: QueryClient): StoredSnapshot {
+function buildSnapshot(client: QueryClient, actorId: string): StoredSnapshot {
   return {
     id: SNAPSHOT_ID,
+    actorId,
     savedAt: Date.now(),
     state: sanitizedState(client),
   };
 }
 
-export async function hydrateMuninQueryCache(client: QueryClient): Promise<boolean> {
+/** Hydrate only a snapshot that belongs to the authenticated actor. */
+export async function hydrateMuninQueryCache(
+  client: QueryClient,
+  actorId: string,
+): Promise<boolean> {
   try {
+    if (!actorId) {
+      await clearMuninQueryCache();
+      return false;
+    }
     const snapshot = await readSnapshot();
     if (!snapshot) return false;
+    if (!snapshot.actorId || snapshot.actorId !== actorId) {
+      await clearMuninQueryCache();
+      return false;
+    }
     if (Date.now() - snapshot.savedAt > MAX_AGE_MS) {
       await clearMuninQueryCache();
       return false;
@@ -152,24 +173,32 @@ export async function hydrateMuninQueryCache(client: QueryClient): Promise<boole
   }
 }
 
-export function subscribeMuninQueryCache(client: QueryClient): () => void {
+/** Persist successful read models for one actor until the subscription is disposed. */
+export function subscribeMuninQueryCache(
+  client: QueryClient,
+  actorId: string,
+): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let writing = false;
   let dirty = false;
+  let disposed = false;
 
   const flush = async () => {
+    if (disposed || currentActorMarker() !== actorId) return;
     if (writing) {
       dirty = true;
       return;
     }
     writing = true;
     try {
-      await writeSnapshot(buildSnapshot(client));
+      if (!disposed && currentActorMarker() === actorId) {
+        await writeSnapshot(buildSnapshot(client, actorId));
+      }
     } catch {
       // IndexedDB is an optional accelerator; ignore quota/private-mode failures.
     } finally {
       writing = false;
-      if (dirty) {
+      if (dirty && !disposed && currentActorMarker() === actorId) {
         dirty = false;
         timer = setTimeout(() => void flush(), 750);
       }
@@ -177,17 +206,21 @@ export function subscribeMuninQueryCache(client: QueryClient): () => void {
   };
 
   const unsubscribe = client.getQueryCache().subscribe(() => {
+    if (disposed || currentActorMarker() !== actorId) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => void flush(), 750);
   });
 
   return () => {
+    disposed = true;
+    dirty = false;
     unsubscribe();
     if (timer) clearTimeout(timer);
-    void flush();
+    timer = null;
   };
 }
 
+/** Delete the browser acceleration snapshot without touching Turso. */
 export async function clearMuninQueryCache(): Promise<void> {
   if (!canUseIndexedDb()) return;
   const db = await openDatabase();
@@ -203,10 +236,12 @@ export async function clearMuninQueryCache(): Promise<void> {
   }
 }
 
+/** Return metadata only for the current actor's cache snapshot. */
 export async function muninQueryCacheInfo(): Promise<{ savedAt: number; queryCount: number } | null> {
   try {
+    const actorId = currentActorMarker();
     const snapshot = await readSnapshot();
-    if (!snapshot) return null;
+    if (!snapshot || !actorId || snapshot.actorId !== actorId) return null;
     return { savedAt: snapshot.savedAt, queryCount: snapshot.state.queries.length };
   } catch {
     return null;
