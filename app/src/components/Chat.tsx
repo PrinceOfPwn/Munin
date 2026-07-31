@@ -166,7 +166,7 @@ function MessageBubble({ message }: { message: import("@/types/mcp").ChatMessage
       <div className="flex-1 min-w-0">
         <div className="bg-surface border border-border rounded-md px-3 py-2.5">
           {message.thinking ? (
-            <ThinkingLine />
+            <ThinkingLine trace={message.executionTrace} />
           ) : message.content ? (
             <div className="prose-munin">
               <ReactMarkdown
@@ -195,6 +195,23 @@ function MessageBubble({ message }: { message: import("@/types/mcp").ChatMessage
               </ReactMarkdown>
             </div>
           ) : null}
+
+          {message.executionTrace && message.executionTrace.length > 0 && (
+            <details className="mt-3 rounded border border-accent/25 bg-bg/30 px-2.5 py-2" open={message.thinking}>
+              <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider text-accent">
+                Observable execution trace · {message.executionTrace.length} events
+              </summary>
+              <div className="mt-2 space-y-1 border-l border-accent/25 pl-3">
+                {message.executionTrace.slice(-16).map((event, index) => (
+                  <div key={`${event.at || "event"}-${index}`} className="grid grid-cols-[76px_1fr] gap-2 text-[11px] font-mono">
+                    <span className="text-muted">{event.stage || "event"}</span>
+                    <span className={event.ok === false ? "text-rose" : "text-body"}>{event.summary || event.message || event.tool || "Recorded"}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-[10px] text-muted">Shows execution milestones and evidence only; private model chain-of-thought is not retained or displayed.</p>
+            </details>
+          )}
 
           {message.toolCalls && message.toolCalls.length > 0 && (
             <div className="mt-2 space-y-1">
