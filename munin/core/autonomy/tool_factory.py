@@ -174,6 +174,12 @@ class ToolFactory:
             },
         }
         tool_tags = ["tool-factory", f"run:{self._run_id or 'unknown'}", *(tags or [])]
+        # Materialize the script on disk BEFORE registering it, so register_state_only
+        # (which loads the callable to validate it loads) sees the file. The previous
+        # ordering registered first and replaced second, which raised "script not found"
+        # for every create_tool call. The try/except below still gives us the issue-7
+        # guarantee that a failed registration does not leave a half-registered entry.
+        staging_path.replace(script_path)
         try:
             registry.register_state_only(
                 self._state,
@@ -186,15 +192,13 @@ class ToolFactory:
                 created_by_agent=self._agent_id,
             )
         except Exception as exc:  # noqa: BLE001
-            staging_path.unlink(missing_ok=True)
+            script_path.unlink(missing_ok=True)
             return {
                 "ok": False,
                 "tool": tool_name,
                 "error": f"registration failed: {exc}",
                 "validation": validation,
             }
-
-        staging_path.replace(script_path)
 
         # 4. Load live handle for same-run invocation.
         fn = registry._load_callable(script_path.resolve(), fn_name)

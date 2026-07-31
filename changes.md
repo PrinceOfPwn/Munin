@@ -40,6 +40,30 @@ longer queue behind the RESERVED lock; the only serial point left is genuine
 mutation, and each mutation is shorter because encryption writes are no longer
 sharing a transaction with the auth SELECTs.
 
+### `munin/core/autonomy/tool_factory.py` — backend test regression
+
+After unblocking the frontend build (above), the `Backend + Turso online` job
+ran for the first time on this branch and surfaced 8 pre-existing failures in
+`tests/characterization/test_tool_factory_*.py`. All reported
+`'registration failed: script not found: .../munin/generated/<tool>.py'`.
+
+Root cause introduced in commit f56a2a7 ("Issue 7: Validate tool registration
+before overwriting active script"): the persistence order was reversed —
+`registry.register_state_only(...)` was invoked first (which internally tries to
+load the callable from `script_path`) and `staging_path.replace(script_path)`
+was moved to after the registration. Every `create_tool` therefore tried to
+load a script that did not exist on disk yet, hit the new `except` wrapper, and
+returned `{"ok": False, "error": "registration failed: script not found: ..."}`.
+The regression was invisible on f56a2a7 because the frontend `next build`
+typecheck failed first and never let the backend job run.
+
+Fix: restore the original ordering — `staging_path.replace(script_path)` happens
+**before** `registry.register_state_only(...)`, so the file exists when the
+registry validates/loads it. The `try/except` introduced by issue 7 stays (it
+still gives the "no half-registered entry on failure" guarantee), but the
+cleanup in the `except` now unlinks `script_path` (the materialized file)
+instead of `staging_path` (which no longer exists after `replace`).
+
 ### `app/src/app/api/chat/[[...path]]/route.ts` — CI fix (commit f56a2a7 broke `Munin CI`)
 
 `next build` typecheck failed at `route.ts:59`:
