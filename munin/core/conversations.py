@@ -102,6 +102,71 @@ class ConversationService:
         self._refresh_summary(conversation_id)
         return message, artifacts
 
+    def begin_async_turn(self, *, conversation_id: str, run_id: str) -> dict[str, Any]:
+        """Persist a visible assistant placeholder before an async worker starts."""
+        return self.state.conversation_append_message(
+            conversation_id=conversation_id,
+            role="assistant",
+            content="Munin is processing this turn. The observable execution trace is being persisted.",
+            metadata={
+                "run_id": run_id,
+                "run_status": "queued",
+                "trace": [{"stage": "queued", "message": "Conversation queued"}],
+            },
+        )
+
+    def update_async_turn(
+        self,
+        *,
+        conversation_id: str,
+        message_id: int,
+        run_status: str,
+        trace: list[dict[str, Any]],
+        job_id: str = "",
+    ) -> dict[str, Any]:
+        return self.state.conversation_update_message(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            metadata={
+                "run_status": run_status,
+                "job_id": job_id,
+                "trace": trace[-100:],
+            },
+        )
+
+    def complete_async_turn(
+        self,
+        *,
+        conversation_id: str,
+        message_id: int,
+        content: str,
+        tool_calls: list[dict[str, Any]],
+        stop_reason: str,
+        iterations: int,
+        trace: list[dict[str, Any]],
+        failed: bool = False,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Finalize the existing async placeholder and retain its trace."""
+        message = self.state.conversation_update_message(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            content=content or "(no response)",
+            metadata={
+                "run_status": "failed" if failed else "completed",
+                "trace": trace[-100:],
+                "tool_calls": tool_calls,
+                "stop_reason": stop_reason,
+                "iterations": iterations,
+            },
+        )
+        artifacts = self._capture_artifacts(
+            conversation_id=conversation_id,
+            message_id=int(message["id"]),
+            content=content,
+        )
+        self._refresh_summary(conversation_id)
+        return message, artifacts
+
     def _prompt_history(self, conversation: dict[str, Any], messages: list[dict[str, Any]]) -> list[dict[str, str]]:
         """Return a bounded prior working set, never a global event dump."""
         selected: list[dict[str, str]] = []
