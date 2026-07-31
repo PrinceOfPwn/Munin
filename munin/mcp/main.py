@@ -525,7 +525,7 @@ def job_cancel(job_id: str, run_id: str = "") -> dict[str, Any]:
 
 
 @MCP.tool()
-@audited_tool("execute_command", "admin", lambda *a, **k: k.get("mode", "async"))
+@audited_tool("execute_command", "active", lambda *a, **k: k.get("mode", "async"))
 def execute_command(
     command: str,
     mode: str = "async",
@@ -533,10 +533,10 @@ def execute_command(
     target: str = "",
     run_id: str = "",
 ) -> dict[str, Any]:
-    """Execute an arbitrary shell command. Requires OPSEC preflight if policy demands it."""
+    """Execute an operator-authorized command with active OPSEC pre/postflight."""
     return _run_command(
         tool="execute_command",
-        level="admin",
+        level="active",
         command=command,
         timeout=timeout,
         target=target,
