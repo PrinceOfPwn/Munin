@@ -63,8 +63,8 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
       target="_blank"
       rel="noopener noreferrer"
       className={cn(
-        "inline-flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-sm",
-        "transition-colors hover:bg-accent hover:text-accent-foreground",
+        "inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm",
+        "transition-colors hover:bg-accent/10 hover:text-accent",
         !uri && "pointer-events-none opacity-60"
       )}
       data-artifact-id={artifactId}
@@ -77,18 +77,18 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
 
       {/* Name and type */}
       <span className="flex flex-col leading-tight">
-        <span className="font-medium text-foreground">{filename}</span>
-        <span className="text-xs text-muted-foreground">{mimeType}</span>
+        <span className="font-medium text-body">{filename}</span>
+        <span className="text-xs text-secondary">{mimeType}</span>
       </span>
 
       {/* MIME badge */}
-      <span className="ml-auto rounded bg-muted px-1.5 py-0.5 text-xs font-mono text-muted-foreground">
+      <span className="ml-auto rounded bg-raised px-1.5 py-0.5 text-xs font-mono text-muted">
         {label}
       </span>
 
       {/* Download arrow */}
       {uri && (
-        <span aria-hidden className="text-muted-foreground">
+        <span aria-hidden className="text-muted">
           ↓
         </span>
       )}

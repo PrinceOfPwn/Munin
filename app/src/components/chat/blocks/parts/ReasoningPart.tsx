@@ -23,7 +23,7 @@ export function ReasoningPart({ text }: ReasoningPartProps) {
     <div
       className={cn(
         "flex items-start gap-2 rounded-md border border-dashed border-muted px-3 py-2",
-        "bg-muted/30 text-muted-foreground"
+        "bg-muted/10 text-secondary"
       )}
       role="note"
       aria-label="Agent reasoning"

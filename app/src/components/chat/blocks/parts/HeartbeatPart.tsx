@@ -47,13 +47,13 @@ export function HeartbeatPart({ ts }: HeartbeatPartProps) {
 
   return (
     <div
-      className="flex items-center gap-1.5 text-xs text-muted-foreground"
+      className="flex items-center gap-1.5 text-xs text-muted"
       aria-label={`Last active: ${label}`}
     >
       {/* Pulsing dot */}
       <span
         className={cn(
-          "inline-block h-1.5 w-1.5 rounded-full bg-green-400",
+          "inline-block h-1.5 w-1.5 rounded-full bg-success",
           "animate-pulse"
         )}
         aria-hidden

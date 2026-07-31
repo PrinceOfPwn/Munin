@@ -25,7 +25,7 @@ export interface ToolInvocationPartProps {
 function StatusBadge({ state, hasError }: { state: ToolInvocationState; hasError: boolean }) {
   if (hasError) {
     return (
-      <span className="rounded px-1.5 py-0.5 text-xs font-medium bg-destructive/15 text-destructive">
+      <span className="rounded bg-danger/15 px-1.5 py-0.5 text-xs font-medium text-danger">
         failed
       </span>
     );
@@ -40,10 +40,10 @@ function StatusBadge({ state, hasError }: { state: ToolInvocationState; hasError
 
   const colourClass =
     state === "partial-call"
-      ? "bg-muted text-muted-foreground"
+      ? "bg-raised text-muted"
       : state === "call"
-      ? "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300"
-      : "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300";
+      ? "bg-warning/20 text-warning"
+      : "bg-success/20 text-success";
 
   return (
     <span className={cn("rounded px-1.5 py-0.5 text-xs font-medium", colourClass)}>
@@ -60,13 +60,13 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
     <div className="mt-1">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+        className="text-xs text-muted underline-offset-2 hover:text-secondary hover:underline"
         aria-expanded={open}
       >
         {open ? "▾" : "▸"} {label}
       </button>
       {open && (
-        <pre className="mt-1 max-h-48 overflow-auto rounded bg-muted/40 p-2 text-xs font-mono text-foreground">
+        <pre className="mt-1 max-h-48 overflow-auto rounded bg-raised p-2 text-xs font-mono text-body">
           {json}
         </pre>
       )}
@@ -96,15 +96,13 @@ export function ToolInvocationPart({
     <div
       className={cn(
         "rounded-md border px-3 py-2 text-sm",
-        hasError
-          ? "border-destructive/40 bg-destructive/5"
-          : "border-border bg-card"
+        hasError ? "border-danger/40 bg-danger/5" : "border-border bg-surface"
       )}
       data-tool-call-id={toolCallId}
     >
       {/* Header row */}
       <div className="flex items-center gap-2">
-        <span className="font-mono font-medium text-foreground">{toolName}</span>
+        <span className="font-mono font-medium text-body">{toolName}</span>
         <StatusBadge state={state} hasError={hasError} />
       </div>
 
@@ -120,7 +118,7 @@ export function ToolInvocationPart({
 
       {/* Explicit error prop */}
       {error && state !== "result" && (
-        <p className="mt-1 text-xs text-destructive">{error}</p>
+        <p className="mt-1 text-xs text-danger">{error}</p>
       )}
     </div>
   );

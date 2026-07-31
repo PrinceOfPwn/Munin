@@ -36,14 +36,14 @@ function stateDotColour(state: string): string {
   switch (state) {
     case "started":
     case "running":
-      return "bg-yellow-400 animate-pulse";
+      return "bg-warning animate-pulse";
     case "completed":
-      return "bg-green-400";
+      return "bg-success";
     case "failed":
     case "cancelled":
-      return "bg-red-400";
+      return "bg-danger";
     default:
-      return "bg-muted-foreground";
+      return "bg-muted";
   }
 }
 
@@ -63,7 +63,7 @@ export function SubagentPresencePart({
 }: SubagentPresencePartProps) {
   return (
     <div
-      className="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2"
+      className="flex items-center justify-between rounded-md border border-border bg-surface px-3 py-2"
       data-subagent-id={subagentId}
     >
       <div className="flex items-center gap-2">
@@ -75,8 +75,8 @@ export function SubagentPresencePart({
 
         {/* Agent name & state */}
         <div className="leading-tight">
-          <p className="text-sm font-medium text-foreground">{name}</p>
-          <p className="text-xs text-muted-foreground">{stateLabel(state)}</p>
+          <p className="text-sm font-medium text-body">{name}</p>
+          <p className="text-xs text-secondary">{stateLabel(state)}</p>
         </div>
       </div>
 
@@ -86,7 +86,7 @@ export function SubagentPresencePart({
           onClick={onOpenWindow}
           className={cn(
             "rounded px-2 py-1 text-xs font-medium transition-colors",
-            "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+            "bg-raised text-body hover:bg-active"
           )}
           aria-label={`Open window for subagent ${name}`}
         >

@@ -14,23 +14,22 @@ export interface GuidancePartProps {
 
 /**
  * Displays guidance injected by an operator into the run.
- * Uses a blue left-border accent and italic text to distinguish it from
+ * Uses an info left-border accent and italic text to distinguish it from
  * agent-authored reasoning and operator notes.
  */
 export function GuidancePart({ text }: GuidancePartProps) {
   return (
     <div
       className={cn(
-        "border-l-4 border-blue-400 bg-blue-50 px-3 py-2 text-sm",
-        "dark:border-blue-500 dark:bg-blue-950/40"
+        "border-l-4 border-info/60 bg-info/10 px-3 py-2 text-sm"
       )}
       role="note"
       aria-label="Operator guidance"
     >
-      <p className="mb-0.5 text-xs font-semibold uppercase tracking-wide text-blue-700 dark:text-blue-400">
+      <p className="mb-0.5 text-xs font-semibold uppercase tracking-wide text-info">
         Guidance
       </p>
-      <p className="italic text-foreground">{text}</p>
+      <p className="italic text-body">{text}</p>
     </div>
   );
 }
