@@ -26,8 +26,11 @@ from ..mcp.shared_state import SharedStateStore
 from ..mcp.tools import (
     capabilities_tool,
     diagnostics_tool,
+    discord_tool,
+    extension_forge_tool,
     forge_tool,
     graph_forge_tool,
+    hugin_rag_tool,
     hugin_tool,
     ldap_tools,
     munin_tools,
@@ -41,6 +44,44 @@ from .orchestrator import Orchestrator
 from .soul import SoulManager
 
 logger = logging.getLogger("munin.agent")
+
+
+def _nmap_scan(
+    target: str,
+    scan_type: str = "-sV",
+    ports: str = "",
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 600,
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Lazy wrapper avoids importing the MCP server while its module initializes."""
+    from ..mcp.main import nmap_scan
+
+    return nmap_scan(target, scan_type, ports, additional_args, mode, timeout, run_id)
+
+
+def _nmap_advanced_scan(
+    target: str,
+    scan_type: str = "-sS",
+    ports: str = "",
+    timing: str = "T4",
+    nse_scripts: str = "",
+    os_detection: bool = False,
+    version_detection: bool = False,
+    aggressive: bool = False,
+    stealth: bool = False,
+    additional_args: str = "",
+    mode: str = "async",
+    timeout: int = 900,
+    run_id: str = "",
+) -> dict[str, Any]:
+    from ..mcp.main import nmap_advanced_scan
+
+    return nmap_advanced_scan(
+        target, scan_type, ports, timing, nse_scripts, os_detection,
+        version_detection, aggressive, stealth, additional_args, mode, timeout, run_id,
+    )
 
 # Tools added to the main agent catalog via state-bound wrappers (no global STATE needed).
 # Added `shared_state_overview` — previously registered on MCP but invisible to the agent
@@ -59,6 +100,24 @@ _DYNAMIC_TOOL_NAMES: set[str] = {
     "list_shared_tasks",
     "shared_state_overview",
 }
+
+# The MCP server already owns these hardened, audited wrappers. They are added
+# at response time (after MCP initialization) so the coordinator receives the
+# same active-recon surface as the server without creating an import cycle.
+_ACTIVE_RECON_TOOL_NAMES = (
+    "nmap_scan",
+    "nmap_advanced_scan",
+    "httpx_probe",
+    "netexec_scan",
+    "feroxbuster_scan",
+    "ffuf_scan",
+    "katana_crawl",
+    "hydra_attack",
+    "sqlmap_scan",
+    "smbmap_scan",
+    "nuclei_scan",
+    "web_evidence_screenshotter",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +139,9 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "hugin_search": hugin_tool.hugin_search,
     "hugin_refresh": hugin_tool.hugin_refresh,
     "hugin_neighbors": hugin_tool.hugin_neighbors,
+    "hugin_rag_search": hugin_rag_tool.hugin_rag_search,
+    "hugin_plan_for": hugin_rag_tool.hugin_plan_for,
+    "hugin_node_detail": hugin_rag_tool.hugin_node_detail,
     "munin_capabilities": capabilities_tool.munin_capabilities,
     # Munin self-inspection & diagnostics
     "munin_self_diagnose": munin_tools.munin_self_diagnose,
@@ -101,12 +163,22 @@ _NATIVE_TOOLS: dict[str, Callable[..., dict[str, Any]]] = {
     "munin_wake": munin_tools.munin_wake,
     "munin_wake_list": munin_tools.munin_wake_list,
     "subagent_trace": munin_tools.subagent_trace,
+    "send_discord_message": discord_tool.send_discord_message,
+    "discord_status": discord_tool.discord_status,
     # Forging + graph design
     "tool_forge": forge_tool.tool_forge,
     "graph_forge": graph_forge_tool.graph_forge,
     "list_generated_graphs": graph_forge_tool.list_generated_graphs,
     "describe_generated_graph": graph_forge_tool.describe_generated_graph,
     "drop_generated_graph": graph_forge_tool.drop_generated_graph,
+    "extension_forge": extension_forge_tool.extension_forge,
+    "extension_list": extension_forge_tool.extension_list,
+    "extension_describe": extension_forge_tool.extension_describe,
+    "extension_open_pr": extension_forge_tool.extension_open_pr,
+    # Active recon is available only inside an explicitly scoped request; the
+    # underlying wrappers retain their OPSEC preflight/postflight enforcement.
+    "nmap_scan": _nmap_scan,
+    "nmap_advanced_scan": _nmap_advanced_scan,
     "list_subagent_tools": munin_tools.list_subagent_tools,
 }
 
@@ -139,6 +211,16 @@ class MuninAgent:
                 logger.warning("skip generated tool %s: %s", row["name"], exc)
         # Dynamic tools: messaging, intel, tasks — bound to self.state (no global STATE)
         catalog.update(build_tool_catalog(self.state, _DYNAMIC_TOOL_NAMES))
+        try:
+            from ..mcp import main as mcp_main
+
+            catalog.update({
+                name: getattr(mcp_main, name)
+                for name in _ACTIVE_RECON_TOOL_NAMES
+                if callable(getattr(mcp_main, name, None))
+            })
+        except Exception as exc:  # pragma: no cover - diagnostics surfaces MCP import failures
+            logger.warning("active-recon catalog unavailable: %s", exc)
         return catalog
 
     def _system_prompt(self) -> str:
@@ -149,6 +231,8 @@ class MuninAgent:
                 "## Working rules",
                 "1. Before calling `tool_forge`, call `list_generated_tools`. Reuse only an exact requested name/contract; a related tool is a lead, not a substitute for a specialised requirement.",
                 "1b. Call `munin_capabilities` when selecting a domain workflow. It describes directory, Hugin/intel, web/service recon and agent-composition contracts without granting extra authorization.",
+                "1c. For a non-trivial plan, use `hugin_rag_search` or `hugin_plan_for` as evidence. Their output is advisory, not authorization.",
+                "1d. `extension_forge` only creates a guarded proposal. Never call `extension_open_pr` unless the operator explicitly approved that exact proposal in this conversation.",
                 "2. To delegate structured work, call `munin_wake(subagent, task_json)` and monitor it via `subagent_trace` rather than replicating a specialist's job yourself.",
                 "3. For LDAP, always use `ldap_search(filter_template=..., params_json=...)` — never build a filter string by hand.",
                 "4. Active-tool calls (nmap, nuclei, sqlmap, hydra, etc.) run an automatic OPSEC preflight/postflight. If a result reports an opsec/egress/route failure, stop and report it to the operator — do not retry the same call blindly.",

@@ -15,8 +15,8 @@ services:
       LDAP_CONFIG_PASSWORD: "itachi"
       LDAP_TLS: "false"
     ports:
-      - "389:389"
-      - "636:636"
+      - "127.0.0.1:389:389"
+      - "127.0.0.1:636:636"
     volumes:
       - openldap_data:/var/lib/ldap
       - openldap_config:/etc/ldap/slapd.d
@@ -32,7 +32,50 @@ services:
       PHPLDAPADMIN_HTTPS: "false"
     depends_on: [openldap]
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
+    networks:
+      - munin
+
+  apache-lab:
+    build:
+      context: ./labs/apache-vulnerable
+    container_name: munin-apache-lab
+    labels:
+      munin.lab: "true"
+      munin.training_only: "true"
+    ports:
+      - "127.0.0.1:8081:80"
+    networks:
+      - munin
+
+  munin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: munin-runtime
+    profiles: ["runtime"]
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LDAP_URI: ldap://openldap:389
+      LDAP_BASE_DN: dc=akatsuki,dc=com
+      MUNIN_MCP_HOST: 0.0.0.0
+      MUNIN_MCP_PORT: 8890
+      MUNIN_DATA_PATH: /app/data
+      MUNIN_SOUL_PATH: /app/soul
+    depends_on:
+      openldap:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8890:8890"
+    volumes:
+      - ./data:/app/data
+      - ./soul:/app/soul
+      - ./munin/generated:/app/munin/generated
+      - ./munin/extensions:/app/munin/extensions
+      - ./runs:/app/runs
+      - ./reports:/app/reports
+      - ./evidence:/app/evidence
     networks:
       - munin
 

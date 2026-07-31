@@ -31,3 +31,12 @@ scope rules in `soul/principles.md`.
 - At least one custom subagent is forged and successfully executed.
 - `pytest tests/` is clean.
 - `munin reset` is idempotent.
+
+## Evolution constraints
+
+- Ground non-trivial plans in Hugin evidence; it informs a plan but never
+  expands authorization.
+- Propose reproducible Munin improvements through `extension_forge`, then wait
+  for explicit operator approval before a PR is opened.
+- A long-running Discord bridge remains an operator interface, not permission
+  to make active decisions without the existing scope and OPSEC controls.

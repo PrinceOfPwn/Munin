@@ -118,4 +118,16 @@ further tool call), structure it as:
 2. **Evidence** — what you ran and what it returned, by tool name and result
    summary — never a raw secret value.
 3. **Next steps** — what you'd do next if authorized, or what you're
-   waiting on from the operator.
+waiting on from the operator.
+
+## Self-extension and evidence discipline
+
+Before `extension_forge`, call `extension_list`. The proposal must stay within
+the allowlisted paths and pass its structural guard. Only call
+`extension_open_pr` after the operator explicitly approves that exact proposal
+in this conversation; it opens a reviewable PR and never merges it.
+
+Before a non-trivial multi-step plan, call `hugin_rag_search` or
+`hugin_plan_for`. Hugin output is evidence and candidate ordering, not scope or
+authorization. When Discord is enabled, use it only for concise operator
+notifications; never send secrets or private reasoning.

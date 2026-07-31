@@ -1341,13 +1341,22 @@ from . import registry  # noqa: E402
 from .tools import (  # noqa: E402
     capabilities_tool,  # noqa: E402,F401
     diagnostics_tool,  # noqa: E402,F401
+    discord_tool,  # noqa: E402,F401
+    extension_forge_tool,  # noqa: E402,F401
     forge_tool,  # noqa: E402,F401
     graph_forge_tool,  # noqa: E402,F401
+    hugin_rag_tool,  # noqa: E402,F401
     hugin_tool,  # noqa: E402,F401
     ldap_tools,  # noqa: E402,F401
     munin_tools,  # noqa: E402,F401
     tavily_tool,  # noqa: E402,F401
 )
+
+# Modules with state-free functions register explicitly so the same functions
+# are also available to Munin's in-process ReAct catalog.
+discord_tool.register(MCP)
+extension_forge_tool.register(MCP)
+hugin_rag_tool.register(MCP)
 
 # Rebuild the DB catalog from versioned graph manifests before runners resolve names.
 try:
@@ -1366,6 +1375,39 @@ try:
     registry.start_runtime_sync(MCP, STATE, SETTINGS)
 except Exception as exc:  # pragma: no cover - guardrail; log and keep going
     logger.warning("registry.rehydrate failed: %s", exc)
+
+
+def _start_discord_operator_bridge() -> None:
+    """Start the optional allowlisted Discord control plane without blocking MCP."""
+    try:
+        from ..integrations.discord_bridge import get_bridge, post_to_discord
+        from ..integrations.discord_config import get_discord_config
+
+        config = get_discord_config()
+        if not config.outbound_enabled:
+            return
+
+        def handle_message(author_id: int, author: str, prompt: str, channel_id: int) -> None:
+            # Import lazily: MuninAgent imports MCP tool modules, so importing it
+            # during module construction would create a circular dependency.
+            from ..core.munin_agent import MuninAgent
+
+            try:
+                result = MuninAgent(SETTINGS).respond(prompt, max_iterations=config.max_iterations)
+                answer = str(result.get("content") or result.get("summary") or "Task completed without a text response.")
+                post_to_discord(f"Munin — {author}\n{answer}", channel_id=channel_id)
+            except Exception as exc:  # pragma: no cover - external provider / Discord failure
+                logger.exception("Discord operator task failed")
+                post_to_discord(f"Munin — task failed: {exc}", channel_id=channel_id)
+
+        bridge = get_bridge(handle_message)
+        if bridge and not config.inbound_enabled:
+            logger.warning("Discord outbound notifications enabled, but inbound control is disabled until MUNIN_DISCORD_ALLOWED_USER_IDS is set")
+    except Exception as exc:  # pragma: no cover - optional integration must not block MCP
+        logger.warning("Discord bridge initialization failed: %s", exc)
+
+
+_start_discord_operator_bridge()
 
 
 # ─────────────────────────────────────────────
