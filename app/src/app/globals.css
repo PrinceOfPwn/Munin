@@ -69,6 +69,18 @@ button:disabled {
   background: theme(colors.borderStrong);
 }
 
+/* Flight deck: when the context-inspector aside is unmounted, reclaim its
+ * fixed 340px track and override the header's static col-span-3 utility. */
+@media (min-width: 1024px) {
+  main.h-screen:not(:has(> aside.border-l)) {
+    grid-template-columns: 240px minmax(0, 1fr);
+  }
+
+  main.h-screen:not(:has(> aside.border-l)) > header {
+    grid-column: span 2 / span 2;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
