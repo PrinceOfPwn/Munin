@@ -1,0 +1,243 @@
+# Enterprise OpenLDAP Mock Directory — Domain: dc=akatsuki,dc=com
+# Auto-bootstrap LDIF seed for osixia/openldap container
+
+dn: ou=users,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: users
+description: Domain Users Container
+
+dn: ou=groups,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: groups
+description: Domain Security Groups Container
+
+dn: ou=computers,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: computers
+description: Domain Computers Container
+
+dn: ou=service-accounts,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: service-accounts
+description: Service Accounts Container
+
+dn: ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Corp
+description: Corporate Enterprise Structure
+
+dn: ou=Engineering,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Engineering
+description: Software & Systems Engineering
+
+dn: ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: IT-Operations
+description: Infrastructure and System Operations
+
+dn: ou=Finance,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Finance
+description: Financial Operations
+
+dn: ou=HR,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: HR
+description: Human Resources
+
+# ── Enterprise Domain Users ───────────────────────────────────────────────────
+
+dn: uid=administrator,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: administrator
+cn: Domain Administrator
+sn: Administrator
+givenName: Domain
+displayName: Domain Administrator
+mail: administrator@akatsuki.com
+title: Lead Infrastructure Administrator
+ou: IT-Operations
+userPassword: {SSHA}Pass389Secure!
+
+dn: uid=jdoe,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: jdoe
+cn: John Doe
+sn: Doe
+givenName: John
+displayName: John Doe (Senior Lead)
+mail: jdoe@akatsuki.com
+title: Senior Infrastructure Engineer
+ou: IT-Operations
+telephoneNumber: +1-555-0192
+userPassword: {SSHA}JdoePassword123!
+
+dn: uid=asmith,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: asmith
+cn: Alice Smith
+sn: Smith
+givenName: Alice
+displayName: Alice Smith (DevOps)
+mail: asmith@akatsuki.com
+title: Site Reliability Engineer
+ou: Engineering
+telephoneNumber: +1-555-0144
+userPassword: {SSHA}AsmithPass2026!
+
+dn: uid=rgarcia,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: rgarcia
+cn: Roberto Garcia
+sn: Garcia
+givenName: Roberto
+displayName: Roberto Garcia
+mail: rgarcia@akatsuki.com
+title: Principal Software Engineer
+ou: Engineering
+telephoneNumber: +1-555-0188
+userPassword: {SSHA}RgarciaSecret99!
+
+dn: uid=htarget,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: htarget
+cn: Hugo Target
+sn: Target
+givenName: Hugo
+displayName: Hugo Target
+mail: htarget@akatsuki.com
+title: Field Operations Specialist
+ou: IT-Operations
+employeeType: DONT_REQ_PREAUTH
+telephoneNumber: +1-555-0177
+userPassword: {SSHA}HtargetPass2026!
+
+dn: uid=mlopez,ou=users,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: mlopez
+cn: Maria Lopez
+sn: Lopez
+givenName: Maria
+displayName: Maria Lopez
+mail: mlopez@akatsuki.com
+title: HR Business Partner
+ou: HR
+telephoneNumber: +1-555-0122
+userPassword: {SSHA}MlopezPass2026!
+
+# ── Service Accounts ──────────────────────────────────────────────────────────
+
+dn: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_backup
+cn: Backup Service Account
+sn: Service
+displayName: Service - Backup System
+mail: svc_backup@akatsuki.com
+title: MSSQLSvc/DBSERVER01.akatsuki.com:1433
+ou: IT-Operations
+
+dn: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_mssql
+cn: MSSQL Database Service Account
+sn: Service
+displayName: Service - MSSQL Database
+mail: svc_mssql@akatsuki.com
+title: MSSQLSvc/SQL01.akatsuki.com:1433
+ou: IT-Operations
+
+dn: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_http
+cn: Intranet HTTP Service Account
+sn: Service
+displayName: Service - Intranet Web App
+mail: svc_http@akatsuki.com
+title: HTTP/intranet.akatsuki.com
+ou: Engineering
+
+dn: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_jenkins
+cn: Jenkins CI Automation Account
+sn: Service
+displayName: Service - Jenkins CI/CD
+mail: svc_jenkins@akatsuki.com
+title: HTTP/jenkins.akatsuki.com:8080
+ou: Engineering
+
+# ── Domain Security Groups ────────────────────────────────────────────────────
+
+dn: cn=Domain Admins,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Domain Admins
+description: Highest privilege domain administration group
+member: uid=administrator,ou=users,dc=akatsuki,dc=com
+member: uid=jdoe,ou=users,dc=akatsuki,dc=com
+
+dn: cn=Enterprise Admins,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Enterprise Admins
+description: Enterprise forest administrators
+member: uid=administrator,ou=users,dc=akatsuki,dc=com
+
+dn: cn=IT-Operations,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: IT-Operations
+description: Systems administration personnel
+member: uid=administrator,ou=users,dc=akatsuki,dc=com
+member: uid=jdoe,ou=users,dc=akatsuki,dc=com
+member: uid=htarget,ou=users,dc=akatsuki,dc=com
+
+dn: cn=DevOps,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: DevOps
+description: Infrastructure automation & SRE personnel
+member: uid=asmith,ou=users,dc=akatsuki,dc=com
+member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
+
+dn: cn=Developers,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Developers
+description: Software engineering staff
+member: uid=rgarcia,ou=users,dc=akatsuki,dc=com
+member: uid=asmith,ou=users,dc=akatsuki,dc=com
+
+dn: cn=Service Accounts,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Service Accounts
+description: Automated service accounts container group
+member: uid=svc_backup,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_mssql,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_http,ou=service-accounts,dc=akatsuki,dc=com
+member: uid=svc_jenkins,ou=service-accounts,dc=akatsuki,dc=com
+
+dn: cn=HR,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: HR
+description: Human Resources personnel group
+member: uid=mlopez,ou=users,dc=akatsuki,dc=com
+
+# ── Domain Computers & Infrastructure ─────────────────────────────────────────
+
+dn: cn=DC01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: DC01
+description: Primary Active Directory Domain Controller (Windows Server 2022)
+
+dn: cn=SQL01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: SQL01
+description: Primary MSSQL Production Database Host
+
+dn: cn=JENKINS01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: JENKINS01
+description: Central CI/CD Automation Build Server
+
+dn: cn=WS01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: WS01
+description: Developer Workstation Host
