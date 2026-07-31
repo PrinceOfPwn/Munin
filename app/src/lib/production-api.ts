@@ -216,19 +216,17 @@ export class AuthError extends Error {
   }
 }
 
-/** Request timeout. Long enough for one Turso round-trip + AES-GCM decrypt
- * of a normal conversation, short enough that a stuck request fails before
- * Cloudflare/ngrok proxies kill it (100s / 300s respectively). Streaming
- * endpoints must NOT go through this helper — use EventSource / raw fetch. */
-const DEFAULT_TIMEOUT_MS = 15_000;
-
+/** Request timeout is opt-in: by default requests run without a client-side
+ * deadline (only the tunnel proxy / browser kills them). Pass `timeoutMs` to
+ * bound a specific call. Streaming endpoints must NOT go through this helper
+ * — use EventSource / raw fetch. */
 async function request<T>(
   path: string,
   init: RequestInit = {},
-  { timeoutMs = DEFAULT_TIMEOUT_MS }: { timeoutMs?: number } = {},
+  { timeoutMs }: { timeoutMs?: number } = {},
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = timeoutMs && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     const response = await fetch(`/api/production/${path.replace(/^\/+/, "")}`, {
       ...init,
@@ -255,11 +253,11 @@ async function request<T>(
     return payload as T;
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error(`Request timed out after ${timeoutMs}ms: ${path}`);
+      throw new Error(`Request aborted${timer ? ` after ${timeoutMs}ms` : ""}: ${path}`);
     }
     throw err;
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
   }
 }
 

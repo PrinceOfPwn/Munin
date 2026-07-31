@@ -7,13 +7,12 @@ THE RAVEN'S MEMORY" infinite spinner + missing traces diagnosed from HAR
 captures (trycloudflare 160s waits, ngrok 300s timeouts, 2000+ request
 pile-up in 7 min).
 
-- **`app/src/lib/production-api.ts`** — `request()` now aborts via
-  AbortController after `DEFAULT_TIMEOUT_MS` (15s) instead of dangling until
-  the tunnel proxy kills it (100s CF / 300s ngrok). 401 responses throw a
-  typed `AuthError` (csrfToken cleared) so query handlers can distinguish
-  session expiry from transient failure. AbortError is rethrown as an
-  explicit timeout error. Caller-provided signals are respected
-  (`init.signal ?? controller.signal`).
+- **`app/src/lib/production-api.ts`** — `request()` aborts via
+  AbortController and throws on 401 as a typed `AuthError` (csrfToken
+  cleared) so query handlers can distinguish session expiry from transient
+  failure. Client-side timeout removed by operator request: requests run
+  with no deadline unless a caller opts in via `timeoutMs`; the AbortError
+  mapping and caller-provided `init.signal` are preserved.
 - **`app/src/lib/queries.ts`** — `useConversation` / `useRunDetail` now
   retry 2x with exponential delay (1s→2s→4s, cap 15s), stop polling in
   background tabs (`refetchIntervalInBackground: false`), and grow the
