@@ -170,3 +170,8 @@ def tavily_search(
             "count": len(results),
         },
     }
+
+
+# Register Valravn after the FastMCP singleton and audit wrapper are ready.
+# The Deep Agents Tool Gateway discovers these registrations dynamically.
+from . import valravn_tool as _valravn_tool  # noqa: E402,F401
