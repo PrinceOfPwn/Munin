@@ -235,6 +235,10 @@ def test_reasoning_redaction_envelope_profiles_and_recorded_replay(production_st
     )
     assert "gsk_" not in str(profile)
     assert production_store.reveal_provider_key(actor_id=operator["id"], profile_id=profile["id"]).startswith("gsk_")
+    assert production_store.set_active_provider_profile(actor_id=operator["id"], profile_id=profile["id"])["active"] is True
+    assert production_store.list_provider_profiles(actor_id=operator["id"])[0]["active"] is True
+    assert production_store.clear_active_provider_profile(actor_id=operator["id"])["active"] is False
+    assert not any(item["active"] for item in production_store.list_provider_profiles(actor_id=operator["id"]))
 
     event = production_store.append_reasoning_event(
         run_id=turn["run"]["id"],

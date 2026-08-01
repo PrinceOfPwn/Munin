@@ -9,12 +9,14 @@ new AI SDK v5 client (``AppShell`` + ``AgentConsole``) actually needs:
 * Auth: session/login/logout/bootstrap + CSRF + password recovery.
 * Conversations: list, create, GET/PATCH/DELETE aggregate, export.
 * Artifacts: read + inline download.
+* Provider profiles: encrypted HTTPS OpenAI-compatible BYOK metadata and
+  active-profile selection; plaintext keys never leave the server boundary.
 * ``POST /api/chat`` and ``POST /api/chat/{run_id}/guidance`` (wired by
   :mod:`munin.production.chat`, which owns the supervisor_runner → SSE
   bridge).
 
 Everything else — ``/api/runs/**``, ``/api/branches/**``, HITL resolve,
-collaborators/notes/presence/broadcasts, provider profiles, agents catalog,
+collaborators/notes/presence/broadcasts, agents catalog,
 page-agent actions, dev simulate-forge — was deleted in Fase 2 and will
 either be reintroduced as an AI-SDK data-part flow (HITL resolve, forthcoming)
 or dropped for good.  See the migration kill-list for the full inventory.
@@ -274,6 +276,44 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         except KeyError:
             return _error(404, "not_found", "conversation not found")
 
+    async def provider_profiles(request: Request) -> Response:
+        try:
+            current = await actor(request, csrf=request.method == "POST")
+            if request.method == "GET":
+                return JSONResponse({"ok": True, "data": store.list_provider_profiles(actor_id=current["id"])})
+            data = await _payload(request)
+            result = store.save_provider_profile(
+                actor_id=current["id"],
+                label=str(data.get("label") or data.get("provider") or "Provider"),
+                provider=str(data.get("provider") or "openai-compatible"),
+                base_url=str(data.get("base_url") or data.get("endpoint") or ""),
+                model=str(data.get("model") or ""),
+                uses=list(data.get("uses") or ["chat"]),
+                plaintext_key=str(data.get("api_key") or data.get("key") or ""),
+            )
+            if bool(data.get("activate")):
+                result = store.set_active_provider_profile(actor_id=current["id"], profile_id=result["id"])
+            return JSONResponse({"ok": True, "data": result}, status_code=201)
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except ValueError as exc:
+            return _error(400, "invalid_provider_profile", str(exc))
+
+    async def provider_profile_activate(request: Request) -> Response:
+        try:
+            current = await actor(request, csrf=True)
+            if request.path_params["profile_id"] == "default":
+                result = store.clear_active_provider_profile(actor_id=current["id"])
+                return JSONResponse({"ok": True, "data": result})
+            result = store.set_active_provider_profile(
+                actor_id=current["id"], profile_id=request.path_params["profile_id"]
+            )
+            return JSONResponse({"ok": True, "data": result})
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "provider profile not found")
+
     async def artifact(request: Request) -> Response:
         try:
             current = await actor(request)
@@ -299,6 +339,8 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         Route("/api/conversations", conversations, methods=["GET", "POST"]),
         Route("/api/conversations/{conversation_id}/export", conversation_export, methods=["GET"]),
         Route("/api/conversations/{conversation_id}", conversation_detail, methods=["GET", "PATCH", "DELETE"]),
+        Route("/api/provider-profiles", provider_profiles, methods=["GET", "POST"]),
+        Route("/api/provider-profiles/{profile_id}/activate", provider_profile_activate, methods=["POST"]),
         # ── artifacts (read-only; writes come from run finalisation) ─
         Route("/api/artifacts/{artifact_id}", artifact, methods=["GET"]),
     ]

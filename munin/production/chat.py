@@ -46,6 +46,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any
 
 from starlette.requests import Request
@@ -812,6 +813,45 @@ async def _stream_chat(
     from ..mcp.shared_state import SharedStateStore
 
     settings = get_settings()
+    # The active operator-owned BYOK profile overrides process defaults for
+    # this run only.  Keys are decrypted server-side and never cross the BFF.
+    try:
+        profiles = store.list_provider_profiles(actor_id=str(actor_info.get("id") or ""))
+        active_profile = next((profile for profile in profiles if profile.get("active")), None)
+        if active_profile:
+            plaintext_key = store.reveal_provider_key(
+                actor_id=str(actor_info.get("id") or ""),
+                profile_id=str(active_profile["id"]),
+            )
+            settings = replace(
+                settings,
+                llm_base_url=str(active_profile.get("base_url") or settings.llm_base_url),
+                llm_model=str(active_profile.get("model") or settings.llm_model),
+                llm_api_key=plaintext_key,
+            )
+            log.info(
+                "chat: using provider profile id=%s provider=%s model=%s",
+                active_profile.get("id"),
+                active_profile.get("provider"),
+                active_profile.get("model"),
+            )
+    except Exception as exc:  # noqa: BLE001 - surface a bad selected profile clearly
+        log.warning("chat: active provider profile unavailable: %s", exc)
+        _finalize(
+            store,
+            run_id=run_id,
+            lease_token=lease_token,
+            content=f"Provider profile unavailable: {exc}",
+            outcome="failed",
+            conversation_id=conversation_id,
+        )
+        yield b": munin-chat-stream v1\n\n"
+        yield _sse_frame(
+            {"kind": "run_state", "run_id": run_id, "state": "failed", "error": str(exc)},
+            sequence=1,
+        )
+        yield b"event: close\ndata: {}\n\n"
+        return
 
     try:
         model = LLMClient(settings).make_langchain()

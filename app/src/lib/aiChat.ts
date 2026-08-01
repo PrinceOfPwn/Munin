@@ -1,10 +1,11 @@
 ﻿import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "ai";
 import { DefaultChatTransport } from "ai";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import { useBrowserCache } from "@/lib/cache";
 import { currentCsrfToken } from "@/lib/production-api";
+import { productionApi, type ConversationMessage } from "@/lib/production-api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,6 +33,24 @@ function latestRunState(messages: UIMessage[]): { runId: string; state: string }
   return latest;
 }
 
+function serverMessageToUiMessage(message: ConversationMessage): UIMessage {
+  return {
+    id: message.id,
+    role: message.kind === "user" ? "user" : "assistant",
+    parts: message.content
+      ? [{ type: "text", text: message.content }]
+      : [],
+  };
+}
+
+function uiMessageText(message: UIMessage): string {
+  return message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("\n")
+    .trim();
+}
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -51,6 +70,7 @@ function latestRunState(messages: UIMessage[]): { runId: string; state: string }
  */
 export function useMuninChat({ conversationId }: UseMuninChatOptions) {
   const cache = useBrowserCache();
+  const hydratedConversation = useRef<string | null>(null);
 
   const transport = useMemo(
     () =>
@@ -92,6 +112,68 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
       }
     },
   });
+
+  // `resumeStream()` replays assistant/run events, but UIMessage streams do
+  // not recreate prior user messages. Hydrate the timeline from the local
+  // cache first and fall back to the authoritative conversation aggregate so
+  // a refresh/new tab never loses the operator's original prompt.
+  useEffect(() => {
+    if (hydratedConversation.current === conversationId) return;
+    hydratedConversation.current = conversationId;
+    let cancelled = false;
+
+    void (async () => {
+      let initial: UIMessage[] = [];
+      try {
+        const cached = await cache.getMessages(conversationId);
+        initial = cached.map((message) => ({
+          id: message.id,
+          role: message.role,
+          parts: message.parts,
+        }));
+      } catch {
+        // IndexedDB is optional; the server aggregate below is authoritative.
+      }
+
+      if (initial.length === 0) {
+        try {
+          const aggregate = await productionApi.conversation(conversationId);
+          initial = aggregate.messages.map(serverMessageToUiMessage);
+        } catch {
+          // The live stream remains usable even if the initial timeline fetch
+          // races authentication or a transient backend restart.
+        }
+      }
+
+      if (!cancelled && initial.length > 0) {
+        const current = chat.messages;
+        if (current.length === 0) {
+          chat.setMessages(initial);
+        } else {
+          // A resume request can win the race and create an assistant message
+          // before the aggregate fetch returns. Merge missing operator turns
+          // into that live stream instead of dropping the original prompt.
+          const missingUserMessages = initial.filter(
+            (message) =>
+              message.role === "user" &&
+              !current.some(
+                (existing) =>
+                  existing.role === "user" &&
+                  (existing.id === message.id ||
+                    uiMessageText(existing) === uiMessageText(message)),
+              ),
+          );
+          if (missingUserMessages.length > 0) {
+            chat.setMessages([...missingUserMessages, ...current]);
+          }
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cache, chat, conversationId]);
 
   return chat;
 }

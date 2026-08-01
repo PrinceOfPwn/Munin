@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -17,9 +18,28 @@ _VALUE_PATTERNS = (
 _REDACTED = "[REDACTED]"
 
 
+def redaction_disabled() -> bool:
+    """Return whether an explicitly trusted operator disabled redaction.
+
+    Redaction stays enabled by default.  A controlled lab can set
+    ``MUNIN_REDACTION_MODE=off`` to inspect exact tool output in the GUI and
+    replay archive; this is intentionally an environment-level switch rather
+    than a browser-controlled flag.
+    """
+    return os.environ.get("MUNIN_REDACTION_MODE", "on").strip().lower() in {
+        "off",
+        "none",
+        "disabled",
+        "false",
+        "0",
+    }
+
+
 def redact_text(value: str) -> str:
     """Redact known credential forms without pretending arbitrary text is safe."""
     text = str(value or "")
+    if redaction_disabled():
+        return text
     for pattern in _VALUE_PATTERNS:
         if pattern.groups >= 2:
             text = pattern.sub(lambda match: f"{match.group(1)}{_REDACTED}", text)
@@ -30,6 +50,8 @@ def redact_text(value: str) -> str:
 
 def redact_payload(value: Any) -> Any:
     """Return a redacted JSON-compatible copy of a potentially nested payload."""
+    if redaction_disabled():
+        return value
     if isinstance(value, Mapping):
         return {
             str(key): _REDACTED if _KEY_NAME.search(str(key)) else redact_payload(item)

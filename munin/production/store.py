@@ -1647,7 +1647,8 @@ class ProductionStore:
     # Both entry points are exercised by :mod:`munin.production.chat`.
 
     def save_provider_profile(self, *, actor_id: str, label: str, provider: str, base_url: str, model: str, uses: list[str], plaintext_key: str) -> dict[str, Any]:
-        if not plaintext_key or not base_url.startswith("https://"):
+        normalized_base_url = base_url.strip()
+        if not plaintext_key or not normalized_base_url.startswith("https://"):
             raise ValueError("provider profile requires an HTTPS base URL and key")
         profile_id = _id("profile")
         now = _now_ms()
@@ -1656,7 +1657,7 @@ class ProductionStore:
             self._require_user(conn, actor_id)
             conn.execute(
                 "INSERT INTO provider_profiles (id,owner_id,label,provider,base_url,model,uses_json,key_fingerprint,ciphertext_json,wrapped_dek_json,kek_version,status,created_at_ms,updated_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (profile_id, actor_id, label[:120], provider[:64], base_url[:500], model[:240], _json(uses), fingerprint, _json(ciphertext), _json(wrapped_dek), self._cipher.kek_version, "active", now, now),
+                (profile_id, actor_id, label[:120], provider[:64], normalized_base_url[:500], model[:240], _json(uses), fingerprint, _json(ciphertext), _json(wrapped_dek), self._cipher.kek_version, "active", now, now),
             )
             self._audit(conn, actor_id=actor_id, action="provider_profile.created", resource_type="provider_profile", resource_id=profile_id, outcome="success", metadata={"fingerprint": fingerprint})
         return {"id": profile_id, "label": label[:120], "provider": provider[:64], "model": model[:240], "uses": list(uses), "key_fingerprint": fingerprint, "status": "active"}
@@ -1682,6 +1683,13 @@ class ProductionStore:
             conn.execute("UPDATE provider_profiles SET active=1,updated_at_ms=? WHERE id=?", (_now_ms(), profile_id))
             self._audit(conn, actor_id=actor_id, action="provider_profile.activated", resource_type="provider_profile", resource_id=profile_id, outcome="success")
             return {"id": profile_id, "active": True}
+
+    def clear_active_provider_profile(self, *, actor_id: str) -> dict[str, Any]:
+        with self._transaction() as conn:
+            self._require_user(conn, actor_id)
+            conn.execute("UPDATE provider_profiles SET active=0,updated_at_ms=? WHERE owner_id=? AND active=1", (_now_ms(), actor_id))
+            self._audit(conn, actor_id=actor_id, action="provider_profile.deactivated", resource_type="provider_profile", resource_id=actor_id, outcome="success")
+            return {"active": False}
 
     def revoke_provider_profile(self, *, actor_id: str, profile_id: str) -> bool:
         with self._transaction() as conn:
@@ -2658,6 +2666,24 @@ class MuninStore:
 
     def append_tool_call(self, **kwargs: Any) -> dict[str, Any]:
         return self._hot.append_tool_call(**kwargs)
+
+    # Provider profiles are durable operator-owned credentials.  The hot
+    # execution store never receives the plaintext key; it is decrypted only
+    # for the lifetime of the LLM client that starts a run.
+    def list_provider_profiles(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._durable.list_provider_profiles(**kwargs)
+
+    def save_provider_profile(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.save_provider_profile(**kwargs)
+
+    def set_active_provider_profile(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.set_active_provider_profile(**kwargs)
+
+    def clear_active_provider_profile(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.clear_active_provider_profile(**kwargs)
+
+    def reveal_provider_key(self, **kwargs: Any) -> str:
+        return self._durable.reveal_provider_key(**kwargs)
 
     def create_subagent_run(self, **kwargs: Any) -> dict[str, Any]:
         return self._hot.create_subagent_run(**kwargs)

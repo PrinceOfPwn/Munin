@@ -2,8 +2,9 @@
 // production-api — Fase 2 (issue #9) trimmed surface.
 //
 // The Munin BFF no longer proxies dispatcher-era endpoints (turns / runs SSE /
-// HITL resolve / provider profiles / collab-notes-presence / branches / dev
-// simulate-forge).  The only Python routes the frontend hits directly are:
+// HITL resolve / collab-notes-presence / branches / dev simulate-forge). The
+// frontend uses the production boundary for auth, conversations, and encrypted
+// provider-profile metadata; runtime execution itself remains `/api/chat`.
 //
 //   * auth: session / login / bootstrap / logout
 //   * conversations: list / create / rename / archive
@@ -22,6 +23,32 @@ export type Conversation = {
   last_activity_at_ms: number;
   message_count: number;
   version: number;
+};
+
+export type ConversationMessage = {
+  id: string;
+  kind: "user" | "assistant" | string;
+  status?: string;
+  content: string;
+  sequence: number;
+  run_id?: string | null;
+};
+
+export type ConversationAggregate = {
+  conversation: Conversation;
+  messages: ConversationMessage[];
+};
+
+export type ProviderProfile = {
+  id: string;
+  label: string;
+  provider: string;
+  base_url: string;
+  model: string;
+  uses?: string[];
+  key_fingerprint?: string;
+  status?: string;
+  active: boolean;
 };
 
 let csrfToken = "";
@@ -77,6 +104,41 @@ export const productionApi = {
         `conversations${query ? `?q=${encodeURIComponent(query)}` : ""}`
       )
     ).data.conversations;
+  },
+  async conversation(id: string) {
+    return (
+      await request<{ data: ConversationAggregate }>(
+        `conversations/${encodeURIComponent(id)}`,
+      )
+    ).data;
+  },
+  async providerProfiles() {
+    return (
+      await request<{ data: ProviderProfile[] }>("provider-profiles")
+    ).data;
+  },
+  async createProviderProfile(input: {
+    label: string;
+    provider: string;
+    base_url: string;
+    model: string;
+    api_key: string;
+    activate?: boolean;
+  }) {
+    return (
+      await request<{ data: ProviderProfile }>("provider-profiles", {
+        method: "POST",
+        body: JSON.stringify(input),
+      })
+    ).data;
+  },
+  async activateProviderProfile(id: string) {
+    return (
+      await request<{ data: ProviderProfile }>(
+        `provider-profiles/${encodeURIComponent(id || "default")}/activate`,
+        { method: "POST", body: "{}" },
+      )
+    ).data;
   },
   async createConversation(title = "New operation") {
     return (

@@ -52,8 +52,16 @@ function StatusBadge({ state, hasError }: { state: ToolInvocationState; hasError
   );
 }
 
-function JsonBlock({ label, value }: { label: string; value: unknown }) {
-  const [open, setOpen] = useState(false);
+function JsonBlock({
+  label,
+  value,
+  initiallyOpen = false,
+}: {
+  label: string;
+  value: unknown;
+  initiallyOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
   const json = JSON.stringify(value, null, 2);
 
   return (
@@ -66,8 +74,8 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
         {open ? "▾" : "▸"} {label}
       </button>
       {open && (
-        <pre className="mt-1 max-h-48 overflow-auto rounded bg-raised p-2 text-xs font-mono text-body">
-          {json}
+        <pre className="mt-1 max-h-72 overflow-auto rounded bg-raised p-2 text-xs font-mono text-body">
+          {json ?? String(value ?? "")}
         </pre>
       )}
     </div>
@@ -113,7 +121,11 @@ export function ToolInvocationPart({
 
       {/* Result or error */}
       {state === "result" && result !== undefined && (
-        <JsonBlock label={hasError ? "error" : "result"} value={result} />
+        <JsonBlock
+          label={hasError ? "error" : "result"}
+          value={result}
+          initiallyOpen
+        />
       )}
 
       {/* Explicit error prop */}

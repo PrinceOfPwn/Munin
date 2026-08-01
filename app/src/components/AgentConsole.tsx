@@ -15,6 +15,7 @@ import {
   MessageSquare,
   Send,
   Sparkles,
+  Square,
   TerminalSquare,
   WifiOff,
   Zap,
@@ -45,6 +46,7 @@ import type { HitlRequestPartProps } from "@/components/chat/blocks/parts/HitlRe
 import { ArtifactPart } from "@/components/chat/blocks/parts/ArtifactPart";
 import { NotePart } from "@/components/chat/blocks/parts/NotePart";
 import { GuidancePart } from "@/components/chat/blocks/parts/GuidancePart";
+import { ProviderSwitcher } from "@/components/ProviderSwitcher";
 
 import {
   approveHitlRequest,
@@ -52,6 +54,7 @@ import {
   useMuninChat,
 } from "@/lib/aiChat";
 import { useConversations } from "@/lib/queries";
+import { productionApi, type ProviderProfile } from "@/lib/production-api";
 import { cn, formatDuration } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -493,6 +496,11 @@ function ConsoleHeader({
   elapsedSeconds,
   lastToolName,
   isStreaming,
+  onStop,
+  providerProfiles,
+  providerBusy,
+  onActivateProvider,
+  onCreateProvider,
   onArchive,
 }: {
   conversationId: string;
@@ -503,6 +511,17 @@ function ConsoleHeader({
   elapsedSeconds: number;
   lastToolName: string | null;
   isStreaming: boolean;
+  onStop: () => void;
+  providerProfiles: ProviderProfile[];
+  providerBusy: boolean;
+  onActivateProvider: (profileId: string) => Promise<void>;
+  onCreateProvider: (draft: {
+    label: string;
+    provider: string;
+    base_url: string;
+    model: string;
+    api_key: string;
+  }) => Promise<void>;
   onArchive: () => void;
 }) {
   return (
@@ -548,6 +567,22 @@ function ConsoleHeader({
       </div>
       <div className="flex items-center gap-2">
         <StatusBadge status={status} />
+        {isStreaming && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onStop}
+            title="Stop streaming and leave the durable run recoverable"
+          >
+            <Square className="h-3.5 w-3.5" /> Stop
+          </Button>
+        )}
+        <ProviderSwitcher
+          profiles={providerProfiles}
+          busy={providerBusy}
+          onActivate={onActivateProvider}
+          onCreate={onCreateProvider}
+        />
         <Button
           variant="outline"
           size="sm"
@@ -566,7 +601,7 @@ function ConsoleHeader({
 // ---------------------------------------------------------------------------
 
 function LiveConsole({ conversationId }: { conversationId: string }) {
-  const { messages, sendMessage, resumeStream, status, error } = useMuninChat({
+  const { messages, sendMessage, resumeStream, stop, status, error } = useMuninChat({
     conversationId,
   });
 
@@ -584,7 +619,51 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   const draftKey = `munin.draft.${conversationId}`;
   const [input, setInput] = useState("");
   const [draftReady, setDraftReady] = useState(false);
+  const [providerProfiles, setProviderProfiles] = useState<ProviderProfile[]>([]);
+  const [providerBusy, setProviderBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void productionApi.providerProfiles().then((profiles) => {
+      if (!cancelled) setProviderProfiles(profiles);
+    }).catch(() => {
+      // Provider configuration is optional; the process environment remains
+      // the fallback when the profile endpoint is unavailable.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function activateProvider(profileId: string) {
+    setProviderBusy(true);
+    try {
+      await productionApi.activateProviderProfile(profileId);
+      setProviderProfiles(await productionApi.providerProfiles());
+      toast.success("AI provider switched for the next turn");
+    } finally {
+      setProviderBusy(false);
+    }
+  }
+
+  async function createProvider(draft: {
+    label: string;
+    provider: string;
+    base_url: string;
+    model: string;
+    api_key: string;
+  }) {
+    setProviderBusy(true);
+    try {
+      const profile = await productionApi.createProviderProfile({ ...draft, activate: false });
+      await productionApi.activateProviderProfile(profile.id);
+      setProviderProfiles(await productionApi.providerProfiles());
+      toast.success("Provider saved and selected for the next turn");
+    } finally {
+      setProviderBusy(false);
+    }
+  }
 
   // Load persisted draft when the conversation changes.
   useEffect(() => {
@@ -691,6 +770,11 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         elapsedSeconds={elapsedSeconds}
         lastToolName={insight.lastToolName}
         isStreaming={isStreaming}
+        onStop={stop}
+        providerProfiles={providerProfiles}
+        providerBusy={providerBusy}
+        onActivateProvider={activateProvider}
+        onCreateProvider={createProvider}
         onArchive={archive}
       />
 

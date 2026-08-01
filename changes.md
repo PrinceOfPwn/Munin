@@ -66,6 +66,17 @@ application-specific agent loop:
   `0`, or `unlimited` uses the framework-compatible unlimited sentinel while
   leases, cancellation, approval, and standard model/tool middleware remain
   the independent safety controls.
+- Tool results are expanded by default in the live console, and the console
+  now hydrates the original user timeline from IndexedDB or the authoritative
+  conversation aggregate before replay. For an explicitly trusted lab where
+  exact credential-shaped output is required, `MUNIN_REDACTION_MODE=off`
+  disables the shared persistence/audit redaction policy; redaction remains
+  the default when the variable is absent.
+- The console now exposes encrypted BYOK provider profiles: operators can add
+  an HTTPS OpenAI-compatible endpoint/model, switch the active profile, and
+  return to environment defaults or continue the same conversation without
+  exposing the API key to the browser. The selected profile applies to the
+  next turn; the conversation id and durable history remain unchanged.
 
 ## 2026-08-01 — Durable chat recovery after process restart
 
