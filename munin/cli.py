@@ -88,7 +88,29 @@ def run(max_iterations: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# munin mcp
+# munin serve — Fase 3 unified server (issue #9)
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", default=8787, show_default=True, type=int,
+              help="Port for the unified backend (HTTP API + MCP at /mcp).")
+def serve(host: str, port: int) -> None:
+    """Start the unified Munin backend (HTTP API + MCP at /mcp).
+
+    Replaces the pre-Fase-3 two-process launch (``munin mcp`` + ``munin
+    production-api``).  Everything now runs in one process, one port:
+    the HTTP surface at ``/`` (auth/conversations/chat) and the FastMCP
+    streamable-http transport at ``/mcp``.  See :mod:`munin.server`.
+    """
+    import uvicorn
+
+    uvicorn.run("munin.server:app", host=host, port=port, log_level="info")
+
+
+# ---------------------------------------------------------------------------
+# munin mcp — kept live for stdio IDE clients.  HTTP transports should use
+# ``munin serve`` instead (MCP mounted at /mcp on the unified port).
 # ---------------------------------------------------------------------------
 
 @cli.command()
@@ -96,7 +118,19 @@ def run(max_iterations: int) -> None:
 @click.option("--host", default="")
 @click.option("--port", type=int, default=0)
 def mcp(transport: str, host: str, port: int) -> None:
-    """Start the Munin MCP server."""
+    """Start the standalone MCP server (stdio for IDE clients).
+
+    Deprecated for HTTP transports as of Fase 3 (issue #9): ``munin serve``
+    already hosts the same MCP tools under ``/mcp`` on the unified backend
+    port.  Kept live for stdio consumers (IDE plugins, Claude Code) which
+    cannot be served over HTTP.
+    """
+    if transport != "stdio":
+        click.echo(
+            "[munin] warning: `munin mcp --transport {}` is deprecated; "
+            "use `munin serve` — MCP is mounted at /mcp on the unified port.".format(transport),
+            err=True,
+        )
     from .mcp import main as mcp_main
 
     argv = ["--transport", transport]
@@ -109,38 +143,38 @@ def mcp(transport: str, host: str, port: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# munin production-api
+# munin production-api - deprecated shim; prefer ``munin serve``.
 # ---------------------------------------------------------------------------
 
 @cli.command("production-api")
 @click.option("--host", default="127.0.0.1", show_default=True)
 @click.option("--port", default=8787, show_default=True, type=int)
 def production_api(host: str, port: int) -> None:
-    """Start the authenticated Turso-backed operator API."""
+    """Deprecated: use ``munin serve`` (mounts MCP at /mcp + HTTP API).
+
+    Kept live during the Fase 3 — Fase 4 transition so any external
+    orchestration scripted around the old subcommand still boots.  The
+    ASGI app it launches is now the same composed ``munin.server:app`` —
+    just via a different CLI verb.
+    """
+    click.echo("[munin] `munin production-api` is deprecated; use `munin serve`.", err=True)
     import uvicorn
 
-    from .production.asgi import app_from_environment
-
-    uvicorn.run(
-        app_from_environment(),
-        host=host,
-        port=port,
-        log_level=os.environ.get("MUNIN_LOG_LEVEL", "info").lower(),
-    )
+    uvicorn.run("munin.server:app", host=host, port=port, log_level=os.environ.get("MUNIN_LOG_LEVEL", "info").lower())
 
 
-@cli.command("production-worker")
-@click.option("--poll-seconds", default=2.0, show_default=True, type=float)
-def production_worker(poll_seconds: float) -> None:
-    """Run the Turso-leased worker independently of browser/API lifetimes."""
-    from .production.dispatcher import ProductionDispatcher
-    from .production.store import ProductionStore
-
-    settings = get_settings()
-    if not settings.db_url.startswith(("libsql://", "libsqls://")):
-        raise click.ClickException("production worker requires authoritative MUNIN_DB_URL=libsql://...")
-    store = ProductionStore.for_settings(settings, master_key=ProductionStore.master_key_from_environment())
-    ProductionDispatcher(store, settings, worker_id=f"worker-{os.getpid()}").run_forever(poll_seconds=poll_seconds)
+# ---------------------------------------------------------------------------
+# munin production-worker - REMOVED in Fase 2 (issue #9)
+# ---------------------------------------------------------------------------
+#
+# The lease-based worker + ``ProductionDispatcher`` were deleted alongside
+# the rest of Arch A.  ``POST /api/chat`` in ``munin/production/chat.py``
+# drives ``supervisor_runner`` directly inside the request handler, so there
+# is no background poll/claim loop to run.  Any live-session workflow that
+# used to launch ``munin production-worker`` should now just start
+# ``munin production-api`` - the API request handler owns the run
+# end-to-end.  The single-server unification (MCP + production API
+# co-located behind ``munin serve``) is Fase 3.
 
 
 # ---------------------------------------------------------------------------

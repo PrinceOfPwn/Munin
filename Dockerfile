@@ -13,4 +13,4 @@ RUN pip install --no-cache-dir .
 COPY soul ./soul
 COPY scripts ./scripts
 
-CMD ["munin", "mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8890"]
+CMD ["munin", "serve", "--host", "0.0.0.0", "--port", "8787"]

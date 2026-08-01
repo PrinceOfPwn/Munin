@@ -2,16 +2,19 @@
 
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import type { FormEvent } from "react";
 import {
+  Archive,
   Bot,
   CheckCircle,
   LoaderCircle,
   MessageSquare,
   Send,
+  Sparkles,
   TerminalSquare,
   WifiOff,
   Zap,
@@ -26,9 +29,11 @@ import type {
   UIMessage,
 } from "ai";
 
+import { Badge, stateBadgeVariant } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { toast } from "@/components/ui/sonner";
 
 import { ReasoningPart } from "@/components/chat/blocks/parts/ReasoningPart";
 import { ToolInvocationPart } from "@/components/chat/blocks/parts/ToolInvocationPart";
@@ -37,7 +42,6 @@ import { SubagentPresencePart } from "@/components/chat/blocks/parts/SubagentPre
 import { HitlRequestPart } from "@/components/chat/blocks/parts/HitlRequestPart";
 import type { HitlRequestPartProps } from "@/components/chat/blocks/parts/HitlRequestPart";
 import { ArtifactPart } from "@/components/chat/blocks/parts/ArtifactPart";
-import { HeartbeatPart } from "@/components/chat/blocks/parts/HeartbeatPart";
 import { NotePart } from "@/components/chat/blocks/parts/NotePart";
 import { GuidancePart } from "@/components/chat/blocks/parts/GuidancePart";
 
@@ -46,7 +50,8 @@ import {
   rejectHitlRequest,
   useMuninChat,
 } from "@/lib/aiChat";
-import { cn } from "@/lib/utils";
+import { useConversations } from "@/lib/queries";
+import { cn, formatDuration } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Custom data part shapes emitted by the Munin BFF translator
@@ -74,17 +79,17 @@ interface ArtifactData {
   uri: string;
 }
 
-interface HeartbeatData {
-  ts: number;
-  elapsedSeconds?: number;
-}
-
 interface NoteData {
   text: string;
 }
 
 interface GuidanceData {
   text: string;
+}
+
+interface RunStateData {
+  state: string;
+  runId?: string;
 }
 
 // UIMessage part union helpers — the `parts` array on a UIMessage can contain
@@ -117,12 +122,12 @@ function StatusBadge({ status }: { status: ChatStatus }) {
     submitted: {
       label: "Sending…",
       icon: LoaderCircle,
-      colour: "text-yellow-400",
+      colour: "text-warning",
     },
     streaming: {
       label: "Streaming",
       icon: Zap,
-      colour: "text-green-400",
+      colour: "text-success",
     },
     ready: {
       label: "Ready",
@@ -349,6 +354,13 @@ function PartRenderer({
     return null;
   }
 
+  // data-operator-guidance is the outgoing marker for guidance UI parts —
+  // the BFF intercepts it and forwards to /api/chat/{run}/guidance so no
+  // corresponding inline widget is needed.
+  if (part.type === "data-operator-guidance") {
+    return null;
+  }
+
   // Unknown part — ignore silently.
   return null;
 }
@@ -383,15 +395,89 @@ function MessagePartList({ message }: { message: UIMessage }) {
 }
 
 // ---------------------------------------------------------------------------
-// Console header
+// Extract active run metadata + last tool call from the message stream
+// ---------------------------------------------------------------------------
+
+interface StreamInsight {
+  activeRunId: string | null;
+  lastToolName: string | null;
+  runState: string | null;
+}
+
+function useStreamInsight(messages: UIMessage[]): StreamInsight {
+  return useMemo(() => {
+    let activeRunId: string | null = null;
+    let lastToolName: string | null = null;
+    let runState: string | null = null;
+    for (const message of messages) {
+      if (message.role !== "assistant") continue;
+      for (const rawPart of message.parts as AnyUIPart[]) {
+        if (rawPart.type === "data-run-state") {
+          const d = (rawPart as DataUIPart<Record<string, unknown>>)
+            .data as unknown as RunStateData;
+          if (d?.runId) activeRunId = d.runId;
+          if (d?.state) runState = d.state;
+        } else if (rawPart.type === "dynamic-tool") {
+          const dp = rawPart as DynamicToolUIPart;
+          if (dp.toolName) lastToolName = dp.toolName;
+        }
+      }
+    }
+    return { activeRunId, lastToolName, runState };
+  }, [messages]);
+}
+
+// ---------------------------------------------------------------------------
+// Elapsed timer (client-only, ticks every second while streaming)
+// ---------------------------------------------------------------------------
+
+function useElapsedSeconds(active: boolean): number {
+  const [elapsed, setElapsed] = useState(0);
+  const startedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!active) {
+      startedAtRef.current = null;
+      setElapsed(0);
+      return;
+    }
+    startedAtRef.current = Date.now();
+    setElapsed(0);
+    const handle = window.setInterval(() => {
+      if (startedAtRef.current != null) {
+        setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
+      }
+    }, 1_000);
+    return () => window.clearInterval(handle);
+  }, [active]);
+
+  return elapsed;
+}
+
+// ---------------------------------------------------------------------------
+// Console header (title + status + archive + inline run insight)
 // ---------------------------------------------------------------------------
 
 function ConsoleHeader({
   conversationId,
+  title,
+  conversationStatus,
   status,
+  runState,
+  elapsedSeconds,
+  lastToolName,
+  isStreaming,
+  onArchive,
 }: {
   conversationId: string;
+  title: string;
+  conversationStatus: string;
   status: ChatStatus;
+  runState: string | null;
+  elapsedSeconds: number;
+  lastToolName: string | null;
+  isStreaming: boolean;
+  onArchive: () => void;
 }) {
   return (
     <header className="flex items-center justify-between gap-4 border-b border-border bg-surface px-6 py-4">
@@ -399,15 +485,52 @@ function ConsoleHeader({
         <p className="font-mono text-[0.65rem] uppercase tracking-widest text-muted">
           AGENT CONSOLE / AI SDK v5 / LIVE STREAM
         </p>
-        <h1 className="flex items-center gap-2 text-xl font-medium tracking-tight">
-          <TerminalSquare className="h-5 w-5 text-accent" />
-          Agent Console
-        </h1>
-        <span className="font-mono text-[0.65rem] text-muted">
+        <div className="flex min-w-0 items-center gap-2">
+          <TerminalSquare className="h-5 w-5 shrink-0 text-accent" />
+          <h1 className="min-w-0 truncate text-xl font-medium tracking-tight">
+            {title}
+          </h1>
+          <Badge variant={stateBadgeVariant(conversationStatus)}>
+            {conversationStatus}
+          </Badge>
+        </div>
+        <span className="block font-mono text-[0.65rem] text-muted">
           {conversationId}
         </span>
+        {(isStreaming || runState) && (
+          <div className="flex items-center gap-3 pt-1 font-mono text-[0.65rem] uppercase tracking-widest text-muted">
+            {runState && (
+              <span>
+                run · <span className="text-body">{runState}</span>
+              </span>
+            )}
+            {isStreaming && (
+              <span>
+                elapsed ·{" "}
+                <span className="text-body">
+                  {formatDuration(elapsedSeconds)}
+                </span>
+              </span>
+            )}
+            {lastToolName && (
+              <span className="truncate">
+                tool · <span className="text-body">{lastToolName}</span>
+              </span>
+            )}
+          </div>
+        )}
       </div>
-      <StatusBadge status={status} />
+      <div className="flex items-center gap-2">
+        <StatusBadge status={status} />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onArchive}
+          disabled={conversationStatus === "archived"}
+        >
+          <Archive className="h-3.5 w-3.5" /> Archive
+        </Button>
+      </div>
     </header>
   );
 }
@@ -421,33 +544,133 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     conversationId,
   });
 
+  // Conversation metadata is read from the cached list (staleTime 30s, no
+  // polling). Fetching a single conversation would require the legacy
+  // detail endpoint which is scheduled for deletion in Fase 2.
+  const conversationsQuery = useConversations("");
+  const conversationMeta = useMemo(
+    () =>
+      conversationsQuery.data?.find((item) => item.id === conversationId) ??
+      null,
+    [conversationsQuery.data, conversationId],
+  );
+
+  const draftKey = `munin.draft.${conversationId}`;
   const [input, setInput] = useState("");
+  const [draftReady, setDraftReady] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  // Load persisted draft when the conversation changes.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      setDraftReady(true);
+      return;
+    }
+    const value = window.localStorage.getItem(draftKey) || "";
+    setInput(value);
+    setDraftReady(true);
+    return () => setDraftReady(false);
+  }, [draftKey]);
+
+  // Autosave the draft (debounced 200ms) once the initial load is in.
+  useEffect(() => {
+    if (!draftReady || typeof window === "undefined") return;
+    const handle = window.setTimeout(() => {
+      if (input) window.localStorage.setItem(draftKey, input);
+      else window.localStorage.removeItem(draftKey);
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [draftKey, draftReady, input]);
 
   // Auto-scroll to the bottom when new messages arrive.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  async function submit(event?: FormEvent) {
+  const isStreaming = status === "streaming" || status === "submitted";
+  const insight = useStreamInsight(messages);
+  const elapsedSeconds = useElapsedSeconds(isStreaming);
+
+  async function submitTurn(event?: FormEvent) {
     event?.preventDefault();
     const text = input.trim();
     if (!text) return;
     setInput("");
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(draftKey);
+    }
     await sendMessage({ text });
   }
 
-  const isStreaming = status === "streaming" || status === "submitted";
+  async function sendGuidance() {
+    const text = input.trim();
+    if (!text) return;
+    if (!insight.activeRunId) {
+      toast.error("No active run to guide");
+      return;
+    }
+    setInput("");
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(draftKey);
+    }
+    try {
+      await sendMessage({
+        // The AI SDK v5 `sendMessage` accepts an arbitrary parts array; the
+        // BFF (Fase 1a) intercepts `data-operator-guidance` and forwards it
+        // to `POST /api/chat/{run_id}/guidance` out-of-band. It never
+        // becomes a new user turn on the timeline.
+        parts: [
+          {
+            type: "data-operator-guidance",
+            data: {
+              runId: insight.activeRunId,
+              body: text,
+            },
+          },
+        ],
+      } as Parameters<typeof sendMessage>[0]);
+      toast.success("Guidance queued for the active run");
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Guidance failed");
+    }
+  }
+
+  function archive() {
+    // Archive lives behind the legacy PATCH endpoint (see Fase 1c/2). Fase 1b
+    // keeps this a stub so the header UI is correct without dragging the
+    // legacy production-api dependency into the new shell.
+    toast.message("Archive coming in phase 3", {
+      description:
+        "The legacy PATCH endpoint stays behind the FlightDeckStable shell during the parity window.",
+    });
+  }
+
+  const conversationTitle =
+    conversationMeta?.title ?? `Conversation ${conversationId.slice(0, 8)}…`;
+  const conversationStatus = conversationMeta?.status ?? "active";
+  const degraded = Boolean(error);
 
   return (
     <div className="flex h-full flex-col">
-      <ConsoleHeader conversationId={conversationId} status={status} />
+      <ConsoleHeader
+        conversationId={conversationId}
+        title={conversationTitle}
+        conversationStatus={conversationStatus}
+        status={status}
+        runState={insight.runState}
+        elapsedSeconds={elapsedSeconds}
+        lastToolName={insight.lastToolName}
+        isStreaming={isStreaming}
+        onArchive={archive}
+      />
 
-      {/* Error banner */}
-      {error && (
-        <div className="flex items-center gap-2 border-b border-danger/30 bg-danger/10 px-6 py-2 text-xs text-danger">
+      {/* Service degraded banner — reflects `useChat.error`. */}
+      {degraded && (
+        <div className="flex items-center gap-2 border-b border-warning/30 bg-warning/10 px-6 py-2 text-xs text-warning">
           <WifiOff className="h-3.5 w-3.5 shrink-0" />
-          <span>Stream error: {error.message}</span>
+          <span>
+            Service degraded · stream error: {error?.message ?? "unknown"}
+          </span>
         </div>
       )}
 
@@ -493,9 +716,9 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
 
       {/* Composer */}
       <footer className="border-t border-border bg-surface px-4 py-4 md:px-8">
-        <div className="mx-auto max-w-4xl">
+        <div className="mx-auto max-w-4xl space-y-2">
           <form
-            onSubmit={(e) => void submit(e)}
+            onSubmit={(e) => void submitTurn(e)}
             className="flex items-end gap-2"
           >
             <Textarea
@@ -505,32 +728,57 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  void submit();
+                  if (isStreaming && insight.activeRunId) {
+                    void sendGuidance();
+                  } else {
+                    void submitTurn();
+                  }
                 }
               }}
-              placeholder="State the objective, evidence, scope, or guidance…"
-              disabled={isStreaming}
+              placeholder={
+                isStreaming && insight.activeRunId
+                  ? "Guide the active run…"
+                  : "State the objective, evidence, scope, or guidance…"
+              }
               className="flex-1"
             />
-            <Button
-              type="submit"
-              disabled={!input.trim() || isStreaming}
-              className="shrink-0"
-            >
-              {isStreaming ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" />
-              ) : (
-                <>
-                  <Send className="h-4 w-4" />
-                  Send
-                </>
-              )}
-            </Button>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="submit"
+                disabled={!input.trim() || isStreaming}
+                className="shrink-0"
+              >
+                {isStreaming ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Send className="h-4 w-4" />
+                    Send
+                  </>
+                )}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void sendGuidance()}
+                disabled={!input.trim() || !isStreaming || !insight.activeRunId}
+                className="shrink-0"
+                title={
+                  isStreaming
+                    ? "Send as operator guidance to the active run"
+                    : "Guidance is only available while a run is streaming"
+                }
+              >
+                <Sparkles className="h-4 w-4" />
+                Guidance
+              </Button>
+            </div>
           </form>
-          <small className="mt-2 block text-[0.65rem] text-muted">
-            Streams via{" "}
-            <code className="font-mono">/api/chat</code> (AI SDK v5 BFF). Turso
-            remains the authoritative archive.
+          <small className="block text-[0.65rem] text-muted">
+            Streams via <code className="font-mono">/api/chat</code> (AI SDK v5
+            BFF). Draft auto-saves locally per conversation. Turso remains the
+            authoritative archive.
           </small>
         </div>
       </footer>
@@ -573,11 +821,20 @@ function NoConversationState() {
  *
  * Mounts `useMuninChat` against the active conversation and renders every
  * message part through the corresponding part-renderer component. This is the
- * visible UI surface wired to the existing BFF route at `/api/chat` and the
+ * visible UI surface wired to the BFF route at `/api/chat` (Fase 1a) and the
  * translator in `lib/chat/translator.ts`.
  *
+ * Fase 1b extensions:
+ *   - Header shows the conversation title + status + Archive button (stub).
+ *   - Inline run status: elapsed timer, current run state, last tool call —
+ *     derived from `useChat.status` and stream parts (no polling).
+ *   - Draft auto-save per conversation id in localStorage.
+ *   - Send-as-guidance button — emits a `data-operator-guidance` UI part that
+ *     the BFF intercepts and forwards to `POST /api/chat/{run_id}/guidance`.
+ *
  * The legacy `ConversationView` (driven by `useRunEvents`) is kept alive in
- * parallel during the parity window; deletion is deferred to PR-16.
+ * parallel during the parity window; the entrypoint switch and deletion
+ * happen in Fase 1c and Fase 2.
  */
 export default function AgentConsole({ conversationId }: AgentConsoleProps) {
   if (!conversationId) {

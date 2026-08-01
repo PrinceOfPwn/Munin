@@ -822,7 +822,11 @@ def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: 
     # forged graph in generated_graphs. Fail early with a clear error otherwise;
     # otherwise the runner subprocess would crash after spawn and the item would
     # sit forever in the wake queue.
-    from ...subagents.runner import _NATIVE_SUBAGENTS  # noqa: PLC0415
+    # ``munin.subagents.runner`` (Arch A subprocess shim) was deleted in Fase 2
+    # of the issue-#9 migration. Native subagents are now expressed as forged
+    # graphs, so the native whitelist is empty and every target must resolve
+    # via ``STATE.graph_get(...)``.
+    _NATIVE_SUBAGENTS: frozenset[str] = frozenset()
     forged = None
     try:
         forged = STATE.graph_get(subagent.strip())

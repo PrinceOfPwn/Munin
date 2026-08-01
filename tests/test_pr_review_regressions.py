@@ -434,54 +434,18 @@ def test_wake_artifact_reader_is_bounded_and_pathless(store, monkeypatch):
     assert munin_tools.read_wake_artifact(-1)["error"]["code"] == "bad_input"
 
 
-def test_hugin_neighbors_is_available_to_main_and_subagents():
-    from munin.core.munin_agent import _NATIVE_TOOLS
-    from munin.subagents.base import _STATIC_TOOLS
-
-    assert "hugin_neighbors" in _NATIVE_TOOLS
-    assert "hugin_neighbors" in _STATIC_TOOLS
-
-
-class _NoopMemory:
-    def log_step(self, **kwargs):
-        return None
+# test_hugin_neighbors_is_available_to_main_and_subagents was removed in
+# Fase 2 of the issue-#9 migration: ``munin.core.munin_agent`` (and its
+# ``_NATIVE_TOOLS`` catalog) was deleted alongside the rest of Arch A. The
+# hugin_neighbors availability contract for subagents is still exercised via
+# ``munin.subagents.base._STATIC_TOOLS`` in the subagent-factory tests, and
+# for the main agent via the runtime_adapter/supervisor tests.
 
 
-def _bare_munin_agent(llm, catalog):
-    from munin.core.munin_agent import MuninAgent
-
-    agent = object.__new__(MuninAgent)
-    agent.llm = llm
-    agent.memory = _NoopMemory()
-    agent._system_prompt = lambda: "test system"
-    agent._current_catalog = lambda: catalog
-    return agent
-
-
-def test_munin_agent_respond_raises_on_llm_failure():
-    """Direct characterization: MuninAgent.respond() wraps provider errors as RuntimeError.
-
-    This assertion is required by tests/characterization/test_coord_respond_loop_parity.py
-    (issue #9 §12 step 1 parity baseline) and must stay green for the duration of the
-    migration; MuninAgent.respond() is kept alive for the rest of the roadmap.
-    """
-    class FailingLlm:
-        def chat(self, **kwargs):
-            raise TimeoutError("provider timeout")
-
-    agent = _bare_munin_agent(FailingLlm(), {})
-    with pytest.raises(RuntimeError, match="LLM call failed"):
-        agent.respond("hello", max_iterations=1)
-
-
-# test_munin_agent_propagates_llm_failure_to_mcp (munin_chat MCP path) was
-# removed: the second half of the original test characterised the pre-issue-#9
-# munin_chat path that dispatched via MuninAgent.respond() through the MCP
-# tool surface (munin_tools.munin_chat → FailingAgent.respond → agent_error).
-# The supervisor_runner / Deep Agents runtime replaced that dispatch path on
-# this PR; error propagation from the new coordinator is exercised by the
-# runtime_adapter integration tests. The direct MuninAgent.respond() assertion
-# above remains intact per the parity baseline contract.
+# test_munin_agent_respond_raises_on_llm_failure (Fase 1 parity baseline)
+# was removed in Fase 2: MuninAgent.respond() is gone. Provider error
+# propagation is now covered by the runtime_adapter / supervisor_runner
+# integration tests.
 
 
 def test_graph_diagnostics_imports_the_top_level_subagent_catalog(store, monkeypatch):
@@ -504,47 +468,11 @@ def test_graph_diagnostics_imports_the_top_level_subagent_catalog(store, monkeyp
 # tests in this file.
 
 
-def test_repetition_nudge_accepts_one_changed_next_call():
-    class SequenceLlm:
-        def __init__(self):
-            self.calls = 0
-
-        def chat(self, **kwargs):
-            self.calls += 1
-            if self.calls <= 6:
-                value = "same"
-            elif self.calls == 7:
-                value = "changed"
-            else:
-                return {"choices": [{"message": {"role": "assistant", "content": "recovered"}}]}
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": f"call-{self.calls}",
-                                    "function": {
-                                        "name": "probe",
-                                        "arguments": json.dumps({"value": value}),
-                                    },
-                                }
-                            ],
-                        }
-                    }
-                ]
-            }
-
-    agent = _bare_munin_agent(
-        SequenceLlm(),
-        {"probe": lambda value: {"ok": True, "summary": value, "data": {"value": value}}},
-    )
-    result = agent.respond("investigate", max_iterations=8)
-
-    assert result["stop_reason"] == "final_answer"
-    assert result["content"] == "recovered"
+# test_repetition_nudge_accepts_one_changed_next_call was removed in Fase 2:
+# it exercised the MuninAgent.respond() repetition guard directly.  The guard
+# lives in the supervisor middleware chain now
+# (``RepetitionGuardMiddleware``) and is covered by
+# tests/characterization/test_repetition_guard_middleware.py.
 
 
 def test_cors_preflight_bypasses_bearer_and_exposes_session_header():

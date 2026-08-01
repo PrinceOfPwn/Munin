@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { BrowserCacheProvider } from "@/lib/cache";
 import { hydrateMuninQueryCache, subscribeMuninQueryCache } from "@/lib/query-cache";
 
 /** Install an RFC 4122 v4 fallback for non-secure tunnel/LAN origins. */
@@ -71,15 +72,17 @@ export function Providers({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider delayDuration={200}>
-        {ready ? (
-          children
-        ) : (
-          <div className="grid min-h-screen place-items-center bg-bg font-mono text-xs uppercase tracking-widest text-secondary">
-            Restoring the Raven&apos;s local cache…
-          </div>
-        )}
-      </TooltipProvider>
+      <BrowserCacheProvider>
+        <TooltipProvider delayDuration={200}>
+          {ready ? (
+            children
+          ) : (
+            <div className="grid min-h-screen place-items-center bg-bg font-mono text-xs uppercase tracking-widest text-secondary">
+              Restoring the Raven's local cache…
+            </div>
+          )}
+        </TooltipProvider>
+      </BrowserCacheProvider>
       <Toaster />
     </QueryClientProvider>
   );

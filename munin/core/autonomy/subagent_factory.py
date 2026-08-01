@@ -59,15 +59,18 @@ class SubagentFactory:
         from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
         if isinstance(agent, dict):
-            if "description" in agent and "purpose" not in agent:
-                raise NotImplementedError(
-                    f"Agent dict with runtime_type='persisted_subagent_dict' cannot be invoked directly. "
-                    f"This declarative shape is meant to be passed to Deep Agents' native SubAgent construction. "
-                    f"Either use a different runtime_type (deep_agent, compiled_langgraph) or handle this dict "
-                    f"through the appropriate Deep Agents API."
-                )
-            else:
-                agent = self.create_subagent(SubagentSpec.model_validate(agent))
+            normalized = dict(agent)
+            if "description" in normalized:
+                normalized["purpose"] = normalized.pop("description")
+            model = normalized.get("model")
+            if model is not None and not isinstance(model, str):
+                normalized.pop("model")
+            tools = normalized.get("tools") or []
+            normalized["tools"] = [
+                getattr(t, "name", str(t)) if not isinstance(t, str) else t for t in tools
+            ]
+            normalized["runtime_type"] = "compiled_langgraph"
+            agent = self.create_subagent(SubagentSpec.model_validate(normalized))
         payload = {"messages": [HumanMessage(content=task)]}
         if hasattr(agent, "ainvoke"):
             result = await agent.ainvoke(payload, config=config or {})

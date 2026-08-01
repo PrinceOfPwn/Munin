@@ -11,6 +11,7 @@ The middleware is a no-op unless the store exposes ``drain_guidance(run_id)``
 """
 from __future__ import annotations
 
+import contextvars
 import inspect
 import logging
 from typing import Any
@@ -18,6 +19,13 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
+
+# Per-invocation override hoisted by ``runtime_adapter.supervisor_runner``.
+# Lets a process-wide cached supervisor graph serve many runs without losing
+# the operator-guidance audit scoping (``consume_pending_guidance(run_id)``).
+ACTIVE_RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "munin_operator_guidance_active_run_id", default=None
+)
 
 try:
     from langchain.agents.middleware import AgentMiddleware
@@ -35,12 +43,16 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
 
     # -- guidance drain ---------------------------------------------------
 
+    def _resolve_run_id(self) -> str:
+        live = ACTIVE_RUN_ID.get()
+        return live if live not in (None, "") else self.run_id
+
     def _drain_sync(self) -> list[dict]:
         consume = getattr(self.store, "consume_pending_guidance", None)
         if consume is None:
             return []
         try:
-            result = consume(run_id=self.run_id)
+            result = consume(run_id=self._resolve_run_id())
             if inspect.isawaitable(result):
                 return []
             return list(result or [])
@@ -53,7 +65,7 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
         if consume is None:
             return []
         try:
-            result = consume(run_id=self.run_id)
+            result = consume(run_id=self._resolve_run_id())
             if inspect.isawaitable(result):
                 result = await result
             return list(result or [])

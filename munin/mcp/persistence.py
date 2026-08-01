@@ -29,8 +29,11 @@ keep using the stdlib driver — zero perf regression for the default case.
 from __future__ import annotations
 
 import logging
+import queue
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -175,16 +178,36 @@ class _LibsqlCursorProxy:
 
 
 class _LibsqlConnectionProxy:
-    """Wraps a libsql connection to look like a sqlite3 connection."""
+    """Wraps a libsql connection to look like a sqlite3 connection.
 
-    def __init__(self, native_conn: Any, *, sync_on_commit: bool = True) -> None:
+    When ``_pool`` is provided the proxy is a **pooled checkout**: ``close()``
+    hands the underlying native connection back to the pool instead of tearing
+    down the TLS+Hrana session, saving 200-500ms of handshake per operation.
+    """
+
+    def __init__(
+        self,
+        native_conn: Any,
+        *,
+        sync_on_commit: bool = True,
+        _pool: LibsqlConnectionPool | None = None,
+    ) -> None:
         self._conn = native_conn
         self._sync_on_commit = sync_on_commit
+        self._pool = _pool
+        # Guards against double-close: once returned to the pool the proxy is
+        # dead; another ``.close()`` (or a stray ``execute``) must not race
+        # with a fresh checkout of the same native handle.
+        self._released = False
 
     def execute(self, sql: str, params: Any = ()) -> _LibsqlCursorProxy:
+        if self._released:
+            raise RuntimeError("libsql connection was already returned to the pool")
         return _LibsqlCursorProxy(self._conn.execute(sql, params))
 
     def executescript(self, sql: str) -> _LibsqlCursorProxy:
+        if self._released:
+            raise RuntimeError("libsql connection was already returned to the pool")
         # libsql doesn't have executescript — split on ; naively but respect strings.
         # For our schema this is fine (no ; inside DDL literals).
         for stmt in _split_script(sql):
@@ -204,6 +227,19 @@ class _LibsqlConnectionProxy:
         self._conn.rollback()
 
     def close(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._pool is not None:
+            # Return-to-pool path. The pool decides whether the native handle
+            # is healthy enough to be reused; if not, it discards it and
+            # spawns a replacement in a background-safe manner.
+            try:
+                self._pool.checkin(self._conn)
+            except Exception as exc:  # pragma: no cover - pool shutdown race
+                logger.debug("libsql pool checkin failed: %s", exc)
+            self._conn = None
+            return
         try:
             self._conn.close()
         except Exception as exc:  # pragma: no cover - driver shutdown guard
@@ -376,3 +412,222 @@ def describe_backend(url_or_path: str) -> str:
     if "url" in params:
         return f"libsql({params['url']})"
     return f"libsql-local({params.get('path','?')})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fase 5: bounded libsql connection pool
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Without pooling every DurableStore operation opens a new libsql session, and
+# each session costs a full TLS + Hrana handshake (~200-500 ms). A pool of N
+# pre-warmed connections amortises that cost across all requests while capping
+# the fan-out to Turso so we never accidentally DoS ourselves during a burst.
+#
+# Semantics:
+#   * Pre-created at construction (N native connections).
+#   * ``checkout()`` blocks on ``queue.Queue.get`` (thread-safe by design) with
+#     a bounded timeout — better to fail-fast than hang a request forever.
+#   * A cheap ``SELECT 1`` health check verifies the handle is alive; broken
+#     connections are discarded and transparently replaced.
+#   * ``close_all()`` drains the pool and tears down every native handle so
+#     the ASGI shutdown hook can leave nothing behind.
+#   * After ``close_all`` further checkouts raise ``RuntimeError`` — that's
+#     the expected shape during a rolling restart and callers surface it as
+#     ``503 Service Unavailable`` via the normal error path.
+
+
+class PoolCheckoutTimeout(RuntimeError):
+    """Raised when no connection becomes available within the configured window."""
+
+
+class LibsqlConnectionPool:
+    """A tiny bounded pool for libsql native connections.
+
+    Parameters
+    ----------
+    factory:
+        Callable that yields a fresh **native** libsql connection every time.
+        The pool owns whatever the factory returns.
+    size:
+        Number of connections to pre-create and cap concurrency at.
+    timeout_s:
+        Upper bound for a blocking ``checkout()`` before ``PoolCheckoutTimeout``
+        is raised. Keeping this well below the request timeout lets a
+        saturated pool surface as a 503 instead of a hung request.
+    """
+
+    def __init__(
+        self,
+        factory: Callable[[], Any],
+        *,
+        size: int = 4,
+        timeout_s: float = 10.0,
+    ) -> None:
+        if size < 1:
+            raise ValueError("pool size must be >= 1")
+        self._factory = factory
+        self._size = int(size)
+        self._timeout_s = float(timeout_s)
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=self._size)
+        self._all: list[Any] = []
+        self._lock = threading.Lock()
+        self._closed = False
+        # Pre-warm every slot. If any single connection fails to open we tear
+        # the rest down so the boot path fails loud rather than limping along
+        # with a half-populated pool.
+        try:
+            for _ in range(self._size):
+                conn = self._factory()
+                self._all.append(conn)
+                self._queue.put_nowait(conn)
+        except Exception:
+            self.close_all()
+            raise
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @property
+    def timeout_s(self) -> float:
+        return self._timeout_s
+
+    def _ping(self, conn: Any) -> bool:
+        """Cheap round-trip health check. Any exception means 'discard me'."""
+        try:
+            cur = conn.execute("SELECT 1")
+            # libsql cursors expose fetchone(); result is unused.
+            with suppress(Exception):
+                cur.fetchone()
+            return True
+        except Exception:
+            return False
+
+    def _replace_broken(self, broken: Any) -> Any:
+        """Discard ``broken`` and spawn a replacement (still holds the slot)."""
+        with suppress(Exception):
+            broken.close()
+        with self._lock:
+            with suppress(ValueError):
+                self._all.remove(broken)
+            replacement = self._factory()
+            self._all.append(replacement)
+        return replacement
+
+    def checkout(self) -> Any:
+        """Block up to ``timeout_s`` waiting for a healthy native connection."""
+        if self._closed:
+            raise RuntimeError("libsql pool is closed")
+        try:
+            conn = self._queue.get(timeout=self._timeout_s)
+        except queue.Empty as exc:
+            raise PoolCheckoutTimeout(
+                f"libsql pool checkout timed out after {self._timeout_s:.1f}s "
+                f"(size={self._size})"
+            ) from exc
+        # Health check the moment we own the slot. If the underlying TCP was
+        # reset while idle (Turso side, LB idle timeout, kernel drop) this
+        # transparently rebuilds it before the caller sees anything.
+        if not self._ping(conn):
+            try:
+                conn = self._replace_broken(conn)
+            except Exception:
+                # Can't rebuild — surface the failure; slot stays "outstanding"
+                # until the caller either checks something back in or shutdown
+                # drains the pool. We do NOT re-queue a dead handle.
+                raise
+        return conn
+
+    def checkin(self, conn: Any) -> None:
+        """Return a connection to the pool. Silently discards if closed."""
+        if self._closed or conn is None:
+            with suppress(Exception):
+                if conn is not None:
+                    conn.close()
+            return
+        try:
+            self._queue.put_nowait(conn)
+        except queue.Full:
+            # More checkouts happened than the pool tracks — shouldn't happen,
+            # but defensively close the extra handle instead of leaking it.
+            with suppress(Exception):
+                conn.close()
+            with self._lock, suppress(ValueError):
+                self._all.remove(conn)
+
+    def close_all(self) -> None:
+        """Tear down every native handle. Safe to call twice."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            # Drain the queue so no one grabs a handle mid-shutdown.
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
+            for conn in list(self._all):
+                with suppress(Exception):
+                    conn.close()
+            self._all.clear()
+
+
+def open_pooled_connection(
+    url_or_path: str,
+    *,
+    default_path: Path | None = None,
+    auth_token: str = "",
+    pool_size: int = 4,
+    pool_timeout_s: float = 10.0,
+) -> tuple[Callable[[], Any], LibsqlConnectionPool | None]:
+    """Build a factory + optional pool for the configured backend.
+
+    For ``libsql://`` URLs this pre-creates ``pool_size`` native connections
+    and returns a factory that hands out pooled ``_LibsqlConnectionProxy``
+    instances (``close()`` returns the underlying handle to the pool).
+
+    For local sqlite / ``file:`` / ``libsql+file:`` URLs this returns an
+    unpooled factory identical in shape to :func:`open_connection` — those
+    backends don't benefit from pooling (sqlite3 WAL handles concurrency
+    locally; libsql+file has no network round-trip to amortise).
+
+    The returned pool (or ``None``) MUST be closed via ``pool.close_all()``
+    at process shutdown to avoid leaking sockets.
+    """
+    backend, params = _classify(url_or_path)
+    if backend == "libsql" and "url" in params:
+        if _libsql is None:
+            raise RuntimeError(
+                "MUNIN_DB_URL points at libsql:// but the official libsql package is not installed. "
+                "Install the project dependencies or run `pip install libsql`."
+            )
+        target_url = params["url"]
+        native_token = auth_token or params.get("auth_token") or ""
+
+        def _native() -> Any:
+            return _libsql.connect(
+                database=target_url,
+                auth_token=native_token,
+                isolation_level=None,
+            )
+
+        pool = LibsqlConnectionPool(_native, size=pool_size, timeout_s=pool_timeout_s)
+
+        def factory() -> Any:
+            native = pool.checkout()
+            return _LibsqlConnectionProxy(native, sync_on_commit=False, _pool=pool)
+
+        return factory, pool
+
+    # Non-pooled path: preserve the existing per-call semantics of
+    # ``open_connection`` so sqlite and libsql+file behave exactly like before.
+    def factory() -> Any:
+        return open_connection(
+            url_or_path,
+            default_path=default_path,
+            auth_token=auth_token,
+            authoritative=True,
+        )
+
+    return factory, None

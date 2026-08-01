@@ -289,30 +289,41 @@ jobs:
           echo "::error::Apache fixture did not become ready" >&2
           exit 1
 
-      - name: Start Munin MCP server
+      - name: Start unified Munin server
+        # Fase 3 (issue #9): the pre-migration two-process launch (``munin mcp``
+        # on :8890 + ``munin production-api`` on :8787) is gone.  ``munin serve``
+        # boots the composed Starlette app that mounts the HTTP API at ``/`` and
+        # the FastMCP streamable-http transport at ``/mcp``, both on :8787.
         run: |
           mkdir -p data soul
-          MCP_HOST="127.0.0.1"
-          if [ "${{ inputs.open_public_tunnel }}" = "true" ]; then
-              MCP_HOST="0.0.0.0"
+          BIND_HOST="127.0.0.1"
+          if [ "${{ inputs.open_public_tunnel }}" = "true" ] || [ "${{ inputs.open_web_gui }}" = "true" ]; then
+              BIND_HOST="0.0.0.0"
           fi
-          nohup env PYTHONUNBUFFERED=1 RUNNER_TRACKING_ID="" poetry run munin mcp \
-              --transport streamable-http --host "$MCP_HOST" --port 8890 \
+          nohup env PYTHONUNBUFFERED=1 RUNNER_TRACKING_ID="" poetry run munin serve \
+              --host "$BIND_HOST" --port 8787 \
               </dev/null > /tmp/munin.log 2>&1 &
           echo $! > /tmp/munin.pid
-          sleep 2
-          if ! kill -0 "$(cat /tmp/munin.pid)" 2>/dev/null; then
-              echo "::error::munin failed to start — dumping log"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/munin.pid)" 2>/dev/null; then
+              echo "::error::munin serve exited during startup"
               cat /tmp/munin.log
               exit 1
-          fi
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/health >/dev/null
 
       - name: Verify Munin MCP is answering
         run: |
           python3 - <<'PY'
           import json, os, sys, time, urllib.error, urllib.request
 
-          url = 'http://localhost:8890/mcp'
+          # Fase 3: MCP is now mounted at /mcp on the unified backend port.
+          url = 'http://127.0.0.1:8787/mcp'
           token = os.environ.get('MUNIN_MCP_AUTH_TOKEN', '')
           deadline = time.monotonic() + 90
           session_id = ''
@@ -421,27 +432,9 @@ jobs:
       - name: Exercise full MCP lab contract
         run: poetry run python scripts/ci_live_smoke.py --require-turso
 
-      - name: Start Production Suite API and worker
-        if: ${{ inputs.open_web_gui }}
-        run: |
-          nohup poetry run munin production-api --host 127.0.0.1 --port 8787 \
-            </dev/null > /tmp/munin-production-api.log 2>&1 &
-          echo $! > /tmp/munin-production-api.pid
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
-              break
-            fi
-            if ! kill -0 "$(cat /tmp/munin-production-api.pid)" 2>/dev/null; then
-              echo "::error::Production Suite API exited during startup"
-              cat /tmp/munin-production-api.log
-              exit 1
-            fi
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:8787/health >/dev/null
-          nohup poetry run munin production-worker --poll-seconds 2 \
-            </dev/null > /tmp/munin-production-worker.log 2>&1 &
-          echo $! > /tmp/munin-production-worker.pid
+      # Fase 3 (issue #9): the standalone ``Start Production Suite API`` step
+      # was folded into ``Start unified Munin server`` above — ``munin serve``
+      # now hosts the HTTP API and MCP transport in one process on :8787.
 
       - name: Build and start Munin web GUI
         if: ${{ inputs.open_web_gui }}
@@ -475,11 +468,15 @@ jobs:
         run: MUNIN_SMOKE_BASE_URL=http://127.0.0.1:3000 poetry run python scripts/ci_live_smoke.py --proxy-only --require-turso
 
       - name: Open MCP public tunnel
+        # Fase 3 (issue #9): the tunnel now exposes the unified backend port
+        # (:8787).  The MCP transport lives at /mcp on that host; the HTTP API
+        # lives at /.  Consumers that used to hit ``$MUNIN_PUBLIC_URL/mcp``
+        # continue to work with no change.
         if: ${{ inputs.open_public_tunnel }}
         run: |
           PROVIDER="${{ inputs.tunnel_provider }}"
           if [ "$PROVIDER" = "all" ]; then PROVIDER="ngrok"; fi
-          MUNIN_TUNNEL_PROVIDER="$PROVIDER" bash scripts/open_tunnel.sh 8890 MUNIN_PUBLIC_URL /tmp/mcp-tunnel.log
+          MUNIN_TUNNEL_PROVIDER="$PROVIDER" bash scripts/open_tunnel.sh 8787 MUNIN_PUBLIC_URL /tmp/mcp-tunnel.log
 
       - name: Open GUI public tunnel(s)
         if: ${{ inputs.open_web_gui }}
@@ -521,7 +518,7 @@ jobs:
         if: ${{ inputs.open_public_tunnel || inputs.open_web_gui }}
         run: |
           GUI_URL="${MUNIN_GUI_URL:-${MUNIN_GUI_NGROK_URL:-${MUNIN_GUI_CLOUDFLARED_URL:-${MUNIN_GUI_LOCALHOST_RUN_URL:-not requested}}}}"
-          MCP_URL="${MUNIN_PUBLIC_URL:-${MUNIN_GUI_URL:-http://localhost:8890}}"
+          MCP_URL="${MUNIN_PUBLIC_URL:-${MUNIN_GUI_URL:-http://localhost:8787}}"
           echo "GUI URL: ${GUI_URL}"
           echo "GUI ngrok URL: ${MUNIN_GUI_NGROK_URL:-not requested}"
           echo "GUI Cloudflare URL: ${MUNIN_GUI_CLOUDFLARED_URL:-not requested}"
@@ -599,10 +596,12 @@ jobs:
           tail -100 /tmp/munin.log 2>/dev/null || echo "(no log)"
           echo "── /tmp/munin-gui.log (tail 100) ──"
           tail -100 /tmp/munin-gui.log 2>/dev/null || echo "(no GUI log)"
-          echo "── /tmp/munin-production-api.log (tail 100) ──"
-          tail -100 /tmp/munin-production-api.log 2>/dev/null || echo "(no production API log)"
-          echo "── /tmp/munin-production-worker.log (tail 100) ──"
-          tail -100 /tmp/munin-production-worker.log 2>/dev/null || echo "(no worker log)"
+          # Fase 3: the production API and MCP server merged into ``munin serve``
+          # so /tmp/munin.log now contains BOTH streams.  The old
+          # /tmp/munin-production-api.log path is preserved for any operator
+          # muscle memory but is not written to any more.
+          echo "── /tmp/munin-production-api.log (tail 100, legacy) ──"
+          tail -100 /tmp/munin-production-api.log 2>/dev/null || echo "(no production API log — folded into /tmp/munin.log)"
           echo "── /tmp/mcp-tunnel.log ──"
           cat /tmp/mcp-tunnel.log 2>/dev/null || echo "(no MCP tunnel log)"
           echo "── /tmp/gui-tunnel.log ──"

@@ -18,13 +18,127 @@ performs I/O or requires credentials.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Process-wide caches (issue #9 §3 fix: build once, reuse across requests).
+#
+# ``_CHECKPOINTER_CACHE`` is intentionally a single ``MemorySaver`` so that
+# ``thread_id`` checkpoints survive *across* requests in the same process —
+# HITL interrupts and resume for a conversation_id no longer die when the
+# next turn produces a fresh ``run_id``. DeepWiki on langgraph-ai/langgraph
+# confirms MemorySaver keys state by ``thread_id`` and is safe for concurrent
+# async invocations on the same event loop with distinct thread_ids (test
+# ``test_async_fallback_concurrent_tasks_do_not_interfere``); production use
+# should move to ``PostgresSaver`` (already on the IMPLEMENTATION_ROADMAP).
+#
+# ``_GRAPH_CACHE`` holds at most one compiled supervisor graph per fingerprint.
+# The fingerprint captures everything that, when changed, requires a rebuild:
+# model identity, the active ``gen__*`` tool set + their signatures, the soul
+# prompt, and the SharedStateStore instance identity. Per-run state that the
+# middleware needs at invoke time (``run_id``, ``progress_sink``) is *not* in
+# the fingerprint — it is delivered per-invocation via contextvars from the
+# middleware modules (see ``munin.core.middleware.progress_emit`` /
+# ``operator_guidance``), so one cached graph serves many runs.
+# ---------------------------------------------------------------------------
+_GRAPH_CACHE: dict[str, Any] = {}
 _CHECKPOINTER_CACHE: dict[str, Any] = {}
+_CACHE_LOCK = threading.Lock()
+_CHECKPOINTER_LOCK = threading.Lock()
+
+
+def _model_identity(model: Any) -> str:
+    """Stable identity string for a chat model across reconstructs."""
+    for attr in ("model_name", "model", "deployment"):
+        value = getattr(model, attr, None)
+        if value:
+            return str(value)
+    return repr(model) if model is not None else ""
+
+def _get_checkpointer() -> Any:
+    """Return the single process-wide MemorySaver (created once, reused)."""
+    with _CHECKPOINTER_LOCK:
+        saver = _CHECKPOINTER_CACHE.get("saver")
+        if saver is None:
+            if "unavailable" in _CHECKPOINTER_CACHE:
+                return None
+            try:
+                from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
+            except ImportError:  # pragma: no cover - optional dep
+                logger.warning("MemorySaver not importable: supervisor runs uncheckpointed")
+                _CHECKPOINTER_CACHE["unavailable"] = True
+                return None
+            saver = MemorySaver()
+            _CHECKPOINTER_CACHE["saver"] = saver
+        return saver
+
+
+def _gen_fingerprint(state: Any) -> frozenset[tuple[str, str, str]]:
+    """Cheap, content-sensitive fingerprint of the active ``gen__*`` tool set.
+
+    Tuple = ``(name, signature_json, created_at)`` per active procedural row.
+    ``created_at`` makes any newly created / re-activated tool a cache miss
+    without hashing source_code. Failure is non-fatal (treated as empty set):
+    the catalog must never explode the build.
+    """
+    try:
+        from ..mcp import registry  # noqa: TID252, PLC0415
+
+        rows = registry.list_generated(state)
+    except Exception:  # noqa: BLE001
+        logger.debug("supervisor: gen fingerprint failed", exc_info=True)
+        return frozenset()
+    out: set[tuple[str, str, str]] = set()
+    for row in rows:
+        if not row.get("active", True):
+            continue
+        name = str(row.get("name") or "")
+        sig = str(row.get("signature") or "")
+        created = str(row.get("created_at") or "")
+        out.add((name, sig, created))
+    return frozenset(out)
+
+
+def _soul_hash(prompt: str) -> str:
+    return hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest() if prompt else ""
+
+
+def _supervisor_fingerprint(
+    *,
+    model: Any,
+    state: Any,
+    soul_prompt: str,
+    include_generated: bool,
+) -> str:
+    """Build the cache key for the compiled supervisor graph."""
+    parts = [
+        f"model={_model_identity(model)}",
+        f"state={id(state)}",
+        f"gen={_gen_fingerprint(state) if include_generated else frozenset()}",
+        f"soul={_soul_hash(soul_prompt)}",
+        f"incgen={int(bool(include_generated))}",
+    ]
+    return "|".join(parts)
+
+
+def invalidate_supervisor_cache() -> None:
+    """Drop the cached supervisor graph so the next build recompiles.
+
+    Call this whenever the Supervisor tool set changes structurally — i.e. when
+    a new ``gen__*`` tool is created, activated, deactivated or purged, or
+    when the soul prompt is edited. The checkpointer is intentionally NOT
+    cleared: it owns per-``thread_id`` conversation checkpoints that must
+    survive across rebuilds (HITL / resume).
+    """
+    with _CACHE_LOCK:
+        _GRAPH_CACHE.clear()
+    logger.info("supervisor: graph cache invalidated (next build recompiles)")
 
 _KERNEL_INSTRUCTIONS = """
 ## Autonomy Kernel
@@ -67,24 +181,29 @@ def compose_munin_prompt(*, soul_prompt: str = "", extra: str = "") -> str:
 def make_checkpointer() -> Any:
     """Default checkpointer for the supervisor.
 
-    Historically Munin tried to ship a durable ``AsyncSqliteSaver`` here, but
-    ``AsyncSqliteSaver.from_conn_string`` returns an async context manager,
-    not a ``BaseCheckpointSaver`` instance, and the synchronous variant has
-    the same shape. ``create_deep_agent(checkpointer=...)`` needs an actual
-    saver before the graph runs, so the durable path would require wrapping
-    the entire build+invoke lifecycle in an ``async with`` — which conflicts
-    with Munin's build-once / invoke-many-times model.
+    Returns the **process-wide singleton** ``MemorySaver`` so that
+    ``thread_id`` checkpoints survive across turns / ``run_id`` changes —
+    required for HITL interrupts and resume inside one Munin process (the
+    use case issue #9 §3 calls out). DeepWiki (langgraph-ai/langgraph)
+    confirms ``InMemorySaver`` keys state by ``thread_id`` and that one compiled
+    graph instance is safe to reuse across async invocations with distinct
+    thread_ids; the same-event-loop concurrency story is verified by
+    ``test_async_fallback_concurrent_tasks_do_not_interfere``.
 
-    For now we default to ``MemorySaver``: per-thread state inside a single
-    supervisor process (enough for HITL interrupts and resume within one
-    session — the use case issue #9 §3 actually calls out). Truly durable
-    cross-session checkpointing belongs to a follow-up PR (see
-    IMPLEMENTATION_ROADMAP.md) and will wrap the supervisor invocation in an
-    ``async with AsyncSqliteSaver.from_conn_string(MUNIN_CHECKPOINT_DB)``.
+    Historically Munin tried a durable ``AsyncSqliteSaver`` here, but
+    ``AsyncSqliteSaver.from_conn_string`` returns an async context manager
+    (not a ``BaseCheckpointSaver``), and ``create_deep_agent(checkpointer=...)``
+    needs the saver instance before the graph runs. Truly durable cross-process
+    checkpointing belongs to a follow-up PR (see IMPLEMENTATION_ROADMAP.md),
+    which will wrap the supervisor invocation in an
+    ``async with AsyncSqliteSaver.from_conn_string(MUNIN_CHECKPOINT_DB)`` and
+    rebind the cached graph's checkpointer defensively.
+
+    If ``langgraph.checkpoint.memory.MemorySaver`` is not importable, falls
+    back to ``None`` (no checkpointing) so the build never hard-fails on a
+    missing optional dep — same behavior as before the fix.
     """
-    from langgraph.checkpoint.memory import MemorySaver  # noqa: PLC0415
-
-    return MemorySaver()
+    return _get_checkpointer()
 
 
 def build_supervisor(
@@ -137,6 +256,17 @@ def build_munin_supervisor(
 
     This is the one authoritative builder used by the runtime adapter, the
     CLI and ``munin_chat`` — no second runtime path exists.
+
+    The compiled graph is **cached per process** keyed by a fingerprint of
+    (model identity, active ``gen__*`` tool set + signatures, soul prompt,
+    SharedStateStore identity). Per-run state (``run_id``, ``progress_sink``)
+    is delivered at invoke time via the ``ACTIVE_*`` contextvars in
+    ``munin.core.middleware.progress_emit`` / ``operator_guidance``, so the
+    cached graph is reused across turns / ``run_id`` changes — and the shared
+    singleton ``MemorySaver`` keeps ``thread_id`` checkpoints alive for HITL
+    interrupts / resume. The ``run_id``/``progress_sink`` arguments here are
+    construction-time fallbacks (used by the single-build langgraph dev-server
+    path where contextvars are never set).
     """
     from .autonomy.kernel import AutonomyKernel  # noqa: PLC0415
     from .middleware import (  # noqa: PLC0415
@@ -156,13 +286,33 @@ def build_munin_supervisor(
     except Exception as exc:  # noqa: BLE001
         logger.warning("supervisor: soul unavailable (%s); using fallback identity", exc)
 
+    fingerprint = _supervisor_fingerprint(
+        model=model,
+        state=state,
+        soul_prompt=soul_prompt,
+        include_generated=include_generated,
+    )
+    with _CACHE_LOCK:
+        cached = _GRAPH_CACHE.get(fingerprint)
+    if cached is not None:
+        logger.debug("supervisor: cache hit fingerprint=%s", fingerprint[:64])
+        return cached
+
+    # Build-time fallbacks; the live per-invocation values come from the
+    # middleware contextvars set by ``runtime_adapter.supervisor_runner``.
+    def _noop_sink(_: dict) -> None:
+        return None
+
     middleware: list[Any] = [
         OperatorGuidanceMiddleware(run_id=run_id, store=state),
         RepetitionGuardMiddleware(),
+        ProgressEmitMiddleware(
+            progress_sink=progress_sink if progress_sink is not None else _noop_sink,
+            run_id=run_id,
+        ),
     ]
-    if progress_sink is not None:
-        middleware.append(ProgressEmitMiddleware(progress_sink=progress_sink, run_id=run_id))
 
+    tools = gateway_tools(state, include_generated=include_generated)
     kernel = AutonomyKernel(
         state,
         model=model,
@@ -170,14 +320,19 @@ def build_munin_supervisor(
         tools_provider=lambda: gateway_tools(state, include_generated=include_generated),
     )
 
-    return build_supervisor(
-        tools=gateway_tools(state, include_generated=include_generated),
+    graph = build_supervisor(
+        tools=tools,
         model=model,
         system_prompt=compose_munin_prompt(soul_prompt=soul_prompt),
         middleware=middleware,
         meta_tools=kernel.meta_tools(),
-        checkpointer=make_checkpointer(),
+        checkpointer=_get_checkpointer(),
     )
+    with _CACHE_LOCK:
+        # Last-writer-wins is fine: identical fingerprint → identical build.
+        _GRAPH_CACHE[fingerprint] = graph
+    logger.info("supervisor: built and cached graph fingerprint=%s", fingerprint[:64])
+    return graph
 
 
 # ---------------------------------------------------------------------------

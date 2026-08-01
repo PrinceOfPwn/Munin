@@ -105,6 +105,11 @@ async def supervisor_runner(
     """
     from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
+    from .middleware.operator_guidance import ACTIVE_RUN_ID as _OG_RUN_ID
+    from .middleware.progress_emit import (
+        ACTIVE_PROGRESS_SINK as _PE_SINK,
+    )
+    from .middleware.progress_emit import ACTIVE_RUN_ID as _PE_RUN_ID
     from .supervisor import build_munin_supervisor  # noqa: PLC0415
 
     middleware_events: list[dict] = []
@@ -132,21 +137,34 @@ async def supervisor_runner(
         "recursion_limit": max_iterations or DEFAULT_RECURSION_LIMIT,
     }
 
-    async for event in supervisor.astream_events(
-        {"messages": messages}, config=config, version="v2"
-    ):
+    # Bind the per-invocation middleware overrides. The supervisor graph is
+    # process-wide (cached), so its middleware instances are SHARED across
+    # runs; they read these contextvars at hook time to recover the live
+    # ``run_id`` and ``progress_sink`` for *this* call. Tokens are reset in a
+    # ``finally`` so a concurrent task never inherits a stale binding.
+    tok_og_rid = _OG_RUN_ID.set(run_id)
+    tok_pe_rid = _PE_RUN_ID.set(run_id)
+    tok_pe_sink = _PE_SINK.set(wrapped_progress_sink)
+    try:
+        async for event in supervisor.astream_events(
+            {"messages": messages}, config=config, version="v2"
+        ):
+            while middleware_events:
+                yield middleware_events.pop(0)
+
+            envelope = translate_event(event, run_id=run_id)
+            if envelope is None:
+                continue
+            if progress_sink is not None:
+                try:
+                    progress_sink(envelope)
+                except Exception:  # noqa: BLE001 - observability must not sink a run
+                    pass
+            yield envelope
+
         while middleware_events:
             yield middleware_events.pop(0)
-
-        envelope = translate_event(event, run_id=run_id)
-        if envelope is None:
-            continue
-        if progress_sink is not None:
-            try:
-                progress_sink(envelope)
-            except Exception:  # noqa: BLE001 - observability must not sink a run
-                pass
-        yield envelope
-
-    while middleware_events:
-        yield middleware_events.pop(0)
+    finally:
+        _PE_SINK.reset(tok_pe_sink)
+        _PE_RUN_ID.reset(tok_pe_rid)
+        _OG_RUN_ID.reset(tok_og_rid)

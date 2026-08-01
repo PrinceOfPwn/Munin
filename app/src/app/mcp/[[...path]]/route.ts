@@ -43,7 +43,11 @@ async function proxy(request: Request): Promise<Response> {
 
   const method = request.method.toUpperCase();
   const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
-  const upstreamUrl = `http://127.0.0.1:8890${incomingUrl.pathname}${incomingUrl.search}`;
+  // Fase 3 (issue #9): the unified backend now hosts MCP under /mcp on the
+  // same port as the HTTP API, so the proxy target follows MUNIN_PRODUCTION_API_URL
+  // (default 127.0.0.1:8787) instead of the retired :8890 MCP-only process.
+  const upstreamBase = (process.env.MUNIN_PRODUCTION_API_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
+  const upstreamUrl = `${upstreamBase}${incomingUrl.pathname}${incomingUrl.search}`;
 
   try {
     const upstream = await fetch(upstreamUrl, { method, headers, body });

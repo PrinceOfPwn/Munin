@@ -377,7 +377,12 @@ def _make_wake_tools(state: SharedStateStore) -> dict[str, Callable]:
     matching the behavior of the MCP-level ``munin_wake`` tool.
     """
     from ..core.orchestrator import Orchestrator  # noqa: PLC0415
-    from .runner import _NATIVE_SUBAGENTS  # noqa: PLC0415
+
+    # ``munin.subagents.runner`` (Arch A subprocess shim) was deleted in Fase 2
+    # of the issue-#9 migration. Native subagents are now expressed as forged
+    # graphs (``subagent_factory``) so the whitelist below is empty and every
+    # target must resolve via ``state.graph_get(...)``.
+    _NATIVE_SUBAGENTS: frozenset[str] = frozenset()
 
     orch = Orchestrator(state)
 

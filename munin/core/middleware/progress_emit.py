@@ -9,6 +9,7 @@ format consumed by the SSE/BFF layer.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from typing import Any, Callable
@@ -16,6 +17,17 @@ from typing import Any, Callable
 from ...mcp.audit import redact_secrets  # noqa: TID252
 
 logger = logging.getLogger(__name__)
+
+# Per-invocation overrides set by ``runtime_adapter.supervisor_runner`` so a
+# process-wide cached supervisor graph can serve many runs.  Middleware always
+# prefers the live override and falls back to its constructor args — which
+# keeps direct unit constructions (``ProgressEmitMiddleware(run_id=...)``) green.
+ACTIVE_RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "munin_supervisor_active_run_id", default=None
+)
+ACTIVE_PROGRESS_SINK: contextvars.ContextVar[Callable[[dict], None] | None] = contextvars.ContextVar(
+    "munin_supervisor_active_progress_sink", default=None
+)
 
 try:  # LangChain 1.x middleware surface
     from langchain.agents.middleware import AgentMiddleware
@@ -52,34 +64,48 @@ class ProgressEmitMiddleware(AgentMiddleware):
     """Wrap every tool call with progress emission (non-blocking, best-effort)."""
 
     def __init__(self, progress_sink: Callable[[dict], None], run_id: str):
+        # These are the per-build fallback. A cached graph serves many runs,
+        # so the live (run_id, sink) is read from ``ACTIVE_*`` contextvars set
+        # by ``runtime_adapter.supervisor_runner`` on each invocation. The
+        # fallback keeps the original direct-construction contract intact
+        # (see ``tests/characterization/test_progress_emit_middleware.py``).
         self.progress_sink = progress_sink
         self.run_id = run_id
 
+    def _resolve_sink(self) -> Callable[[dict], None]:
+        live = ACTIVE_PROGRESS_SINK.get()
+        return live if live is not None else self.progress_sink
+
+    def _resolve_run_id(self) -> str:
+        live = ACTIVE_RUN_ID.get()
+        return live if live not in (None, "") else self.run_id
+
     def _emit(self, event: dict) -> None:
         try:
-            self.progress_sink(event)
+            self._resolve_sink()(event)
         except Exception:  # noqa: BLE001 - observability must never sink a run
             logger.debug("progress sink raised", exc_info=True)
 
-    def _before(self, request: Any) -> str:
+    def _before(self, request: Any) -> tuple[str, str]:
         name, args, call_id = _tool_request_parts(request)
         self._emit(
             {
                 "kind": "tool_intent",
-                "run_id": self.run_id,
+                "run_id": self._resolve_run_id(),
                 "tool_name": name,
                 "tool_call_id": call_id,
                 "input": _deep_redact(args),
             }
         )
-        return call_id
+        return name, call_id
 
-    def _after(self, call_id: str, result: Any, error: Exception | None = None) -> None:
+    def _after(self, call_id: str, name: str, result: Any, error: Exception | None = None) -> None:
         if error is not None:
             self._emit(
                 {
                     "kind": "tool_failed",
-                    "run_id": self.run_id,
+                    "run_id": self._resolve_run_id(),
+                    "tool_name": name,
                     "tool_call_id": call_id,
                     "error": redact_secrets(f"{type(error).__name__}: {error}"),
                 }
@@ -90,7 +116,8 @@ class ProgressEmitMiddleware(AgentMiddleware):
         self._emit(
             {
                 "kind": "tool_result",
-                "run_id": self.run_id,
+                "run_id": self._resolve_run_id(),
+                "tool_name": name,
                 "tool_call_id": call_id,
                 "output": output,
             }
@@ -99,21 +126,21 @@ class ProgressEmitMiddleware(AgentMiddleware):
     # -- LangChain hooks -------------------------------------------------
 
     def wrap_tool_call(self, request: Any, handler: Callable) -> Any:
-        call_id = self._before(request)
+        name, call_id = self._before(request)
         try:
             result = handler(request)
         except Exception as exc:  # noqa: BLE001
-            self._after(call_id, None, error=exc)
+            self._after(call_id, name, None, error=exc)
             raise
-        self._after(call_id, result)
+        self._after(call_id, name, result)
         return result
 
     async def awrap_tool_call(self, request: Any, handler: Callable) -> Any:
-        call_id = self._before(request)
+        name, call_id = self._before(request)
         try:
             result = await handler(request)
         except Exception as exc:  # noqa: BLE001
-            self._after(call_id, None, error=exc)
+            self._after(call_id, name, None, error=exc)
             raise
-        self._after(call_id, result)
+        self._after(call_id, name, result)
         return result
