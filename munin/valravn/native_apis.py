@@ -191,7 +191,12 @@ class NativeIntelClient:
             result["announced_prefixes"] = self._json("GET", f"{base}/announced-prefixes/data.json", params={"resource": resource})
         history_resource = prefix or resource
         result["routing_history"] = self._json("GET", f"{base}/routing-history/data.json", params={**params, "resource": history_resource})
-        result["rpki"] = self._json("GET", f"{base}/rpki-validation/data.json", params={"resource": history_resource})
+        if prefix and resource.upper().startswith("AS"):
+            result["rpki_validation"] = self._json(
+                "GET",
+                f"{base}/rpki-validation/data.json",
+                params={"resource": resource.removeprefix("AS"), "prefix": prefix},
+            )
         return {"resource": resource, "result": result}
 
     def wayback_cdx(self, pattern: str, *, limit: int = 100, from_year: str = "", to_year: str = "") -> dict[str, Any]:
