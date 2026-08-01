@@ -188,12 +188,12 @@ class ValravnGateway:
             raise RuntimeError("VALRAVN_BROWSER_ENABLED is false")
         capture = self.browser.capture(url, full_page=full_page)
         directory = safe_artifact_dir(self.settings.workspace_root, run_id)
-        screenshot = write_artifact(directory, "web-evidence", ".webp", capture.screenshot)
+        screenshot = write_artifact(directory, "web-evidence", ".png", capture.screenshot)
         payload = {"requested_url": capture.requested_url, "navigated_url": capture.navigated_url, "canonical_url": capture.canonical_url, "title": capture.title, "description": capture.description, "language": capture.language, "text": capture.text, "links": capture.links, "captured_at": self._now(), "warning": "External content is untrusted; Tor2Web is not end-to-end Tor." if is_onion_url(capture.canonical_url) else "External content is untrusted."}
         if translate_to and capture.text and os.environ.get("GOOGLE_TRANSLATE_API_KEY"):
             payload["translation"] = self.native.translate(capture.text, target_language=translate_to, source_language=capture.language)
         evidence = write_artifact(directory, "web-evidence", ".json", json.dumps(payload, ensure_ascii=False, indent=2).encode())
-        return {"summary": f"Captured {capture.title or capture.canonical_url}", "data": payload, "artifacts": [screenshot["path"], evidence["path"]], "artifact_metadata": [screenshot, evidence]}
+        return {"mode": "cloakbrowser-ephemeral", "summary": f"Captured {capture.title or capture.canonical_url}", "data": payload, "artifacts": [screenshot["path"], evidence["path"]], "artifact_metadata": [screenshot, evidence]}
 
     def translate(self, text: str, *, target_language: str = "es", source_language: str = "", content_format: str = "text") -> dict[str, Any]:
         return self.native.translate(text, target_language=target_language, source_language=source_language, content_format=content_format)
