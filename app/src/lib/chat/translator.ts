@@ -14,6 +14,8 @@ export type BackendEnvelopeKind =
   | "tool_result"
   | "tool_completed"
   | "tool_failed"
+  | "tool_output"
+  | "tool_heartbeat"
   | "subagent_started"
   | "subagent_state"
   | "human_request"
@@ -50,6 +52,12 @@ export interface BackendEnvelope {
   elapsed_seconds?: number;
   provider?: string;
   step?: number;
+  job_id?: string;
+  stream?: "stdout" | "stderr" | "meta";
+  elapsed_ms?: number;
+  final?: boolean;
+  last_output_ms?: number;
+  transient?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +161,38 @@ export function createTranslator(runId: string): {
       case "tool_failed":
         if (!envelope.tool_call_id) return [];
         return [...closeReasoning(), { type: "tool-output-error", toolCallId: envelope.tool_call_id, errorText: envelope.error ?? "unknown error", dynamic: true }];
+
+      case "tool_output":
+        if (!envelope.text) return [];
+        return [{
+          type: "data-command-output",
+          id: `command-output-${envelope.job_id ?? envelope.tool_call_id ?? envelope.tool_name ?? "tool"}-${envelope.sequence ?? 0}`,
+          data: {
+            jobId: envelope.job_id ?? "",
+            toolCallId: envelope.tool_call_id ?? "",
+            toolName: envelope.tool_name ?? "unknown",
+            stream: envelope.stream ?? "stdout",
+            text: envelope.text,
+            sequence: envelope.sequence ?? 0,
+            elapsedMs: envelope.elapsed_ms ?? 0,
+            final: Boolean(envelope.final),
+          },
+        }];
+
+      case "tool_heartbeat":
+        return [{
+          type: "data-tool-heartbeat",
+          id: `tool-heartbeat-${envelope.job_id ?? envelope.tool_call_id ?? envelope.tool_name ?? "tool"}`,
+          data: {
+            jobId: envelope.job_id ?? "",
+            toolCallId: envelope.tool_call_id ?? "",
+            toolName: envelope.tool_name ?? "unknown",
+            elapsedMs: envelope.elapsed_ms ?? 0,
+            lastOutputMs: envelope.last_output_ms ?? 0,
+            text: envelope.text ?? "command still running",
+          },
+          transient: true,
+        }];
 
       case "subagent_started":
       case "subagent_state":

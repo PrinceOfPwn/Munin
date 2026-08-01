@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
+import threading
 import time
+from contextvars import copy_context
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,9 @@ _REQUIRED_NFT_TABLES: list[str] = [
     for t in os.environ.get("OFFX_REQUIRED_NFT_TABLES", "opsec_strict,container_vpn_guard").split(",")
     if t.strip()
 ]
+
+_PROCESS_HEARTBEAT_SECONDS = float(os.environ.get("MUNIN_PROCESS_HEARTBEAT_SECONDS", "5"))
+_PROCESS_OUTPUT_CHUNK_CHARS = int(os.environ.get("MUNIN_PROCESS_OUTPUT_CHUNK_CHARS", "4096"))
 
 
 # Install hints for offensive binaries commonly missing on generic runners / dev boxes.
@@ -244,39 +250,135 @@ class ExecutionEngine:
         deadline = time.monotonic() + timeout
         cancelled = False
         timed_out = False
-        stdout_raw = ""
-        stderr_raw = ""
-        while True:
+        output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        output_buffers: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        output_sizes = {"stdout": 0, "stderr": 0}
+        reader_threads: list[threading.Thread] = []
+
+        def read_stream(stream_name: str, pipe: Any) -> None:
+            try:
+                for line in iter(pipe.readline, ""):
+                    if line:
+                        output_queue.put((stream_name, line))
+            finally:
+                output_queue.put((stream_name, None))
+
+        for stream_name, pipe in (("stdout", process.stdout), ("stderr", process.stderr)):
+            if pipe is None:
+                output_queue.put((stream_name, None))
+                continue
+            thread = threading.Thread(
+                target=lambda name=stream_name, source=pipe, context=copy_context(): context.run(
+                    read_stream, name, source
+                ),
+                name=f"munin-command-{stream_name}",
+                daemon=True,
+            )
+            thread.start()
+            reader_threads.append(thread)
+
+        started_at = time.monotonic()
+        last_activity = started_at
+        last_heartbeat = started_at
+        output_sequence = 0
+        open_streams = 2
+        termination_started_at: float | None = None
+
+        def emit_process_event(event: dict[str, Any]) -> None:
+            """Publish to both the active graph stream and an async job buffer."""
+            if job is not None:
+                sink = getattr(job, "progress_sink", None)
+                if sink is not None:
+                    try:
+                        sink(event)
+                    except Exception:  # pragma: no cover - telemetry must not fail a command
+                        logger.debug("job progress sink failed", exc_info=True)
+            try:
+                from ..core.execution_progress import emit_tool_progress  # noqa: PLC0415
+
+                emit_tool_progress(event)
+            except Exception:  # pragma: no cover - direct MCP execution has no graph sink
+                logger.debug("live process progress emission failed", exc_info=True)
+
+        def terminate_once() -> None:
+            if process.poll() is None:
+                self._terminate_process(process)
+
+        while open_streams > 0 or process.poll() is None:
+            now = time.monotonic()
             if job is not None and getattr(job, "cancel_requested", False):
                 cancelled = True
-                self._terminate_process(process)
-                try:
-                    stdout_raw, stderr_raw = process.communicate(timeout=5)
-                except Exception:
-                    stdout_raw = stdout_raw or ""
-                    stderr_raw = stderr_raw or ""
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+                terminate_once()
+                termination_started_at = termination_started_at or now
+            elif now >= deadline:
                 timed_out = True
-                self._terminate_process(process)
-                try:
-                    stdout_raw, stderr_raw = process.communicate(timeout=5)
-                except Exception:
-                    stdout_raw = stdout_raw or ""
-                    stderr_raw = stderr_raw or ""
+                terminate_once()
+                termination_started_at = termination_started_at or now
+
+            if termination_started_at is not None and now - termination_started_at > 5:
                 break
+
             try:
-                stdout_raw, stderr_raw = process.communicate(timeout=min(2, remaining))
-                break
-            except subprocess.TimeoutExpired:
+                stream_name, text = output_queue.get(timeout=0.25)
+            except queue.Empty:
+                stream_name, text = "", ""
+
+            if text is None:
+                if stream_name:
+                    open_streams = max(0, open_streams - 1)
                 continue
+            if text:
+                last_activity = now
+                output_sequence += 1
+                text = text[:_PROCESS_OUTPUT_CHUNK_CHARS]
+                output_buffers[stream_name].append(text)
+                output_sizes[stream_name] += len(text)
+                # Retain a bounded tail for the final result while streaming
+                # every bounded chunk to the operator-facing event log.
+                max_chars = max(1, int(self.settings.max_output_chars))
+                while output_sizes[stream_name] > max_chars and output_buffers[stream_name]:
+                    removed = output_buffers[stream_name].pop(0)
+                    output_sizes[stream_name] -= len(removed)
+                emit_process_event(
+                    {
+                        "kind": "tool_output",
+                        "stream": stream_name,
+                        "text": text,
+                        "sequence": output_sequence,
+                        "elapsed_ms": int((now - started_at) * 1000),
+                        "final": False,
+                    }
+                )
+
+            now = time.monotonic()
+            if now - last_heartbeat >= max(1.0, _PROCESS_HEARTBEAT_SECONDS) and process.poll() is None:
+                last_heartbeat = now
+                emit_process_event(
+                    {
+                        "kind": "tool_heartbeat",
+                        "stream": "meta",
+                        "text": "command still running",
+                        "elapsed_ms": int((now - started_at) * 1000),
+                        "last_output_ms": int((now - last_activity) * 1000),
+                        "transient": True,
+                    }
+                )
+
+            if (cancelled or timed_out) and process.poll() is not None and open_streams == 0:
+                break
+
+        for thread in reader_threads:
+            thread.join(timeout=1)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            terminate_once()
 
         postflight = self._preflight_gated(level)
         return_code = process.returncode if process.returncode is not None else -9
         ok = (return_code == 0) and not cancelled and not timed_out
-        stdout = truncate_text(stdout_raw or "", self.settings.max_output_chars)
-        stderr = truncate_text(stderr_raw or "", self.settings.max_output_chars)
+        stdout = truncate_text("".join(output_buffers["stdout"]), self.settings.max_output_chars)
+        stderr = truncate_text("".join(output_buffers["stderr"]), self.settings.max_output_chars)
         error = None
         summary = f"{tool} {'completed' if ok else 'failed'}"
         if cancelled:

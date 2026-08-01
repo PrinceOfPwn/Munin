@@ -159,6 +159,68 @@ describe("createTranslator - tool parts", () => {
     ]);
   });
 
+  it("streams command output as a typed UI data part", () => {
+    const { translate } = createTranslator("run-x");
+    expect(
+      translate(
+        makeEnvelope({
+          kind: "tool_output",
+          tool_name: "execute_command",
+          tool_call_id: "tc-4",
+          job_id: "job-4",
+          stream: "stdout",
+          text: "scanning 10.0.0.1",
+          sequence: 7,
+          elapsed_ms: 2300,
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "data-command-output",
+        id: "command-output-job-4-7",
+        data: {
+          jobId: "job-4",
+          toolCallId: "tc-4",
+          toolName: "execute_command",
+          stream: "stdout",
+          text: "scanning 10.0.0.1",
+          sequence: 7,
+          elapsedMs: 2300,
+          final: false,
+        },
+      },
+    ]);
+  });
+
+  it("keeps quiet-command heartbeats visible and transient", () => {
+    const { translate } = createTranslator("run-x");
+    expect(
+      translate(
+        makeEnvelope({
+          kind: "tool_heartbeat",
+          tool_name: "nmap_scan",
+          job_id: "job-5",
+          elapsed_ms: 12_000,
+          last_output_ms: 4_000,
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "data-tool-heartbeat",
+        id: "tool-heartbeat-job-5",
+        data: {
+          jobId: "job-5",
+          toolCallId: "",
+          toolName: "nmap_scan",
+          elapsedMs: 12_000,
+          lastOutputMs: 4_000,
+          text: "command still running",
+        },
+        transient: true,
+      },
+    ]);
+  });
+
   it("tool envelopes without tool_call_id are ignored", () => {
     const { translate } = createTranslator("run-x");
     expect(translate(makeEnvelope({ kind: "tool_result", output: "x" }))).toEqual([]);

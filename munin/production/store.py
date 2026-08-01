@@ -1439,6 +1439,42 @@ class ProductionStore:
                 )
             return {"id": identifier, "event_id": event["id"], "state": state, "tool_name": tool_name, "arguments": safe_args, "result": safe_result}
 
+    def append_tool_output_event(
+        self,
+        *,
+        run_id: str,
+        tool_name: str,
+        tool_call_id: str = "",
+        job_id: str = "",
+        stream: str,
+        text: str,
+        sequence: int = 0,
+        elapsed_ms: int = 0,
+        final: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one bounded command-output chunk in the run event log.
+
+        Output is an operational data part, not reasoning and not a growing
+        tool result.  Keeping each chunk in ``run_events`` gives replay/resume
+        the same cursor semantics as the rest of the UIMessage stream.
+        """
+        if stream not in {"stdout", "stderr", "meta"}:
+            raise ValueError("unknown tool output stream")
+        payload = {
+            "tool_name": str(tool_name or "unknown")[:160],
+            "tool_call_id": str(tool_call_id or "")[:160],
+            "job_id": str(job_id or "")[:160],
+            "stream": stream,
+            "text": redact_text(str(text or ""))[:8_192],
+            "sequence": max(0, int(sequence)),
+            "elapsed_ms": max(0, int(elapsed_ms)),
+            "final": bool(final),
+        }
+        with self._transaction() as conn:
+            if not conn.execute("SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone():
+                raise KeyError(run_id)
+            return self._append_event(conn, run_id=run_id, kind="tool.output", payload=payload)
+
     def create_subagent_run(self, *, parent_run_id: str, profile_id: str, objective: str) -> dict[str, Any]:
         if not objective.strip():
             raise ValueError("subagent objective is required")
@@ -2666,6 +2702,9 @@ class MuninStore:
 
     def append_tool_call(self, **kwargs: Any) -> dict[str, Any]:
         return self._hot.append_tool_call(**kwargs)
+
+    def append_tool_output_event(self, **kwargs: Any) -> dict[str, Any]:
+        return self._hot.append_tool_output_event(**kwargs)
 
     # Provider profiles are durable operator-owned credentials.  The hot
     # execution store never receives the plaintext key; it is decrypted only

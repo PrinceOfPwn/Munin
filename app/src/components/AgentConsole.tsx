@@ -46,6 +46,9 @@ import type { HitlRequestPartProps } from "@/components/chat/blocks/parts/HitlRe
 import { ArtifactPart } from "@/components/chat/blocks/parts/ArtifactPart";
 import { NotePart } from "@/components/chat/blocks/parts/NotePart";
 import { GuidancePart } from "@/components/chat/blocks/parts/GuidancePart";
+import { CommandOutputPart } from "@/components/chat/blocks/parts/CommandOutputPart";
+import { ToolHeartbeatPart } from "@/components/chat/blocks/parts/ToolHeartbeatPart";
+import { HeartbeatPart } from "@/components/chat/blocks/parts/HeartbeatPart";
 import { ProviderSwitcher } from "@/components/ProviderSwitcher";
 
 import {
@@ -99,6 +102,25 @@ interface RunStateData {
 interface ActivityData {
   stage: string;
   text: string;
+}
+
+interface CommandOutputData {
+  jobId?: string;
+  toolCallId?: string;
+  toolName: string;
+  stream: "stdout" | "stderr" | "meta";
+  text: string;
+  elapsedMs?: number;
+  final?: boolean;
+}
+
+interface ToolHeartbeatData {
+  jobId?: string;
+  toolCallId?: string;
+  toolName: string;
+  elapsedMs?: number;
+  lastOutputMs?: number;
+  text?: string;
 }
 
 // UIMessage part union helpers — the `parts` array on a UIMessage can contain
@@ -332,8 +354,35 @@ function PartRenderer({
   }
 
   if (part.type === "data-heartbeat") {
-    // Transient heartbeats are not rendered inline.
-    return null;
+    const d = (part as DataUIPart<Record<string, unknown>>).data as { ts?: number };
+    return d.ts ? <HeartbeatPart key={key} ts={d.ts} /> : null;
+  }
+
+  if (part.type === "data-command-output") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as CommandOutputData;
+    return (
+      <CommandOutputPart
+        key={key}
+        toolName={d.toolName ?? "command"}
+        stream={d.stream ?? "stdout"}
+        text={d.text ?? ""}
+        elapsedMs={d.elapsedMs}
+        final={d.final}
+      />
+    );
+  }
+
+  if (part.type === "data-tool-heartbeat") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ToolHeartbeatData;
+    return (
+      <ToolHeartbeatPart
+        key={key}
+        toolName={d.toolName ?? "command"}
+        elapsedMs={d.elapsedMs}
+        lastOutputMs={d.lastOutputMs}
+        text={d.text}
+      />
+    );
   }
 
   if (part.type === "reasoning") {

@@ -15,6 +15,7 @@ import logging
 from typing import Any, Callable
 
 from ...mcp.audit import redact_secrets  # noqa: TID252
+from ..execution_progress import tool_call_scope, tool_progress_scope
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,17 @@ class ProgressEmitMiddleware(AgentMiddleware):
     def wrap_tool_call(self, request: Any, handler: Callable) -> Any:
         name, call_id = self._before(request)
         try:
-            result = handler(request)
+            with tool_call_scope(name, call_id), tool_progress_scope(
+                lambda event: self._emit(
+                    {
+                        **event,
+                        "tool_name": event.get("tool_name") or name,
+                        "tool_call_id": event.get("tool_call_id") or call_id,
+                        "run_id": event.get("run_id") or self._resolve_run_id(),
+                    }
+                )
+            ):
+                result = handler(request)
         except Exception as exc:  # noqa: BLE001
             self._after(call_id, name, None, error=exc)
             raise
@@ -138,7 +149,17 @@ class ProgressEmitMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request: Any, handler: Callable) -> Any:
         name, call_id = self._before(request)
         try:
-            result = await handler(request)
+            with tool_call_scope(name, call_id), tool_progress_scope(
+                lambda event: self._emit(
+                    {
+                        **event,
+                        "tool_name": event.get("tool_name") or name,
+                        "tool_call_id": event.get("tool_call_id") or call_id,
+                        "run_id": event.get("run_id") or self._resolve_run_id(),
+                    }
+                )
+            ):
+                result = await handler(request)
         except Exception as exc:  # noqa: BLE001
             self._after(call_id, name, None, error=exc)
             raise

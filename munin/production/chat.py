@@ -22,6 +22,7 @@ Envelope contract (mirrors the pre-migration wire format so
    "input": {...}}`` — before ``wrap_tool_call``
 * ``{"kind": "tool_result", "tool_call_id": ..., "output": ...}`` — success
 * ``{"kind": "tool_failed", "tool_call_id": ..., "error": ...}`` — exception
+* ``{"kind": "tool_output", "tool_call_id": ..., "stream": ..., "text": ...}`` — live command output
 
 Envelopes are emitted by ``ProgressEmitMiddleware`` (tool lifecycle) and
 ``runtime_adapter.translate_events`` (provider reasoning + run_state), so this handler
@@ -318,6 +319,26 @@ def _persist_envelope(
                 tool_call_id=envelope.get("tool_call_id") or None,
             )
             return
+        if kind == "tool_output":
+            append_output = getattr(store, "append_tool_output_event", None)
+            if append_output is not None and str(envelope.get("text") or ""):
+                append_output(
+                    run_id=run_id,
+                    tool_name=str(envelope.get("tool_name") or "unknown"),
+                    tool_call_id=str(envelope.get("tool_call_id") or ""),
+                    job_id=str(envelope.get("job_id") or ""),
+                    stream=str(envelope.get("stream") or "stdout"),
+                    text=str(envelope.get("text") or ""),
+                    sequence=int(envelope.get("sequence") or 0),
+                    elapsed_ms=int(envelope.get("elapsed_ms") or 0),
+                    final=bool(envelope.get("final")),
+                )
+            return
+        if kind == "tool_heartbeat":
+            # Heartbeats are transient transport signals. The output chunks
+            # and terminal tool lifecycle are durable, so replay never needs
+            # to reproduce every pulse.
+            return
     except Exception:  # noqa: BLE001 - persistence best-effort
         log.debug("chat: envelope persistence failed (kind=%s)", kind, exc_info=True)
 
@@ -452,6 +473,21 @@ def _envelope_from_event(
 
     if kind.startswith("tool."):
         state = kind.split(".", 1)[1]
+        if state == "output":
+            if not isinstance(payload, dict):
+                return None
+            return {
+                "kind": "tool_output",
+                "run_id": run_id,
+                "tool_call_id": payload.get("tool_call_id") or "",
+                "tool_name": payload.get("tool_name") or "unknown",
+                "job_id": payload.get("job_id") or "",
+                "stream": payload.get("stream") or "stdout",
+                "text": payload.get("text") or "",
+                "sequence": int(payload.get("sequence") or 0),
+                "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+                "final": bool(payload.get("final")),
+            }
         detail = tools_by_eid.get(eid) or {}
         tool_call_id = payload.get("tool_call_id") if isinstance(payload, dict) else None
         tool_call_id = tool_call_id or detail.get("id")

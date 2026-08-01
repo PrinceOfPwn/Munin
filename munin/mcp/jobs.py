@@ -20,6 +20,8 @@ class JobRecord:
     target: str
     command_preview: str
     created_at: str
+    run_id: str = ""
+    tool_call_id: str = ""
     status: str = "queued"
     started_at: str = ""
     finished_at: str = ""
@@ -32,6 +34,8 @@ class JobRecord:
     # Small, operator-safe milestones emitted while a long job is running.
     # They make polling useful without retaining hidden model reasoning.
     progress: list[dict[str, Any]] | None = None
+    progress_sequence: int = 0
+    progress_sink: Callable[[dict[str, Any]], None] | None = None
 
 
 class JobManager:
@@ -74,6 +78,8 @@ class JobManager:
         level: str,
         target: str,
         command_preview: str,
+        run_id: str = "",
+        tool_call_id: str = "",
         fn: Callable[[JobRecord], dict[str, Any]],
         on_finish: Callable[[JobRecord], None] | None = None,
     ) -> JobRecord:
@@ -86,10 +92,13 @@ class JobManager:
             target=target,
             command_preview=command_preview,
             created_at=utc_now_iso(),
+            run_id=run_id,
+            tool_call_id=tool_call_id,
             progress=[],
         )
         with self.lock:
             self.records[job.job_id] = job
+        job.progress_sink = lambda event, job_id=job.job_id: self.add_progress(job_id, event)
         future = self.executor.submit(self._run_job, job.job_id, fn, on_finish)
         job.future = future
         return job
@@ -106,10 +115,57 @@ class JobManager:
                 return
             if job.progress is None:
                 job.progress = []
-            job.progress.append({"at": utc_now_iso(), **event})
+            job.progress_sequence += 1
+            job.progress.append(
+                {
+                    "at": utc_now_iso(),
+                    "sequence": job.progress_sequence,
+                    "run_id": job.run_id,
+                    "job_id": job.job_id,
+                    "tool_name": job.tool,
+                    "tool_call_id": job.tool_call_id,
+                    **event,
+                }
+            )
             # Keep polling payloads bounded even for a pathological ReAct loop.
             if len(job.progress) > 100:
                 del job.progress[:-100]
+
+    def progress_for_run(
+        self,
+        run_id: str,
+        cursors: dict[str, int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return new live command events for one supervisor run.
+
+        Jobs are intentionally an in-memory execution detail.  The caller
+        persists the returned events through the durable run-event log, while
+        this cursor prevents duplicate UIMessage chunks during one stream.
+        """
+        if not run_id:
+            return []
+        cursors = cursors if cursors is not None else {}
+        if not self._acquire_lock():
+            return []
+        try:
+            events: list[dict[str, Any]] = []
+            for job in self.records.values():
+                if job.run_id != run_id:
+                    continue
+                after = int(cursors.get(job.job_id, 0))
+                for event in (job.progress or []):
+                    sequence = int(event.get("sequence") or 0)
+                    if sequence <= after:
+                        continue
+                    if event.get("kind") not in {"tool_output", "tool_heartbeat"}:
+                        cursors[job.job_id] = max(cursors.get(job.job_id, 0), sequence)
+                        continue
+                    events.append(dict(event))
+                    cursors[job.job_id] = max(cursors.get(job.job_id, 0), sequence)
+            events.sort(key=lambda item: (str(item.get("at") or ""), int(item.get("sequence") or 0)))
+            return events
+        finally:
+            self.lock.release()
 
     def _run_job(
         self,
@@ -193,6 +249,8 @@ class JobManager:
             data = {
                 "job_id": job.job_id,
                 "tool": job.tool,
+                "run_id": job.run_id,
+                "tool_call_id": job.tool_call_id,
                 "level": job.level,
                 "target": job.target,
                 "command_preview": truncate_text(job.command_preview, 180),

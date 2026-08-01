@@ -373,6 +373,12 @@ def _submit_command_job(
     artifacts: list[str] | None = None,
 ) -> dict[str, Any]:
     started_at = utc_now_iso()
+    try:
+        from ..core.execution_progress import active_tool_identity  # noqa: PLC0415
+
+        _active_name, tool_call_id = active_tool_identity()
+    except Exception:  # pragma: no cover - direct MCP calls have no graph context
+        tool_call_id = ""
 
     def on_finish(job: Any) -> None:
         result = job.result or {}
@@ -402,6 +408,8 @@ def _submit_command_job(
         level=level,
         target=target,
         command_preview=command[:200],
+        run_id=run_id,
+        tool_call_id=tool_call_id,
         fn=lambda current_job: ENGINE.execute_job(
             job=current_job,
             tool=tool,
