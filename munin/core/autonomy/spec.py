@@ -37,7 +37,7 @@ class SubagentSpec(BaseModel):
     # Middleware
     middleware: list[str] = Field(
         default_factory=list,
-        description="Middleware class names to attach (e.g. 'RepetitionGuardMiddleware')"
+        description="Additional LangChain/Deep Agents middleware class names to attach"
     )
 
     # Output

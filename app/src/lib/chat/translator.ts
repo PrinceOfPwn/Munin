@@ -6,6 +6,7 @@ import type { UIMessageChunk } from "ai";
 
 export type BackendEnvelopeKind =
   | "assistant_text"
+  | "provider_reasoning"
   | "reasoning"
   | "activity"
   | "tool_intent"
@@ -47,6 +48,8 @@ export interface BackendEnvelope {
   uri?: string;
   ts?: number;
   elapsed_seconds?: number;
+  provider?: string;
+  step?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,7 @@ export interface BackendEnvelope {
 export interface TranslatorState {
   textId: string;
   textStarted: boolean;
+  reasoningId: string | null;
   finished: boolean;
 }
 
@@ -66,6 +70,7 @@ export function createTranslator(runId: string): {
   const state: TranslatorState = {
     textId: `text-${runId}`,
     textStarted: false,
+    reasoningId: null,
     finished: false,
   };
 
@@ -85,6 +90,25 @@ export function createTranslator(runId: string): {
     return [{ type: "text-end", id: state.textId }];
   }
 
+  function reasoningDeltas(text: string, step: number): UIMessageChunk[] {
+    const id = `reasoning-${runId}-${step}`;
+    const chunks: UIMessageChunk[] = [];
+    if (state.reasoningId !== id) {
+      chunks.push(...closeReasoning());
+      state.reasoningId = id;
+      chunks.push({ type: "reasoning-start", id });
+    }
+    chunks.push({ type: "reasoning-delta", id, delta: text });
+    return chunks;
+  }
+
+  function closeReasoning(): UIMessageChunk[] {
+    if (!state.reasoningId) return [];
+    const id = state.reasoningId;
+    state.reasoningId = null;
+    return [{ type: "reasoning-end", id }];
+  }
+
   function translate(envelope: BackendEnvelope): UIMessageChunk[] {
     switch (envelope.kind) {
       case "assistant_text":
@@ -92,10 +116,17 @@ export function createTranslator(runId: string): {
         // `reasoning` is retained solely to render historical runs created
         // before this protocol split. New backend output uses
         // `assistant_text`; no private chain-of-thought is sent to the UI.
-        return envelope.text ? textDeltas(envelope.text) : [];
+        return envelope.text ? [...closeReasoning(), ...textDeltas(envelope.text)] : [];
+
+      case "provider_reasoning":
+        // Only provider-emitted thinking arrives here. It is an independent
+        // UIMessage part, never concatenated into the assistant answer.
+        return envelope.text
+          ? reasoningDeltas(envelope.text, Math.max(0, envelope.step ?? 0))
+          : [];
 
       case "activity":
-        return envelope.text ? [{
+        return envelope.text ? [...closeReasoning(), {
           type: "data-activity",
           id: `activity-${envelope.sequence ?? `${envelope.stage ?? "event"}-${envelope.text.slice(0, 48)}`}`,
           data: { stage: envelope.stage ?? "working", text: envelope.text },
@@ -104,6 +135,7 @@ export function createTranslator(runId: string): {
       case "tool_intent": {
         if (!envelope.tool_call_id || !envelope.tool_name) return [];
         return [
+          ...closeReasoning(),
           { type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name, dynamic: true },
           { type: "tool-input-available", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name, input: envelope.input ?? {}, dynamic: true },
         ];
@@ -111,16 +143,16 @@ export function createTranslator(runId: string): {
 
       case "tool_started":
         if (!envelope.tool_call_id) return [];
-        return [{ type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name ?? "unknown", dynamic: true }];
+        return [...closeReasoning(), { type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name ?? "unknown", dynamic: true }];
 
       case "tool_result":
       case "tool_completed":
         if (!envelope.tool_call_id) return [];
-        return [{ type: "tool-output-available", toolCallId: envelope.tool_call_id, output: envelope.output ?? "", dynamic: true }];
+        return [...closeReasoning(), { type: "tool-output-available", toolCallId: envelope.tool_call_id, output: envelope.output ?? "", dynamic: true }];
 
       case "tool_failed":
         if (!envelope.tool_call_id) return [];
-        return [{ type: "tool-output-error", toolCallId: envelope.tool_call_id, errorText: envelope.error ?? "unknown error", dynamic: true }];
+        return [...closeReasoning(), { type: "tool-output-error", toolCallId: envelope.tool_call_id, errorText: envelope.error ?? "unknown error", dynamic: true }];
 
       case "subagent_started":
       case "subagent_state":
@@ -179,12 +211,13 @@ export function createTranslator(runId: string): {
         if (runState === "completed") {
           if (state.finished) return [];
           state.finished = true;
-          return [...closeText(), runStatePart, { type: "finish" }];
+          return [...closeReasoning(), ...closeText(), runStatePart, { type: "finish" }];
         }
         if (["failed", "cancelled", "interrupted"].includes(runState)) {
           if (state.finished) return [];
           state.finished = true;
           return [
+            ...closeReasoning(),
             ...closeText(),
             runStatePart,
             { type: "error", errorText: envelope.error ?? `run ${runState}` },

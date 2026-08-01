@@ -56,6 +56,11 @@ RUN_DEADLINE_SECONDS = int(os.environ.get("MUNIN_LIVE_SMOKE_RUN_DEADLINE_SECONDS
 MAX_ATTEMPTS = int(os.environ.get("MUNIN_LIVE_SMOKE_MAX_ATTEMPTS", "3"))
 BACKOFF_BASE_SECONDS = float(os.environ.get("MUNIN_LIVE_SMOKE_BACKOFF_BASE", "8.0"))
 BACKOFF_MAX_SECONDS = float(os.environ.get("MUNIN_LIVE_SMOKE_BACKOFF_MAX", "60.0"))
+REQUIRED_TOOL_NAMES = frozenset(
+    name.strip()
+    for name in os.environ.get("MUNIN_LIVE_SMOKE_REQUIRED_TOOLS", "ldap_search,httpx_probe").split(",")
+    if name.strip()
+)
 
 # Regex of failure messages the dispatcher writes into complete_run when the
 # provider is at fault.  Anything else is treated as a Munin code regression.
@@ -182,6 +187,11 @@ def _post_chat(jar: http.cookiejar.CookieJar, csrf: str, conversation_id: str, c
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
         raise HttpError(f"POST /api/chat -> {exc.code}: {body[:400]}", exc.code, body) from exc
+    return run_id, _parse_sse_envelopes(raw)
+
+
+def _parse_sse_envelopes(raw: str) -> list[dict[str, Any]]:
+    """Parse only Munin run-event frames from an AI SDK-compatible SSE body."""
     envelopes: list[dict[str, Any]] = []
     for block in raw.split("\n\n"):
         lines = block.splitlines()
@@ -189,7 +199,65 @@ def _post_chat(jar: http.cookiejar.CookieJar, csrf: str, conversation_id: str, c
         data_lines = [line[6:] for line in lines if line.startswith("data: ")]
         if event == "run-event" and data_lines:
             envelopes.append(json.loads(data_lines[0]))
-    return run_id, envelopes
+    return envelopes
+
+
+def _resume_chat(
+    jar: http.cookiejar.CookieJar, *, conversation_id: str
+) -> list[dict[str, Any]]:
+    """Replay a waiting/resumed run through the canonical AI SDK stream route."""
+    req = urllib.request.Request(
+        f"{BASE_URL}/api/chat/{conversation_id}/stream",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "Origin": ORIGIN,
+            "Sec-Fetch-Site": "same-origin",
+        },
+        method="GET",
+    )
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    try:
+        with opener.open(req, timeout=RUN_DEADLINE_SECONDS + 60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
+        raise HttpError(f"GET /api/chat/{conversation_id}/stream -> {exc.code}: {body[:400]}", exc.code, body) from exc
+    return _parse_sse_envelopes(raw)
+
+
+def _approve_pending_human_requests(
+    jar: http.cookiejar.CookieJar,
+    *,
+    csrf: str,
+    conversation_id: str,
+    envelopes: list[dict[str, Any]],
+    resolved_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Resolve native Deep Agents HITL cards and return the durable replay."""
+    pending = [
+        item
+        for item in envelopes
+        if item.get("kind") == "human_request"
+        and str(item.get("request_id") or "") not in resolved_ids
+    ]
+    if not pending:
+        return []
+    for request in pending:
+        request_id = str(request.get("request_id") or "")
+        nonce = str(request.get("nonce") or "")
+        if not request_id or not nonce:
+            raise RuntimeError("HITL envelope did not contain a resolvable request id and nonce")
+        choices = [str(choice) for choice in request.get("choices") or []]
+        choice = next((item for item in choices if item.lower() in {"approve", "approved"}), "approve")
+        _request(
+            "POST",
+            f"/api/human-requests/{request_id}/resolve",
+            jar=jar,
+            csrf_token=csrf,
+            json_body={"choice": choice, "nonce": nonce},
+        )
+        resolved_ids.add(request_id)
+    return _resume_chat(jar, conversation_id=conversation_id)
 
 
 def _terminal_state(envelopes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -203,6 +271,33 @@ def _tool_calls(envelopes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [envelope for envelope in envelopes if envelope.get("kind") == "tool_intent"]
 
 
+def _assistant_text(envelopes: list[dict[str, Any]]) -> str:
+    return "".join(
+        str(envelope.get("text") or "")
+        for envelope in envelopes
+        if envelope.get("kind") == "assistant_text"
+    ).strip()
+
+
+def _validate_completed_run(outcome: dict[str, Any]) -> None:
+    """Assert the live agent used its catalog and emitted a final answer.
+
+    A terminal state alone is not a ReAct smoke: it can be a model that chose
+    to answer from memory, or a middleware path that ended before the planned
+    probes. Tool names are deliberately the only diagnostics retained here;
+    arguments and provider thinking are not logged by CI.
+    """
+    observed = {str(item.get("tool_name") or "") for item in outcome.get("tools") or []}
+    missing = sorted(REQUIRED_TOOL_NAMES - observed)
+    if missing:
+        raise RuntimeError(
+            "completed run did not invoke required tools: "
+            f"missing={missing}; observed={sorted(name for name in observed if name)}"
+        )
+    if not str(outcome.get("answer") or "").strip():
+        raise RuntimeError("completed run did not emit a final assistant answer")
+
+
 def _run_one_attempt(prompt: str) -> dict[str, Any]:
     """One full try; raises on hard failure, returns the terminal run on success."""
     jar = http.cookiejar.CookieJar()
@@ -210,10 +305,36 @@ def _run_one_attempt(prompt: str) -> dict[str, Any]:
     csrf = _login(jar)
     conversation_id = _create_conversation(jar, csrf, "Live LLM smoke")
     run_id, envelopes = _post_chat(jar, csrf, conversation_id, prompt)
+    # Active tools use native Deep Agents interrupts. Approve each durable
+    # request through the authenticated endpoint, then resume from the
+    # persisted LangGraph checkpoint instead of fabricating a tool result.
+    resolved_human_request_ids: set[str] = set()
+    for _ in range(4):
+        terminal = _terminal_state(envelopes)
+        if terminal:
+            break
+        if not any(item.get("kind") == "human_request" for item in envelopes):
+            break
+        envelopes.extend(
+            _approve_pending_human_requests(
+                jar,
+                csrf=csrf,
+                conversation_id=conversation_id,
+                envelopes=envelopes,
+                resolved_ids=resolved_human_request_ids,
+            )
+        )
     terminal = _terminal_state(envelopes)
     tools = _tool_calls(envelopes)
+    answer = _assistant_text(envelopes)
     print(f"::notice::live-llm-smoke: turn finished run_id={run_id} state={terminal.get('state', 'unknown')} tools={len(tools)}")
-    return {"run": terminal, "tools": tools, "conversation_id": conversation_id, "run_id": run_id}
+    return {
+        "run": terminal,
+        "tools": tools,
+        "answer": answer,
+        "conversation_id": conversation_id,
+        "run_id": run_id,
+    }
 
 
 def _classify_failure(outcome: dict[str, Any]) -> str:
@@ -235,9 +356,6 @@ def _classify_failure(outcome: dict[str, Any]) -> str:
     # happened before the ReAct loop got going — almost always provider/auth.
     # This is the realistic shape of provider-side outages (TLS/auth/quota/
     # feed) since MuninAgent.respond raises before any tool.
-    tools = outcome.get("tools", []) or []
-    if not tools:
-        return "transient"
     return "hard"
 
 
@@ -259,8 +377,7 @@ def main() -> int:
             if run.get("state") == "completed":
                 tools = outcome.get("tools") or []
                 print(f"::notice::live-llm-smoke: run {outcome['run_id']} completed with {len(tools)} tool call(s)")
-                if not tools:
-                    print("::warning::live-llm-smoke: completed run produced 0 tool calls; the agent may not have invoked the catalog")
+                _validate_completed_run(outcome)
                 print("OK live LLM ReAct turn completed end-to-end")
                 return 0
             last_failure = outcome
@@ -280,6 +397,8 @@ def main() -> int:
         run = last_failure.get("run") or {}
         if run:
             print(f"::error::  run_id={last_failure.get('run_id')} state={run.get('state')}")
+            if run.get("error"):
+                print(f"::error::  terminal_error={run['error']}")
         if last_failure.get("exc"):
             print(f"::error::  exception: {last_failure['exc']}")
     return 1

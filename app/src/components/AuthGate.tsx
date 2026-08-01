@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   type FormEvent,
   type ReactNode,
@@ -135,7 +136,7 @@ function LoginForm({
   return (
     <main className="grid min-h-screen bg-bg text-body md:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
       <section className="hidden flex-col justify-center border-r border-border px-16 py-24 md:flex">
-        <img
+        <Image
           src="/raven-mark.png"
           width={76}
           height={76}

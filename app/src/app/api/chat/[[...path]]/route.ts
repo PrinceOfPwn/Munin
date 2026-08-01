@@ -22,6 +22,9 @@ const DOTTED_KIND_MAP: Record<string, BackendEnvelope["kind"]> = {
   "agent.text": "assistant_text",
   "agent.activity": "activity",
   "agent.reasoning": "reasoning",
+  "reasoning.provider_reasoning": "provider_reasoning",
+  "reasoning.operational_summary": "activity",
+  "reasoning.operator_guidance": "guidance",
   "tool.intent": "tool_intent",
   "tool.started": "tool_started",
   "tool.running": "tool_started",
@@ -44,7 +47,9 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
   let resolvedKind = DOTTED_KIND_MAP[event.kind];
   if (!resolvedKind) {
     if (event.kind.startsWith("reasoning.")) {
-      resolvedKind = "reasoning";
+      resolvedKind = event.kind.endsWith("provider_reasoning")
+        ? "provider_reasoning"
+        : "reasoning";
     } else if (event.kind.startsWith("human_request.")) {
       resolvedKind = "human_request";
     } else if (event.kind.startsWith("run.")) {
@@ -58,7 +63,7 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
 
   const topLevelFields = ["run_id", "sequence", "text", "stage", "tool_name", "tool_call_id", "input",
     "output", "error", "subagent_id", "name", "state", "request_id", "args", "resolution",
-    "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds"];
+    "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds", "provider", "step"];
 
   // Cast via `unknown` because BackendEnvelope is a typed interface without an
   // index signature; assigning dynamic string-keyed fields onto it requires an

@@ -23,6 +23,7 @@ import type {
   ChatStatus,
   DataUIPart,
   DynamicToolUIPart,
+  ReasoningUIPart,
   StepStartUIPart,
   TextUIPart,
   UIMessage,
@@ -35,6 +36,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "@/components/ui/sonner";
 
 import { OperationalTracePart } from "@/components/chat/blocks/parts/OperationalTracePart";
+import { ReasoningPart } from "@/components/chat/blocks/parts/ReasoningPart";
 import { ToolInvocationPart } from "@/components/chat/blocks/parts/ToolInvocationPart";
 import type { ToolInvocationState } from "@/components/chat/blocks/parts/ToolInvocationPart";
 import { SubagentPresencePart } from "@/components/chat/blocks/parts/SubagentPresencePart";
@@ -100,6 +102,7 @@ interface ActivityData {
 // any of these at runtime; we distinguish them by their `type` string.
 type AnyUIPart =
   | TextUIPart
+  | ReasoningUIPart
   | DynamicToolUIPart
   | StepStartUIPart
   | DataUIPart<Record<string, unknown>>;
@@ -328,6 +331,11 @@ function PartRenderer({
   if (part.type === "data-heartbeat") {
     // Transient heartbeats are not rendered inline.
     return null;
+  }
+
+  if (part.type === "reasoning") {
+    const reasoning = part as ReasoningUIPart;
+    return reasoning.text ? <ReasoningPart key={key} id={key} text={reasoning.text} /> : null;
   }
 
   if (part.type === "data-activity") {

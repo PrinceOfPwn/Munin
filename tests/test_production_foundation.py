@@ -196,6 +196,76 @@ def test_reasoning_redaction_envelope_profiles_and_recorded_replay(production_st
     assert replay["egress_enabled"] is False
 
 
+@pytest.mark.asyncio
+async def test_provider_reasoning_is_durable_and_replayed_to_the_ui_stream(production_store):
+    """Only provider-emitted thinking is retained as a reasoning event.
+
+    The test covers the durable hand-off, not a private backend inference:
+    ``provider_reasoning`` is persisted separately from the answer and the
+    reconnect/replay stream emits that same typed envelope.
+    """
+    from munin.production.chat import (
+        _DetachedChatRequest,
+        _claim_direct,
+        _persist_envelope,
+        _stream_idempotent_replay,
+    )
+
+    operator = production_store.create_user(
+        username="operator", password="strong passphrase", role="operator"
+    )
+    conversation = production_store.create_conversation(owner_id=operator["id"], title="Reasoning replay")
+    turn = production_store.create_turn(
+        actor_id=operator["id"],
+        conversation_id=conversation["id"],
+        content="Inspect the record",
+        idempotency_key="provider-reasoning-replay-001",
+    )
+    run_id = turn["run"]["id"]
+    lease_token, assistant_message_id = _claim_direct(production_store, run_id=run_id)
+    _persist_envelope(
+        production_store,
+        {
+            "kind": "provider_reasoning",
+            "run_id": run_id,
+            "text": "The provider explicitly emitted this thinking delta.",
+            "provider": "test-provider",
+            "step": 3,
+        },
+        run_id=run_id,
+        assistant_message_id=assistant_message_id,
+        assistant_buffer=[],
+    )
+    assert production_store.complete_run(
+        run_id=run_id,
+        lease_token=lease_token,
+        content="Final answer",
+        outcome="completed",
+    )
+
+    detail = production_store.get_run_detail_for_actor(actor_id=operator["id"], run_id=run_id)
+    assert len(detail["reasoning"]) == 1
+    persisted = detail["reasoning"][0]
+    assert persisted["kind"] == "provider_reasoning"
+    assert persisted["content"] == "The provider explicitly emitted this thinking delta."
+    assert persisted["provider"] == "test-provider"
+    assert persisted["step"] == 3
+
+    frames = [
+        frame
+        async for frame in _stream_idempotent_replay(
+            _DetachedChatRequest(),
+            store=production_store,
+            actor_id=operator["id"],
+            run_id=run_id,
+        )
+    ]
+    replay = b"".join(frames).decode("utf-8")
+    assert '"kind":"provider_reasoning"' in replay
+    assert '"provider":"test-provider"' in replay
+    assert '"step":3' in replay
+
+
 def test_human_gate_tools_subagents_retry_and_recorded_branch(production_store):
     from munin.production.chat import _claim_direct
 

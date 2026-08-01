@@ -7,8 +7,8 @@ The supervisor is a ``deepagents.create_deep_agent`` graph:
   + Autonomy Kernel usage instructions — see ``compose_munin_prompt``.
 * ``tools`` = Tool Gateway (every fixed MCP / domain / gen__* tool as
   LangChain StructuredTools) + Autonomy Kernel meta-tools.
-* ``middleware`` = operator guidance, repetition guard, progress emission —
-  real LangChain 1.x AgentMiddleware hooks.
+* ``middleware`` = operator guidance, standard LangChain call-limit guards,
+  and progress emission.
 * ``checkpointer`` = the application-lifetime AsyncSqliteSaver on
   ``MUNIN_CHECKPOINT_DB`` when the ASGI server provides it.
 
@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import threading
 from typing import Any
 
@@ -119,6 +118,8 @@ def _supervisor_fingerprint(
         f"gen={_gen_fingerprint(state) if include_generated else frozenset()}",
         f"soul={_soul_hash(soul_prompt)}",
         f"incgen={int(bool(include_generated))}",
+        f"model_limit={getattr(getattr(state, 'settings', None), 'agent_model_call_limit', 24)}",
+        f"tool_limit={getattr(getattr(state, 'settings', None), 'agent_tool_call_limit', 64)}",
     ]
     return "|".join(parts)
 
@@ -247,11 +248,15 @@ def build_munin_supervisor(
     construction-time fallbacks (used by the single-build langgraph dev-server
     path where contextvars are never set).
     """
+    from langchain.agents.middleware import (  # noqa: PLC0415
+        ModelCallLimitMiddleware,
+        ToolCallLimitMiddleware,
+    )
+
     from .autonomy.kernel import AutonomyKernel  # noqa: PLC0415
     from .middleware import (  # noqa: PLC0415
         OperatorGuidanceMiddleware,
         ProgressEmitMiddleware,
-        RepetitionGuardMiddleware,
     )
     from .tool_gateway import gateway_tools  # noqa: PLC0415
     from .tool_gateway import approval_policy_for_tools  # noqa: PLC0415
@@ -285,12 +290,21 @@ def build_munin_supervisor(
 
     middleware: list[Any] = [
         OperatorGuidanceMiddleware(run_id=run_id, store=state),
-        RepetitionGuardMiddleware(),
         ProgressEmitMiddleware(
             progress_sink=progress_sink if progress_sink is not None else _noop_sink,
             run_id=run_id,
         ),
     ]
+    # Deep Agents composes standard LangChain middleware at graph-build time.
+    # These caps count actual model/tool executions, unlike the retired
+    # content-only repetition guard which treated distinct tool calls with
+    # empty assistant text as a loop.
+    model_limit = max(0, int(getattr(state.settings, "agent_model_call_limit", 24)))
+    tool_limit = max(0, int(getattr(state.settings, "agent_tool_call_limit", 64)))
+    if model_limit:
+        middleware.insert(1, ModelCallLimitMiddleware(run_limit=model_limit, exit_behavior="end"))
+    if tool_limit:
+        middleware.insert(2 if model_limit else 1, ToolCallLimitMiddleware(run_limit=tool_limit))
 
     tools = gateway_tools(state, include_generated=include_generated)
     durable_checkpointer = getattr(state, "langgraph_checkpointer", None) or _get_checkpointer()

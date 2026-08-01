@@ -2,7 +2,7 @@
 import pytest
 
 def test_langgraph_command_exists():
-    langgraph = pytest.importorskip("langgraph")
+    pytest.importorskip("langgraph")
     try:
         from langgraph.types import Command
         assert Command is not None

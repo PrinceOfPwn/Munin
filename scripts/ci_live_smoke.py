@@ -29,11 +29,17 @@ LDAP_TARGET = os.environ.get("MUNIN_SMOKE_LDAP_TARGET", "ldap")
 APACHE_TARGET = os.environ.get("MUNIN_SMOKE_APACHE_TARGET", "apache")
 
 
-def _endpoint() -> str:
+def _endpoint(*, via_proxy: bool = False) -> str:
+    """Return the MCP endpoint without relying on redirect behaviour.
+
+    FastMCP is mounted with a trailing slash, while Next's catch-all BFF route
+    owns the slashless ``/mcp`` path. A POST redirect is not a safe MCP
+    transport operation: it can discard the body or session header.
+    """
     base = BASE_URL.rstrip("/")
     if base.endswith("/mcp"):
-        return base + "/"
-    return f"{base}/mcp/"
+        return base if via_proxy else base + "/"
+    return f"{base}/mcp" if via_proxy else f"{base}/mcp/"
 
 
 def _read_rpc_response(response: Any) -> dict[str, Any]:
@@ -48,8 +54,9 @@ def _read_rpc_response(response: Any) -> dict[str, Any]:
 
 
 class McpClient:
-    def __init__(self) -> None:
+    def __init__(self, *, via_proxy: bool = False) -> None:
         self.session_id = ""
+        self.endpoint = _endpoint(via_proxy=via_proxy)
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -67,7 +74,7 @@ class McpClient:
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             request = urllib.request.Request(
-                _endpoint(),
+                self.endpoint,
                 data=json.dumps(
                     {
                         "jsonrpc": "2.0",
@@ -89,14 +96,22 @@ class McpClient:
                 if self.session_id:
                     return
                 last_error = RuntimeError("initialize response has no mcp-session-id")
-            except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+            except urllib.error.HTTPError as exc:
+                if 300 <= exc.code < 400:
+                    location = exc.headers.get("Location", "")
+                    raise RuntimeError(
+                        f"MCP initialize redirected ({exc.code}) from {self.endpoint} to {location!r}; "
+                        "use the endpoint owned by this transport"
+                    ) from exc
+                last_error = exc
+            except (OSError, urllib.error.URLError, TimeoutError, ValueError) as exc:
                 last_error = exc
             time.sleep(2)
         raise RuntimeError(f"MCP did not initialize within 90 seconds: {last_error}")
 
     def rpc(self, request_id: int, method: str, params: dict[str, Any], timeout: int = 90) -> dict[str, Any]:
         request = urllib.request.Request(
-            _endpoint(),
+            self.endpoint,
             data=json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode(),
             headers=self._headers(),
         )
@@ -127,7 +142,16 @@ class McpClient:
         except ValueError as exc:
             raise RuntimeError(f"{name} returned non-JSON tool content: {text[:500]!r}") from exc
         if require_ok and not payload.get("ok"):
-            raise RuntimeError(f"{name} failed: {payload.get('error') or payload.get('summary')}")
+            # CI needs the actionable subprocess tail, not merely a generic
+            # ``command_failed`` code.  Do not include the command or request
+            # arguments here: either could contain an operator secret.
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            stderr = str(data.get("stderr_tail") or data.get("stderr") or "").strip()
+            detail = f"; stderr={stderr[-600:]!r}" if stderr else ""
+            raise RuntimeError(
+                f"{name} failed: {payload.get('error') or payload.get('summary')}"
+                f"; return_code={data.get('return_code')!r}{detail}"
+            )
         return payload
 
 
@@ -147,7 +171,7 @@ def main() -> None:
     parser.add_argument("--require-turso", action="store_true", help="fail unless diagnostics reports a libsql backend")
     args = parser.parse_args()
 
-    client = McpClient()
+    client = McpClient(via_proxy=args.proxy_only)
     client.initialize()
     catalog = client.rpc(2, "tools/list", {})
     required_tools = {
@@ -199,7 +223,7 @@ def main() -> None:
     print("OK diagnostics reachable through MCP")
 
     if args.proxy_only:
-        print(f"OK same-origin GUI proxy: {_endpoint()}")
+        print(f"OK same-origin GUI proxy: {client.endpoint}")
         return
 
     conversation_id = f"actions_e2e_conversation_{os.environ.get('GITHUB_RUN_ID', 'manual')}"

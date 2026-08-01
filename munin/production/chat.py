@@ -24,7 +24,7 @@ Envelope contract (mirrors the pre-migration wire format so
 * ``{"kind": "tool_failed", "tool_call_id": ..., "error": ...}`` — exception
 
 Envelopes are emitted by ``ProgressEmitMiddleware`` (tool lifecycle) and
-``runtime_adapter.translate_event`` (reasoning + run_state), so this handler
+``runtime_adapter.translate_events`` (provider reasoning + run_state), so this handler
 is only responsible for framing them as SSE and persisting side-effects.
 
 Follow-up (post-Fase 5): ``POST /api/chat`` now also handles *reconnect* on
@@ -256,6 +256,19 @@ def _persist_envelope(
                     content="".join(assistant_buffer),
                 )
             return
+        if kind == "provider_reasoning":
+            text = str(envelope.get("text") or "")
+            if text:
+                store.append_reasoning_event(
+                    run_id=run_id,
+                    kind="provider_reasoning",
+                    content=text,
+                    provider=str(envelope.get("provider") or "openai-compatible"),
+                    persistence_enabled=True,
+                    agent_name="munin",
+                    step=max(0, int(envelope.get("step") or 0)),
+                )
+            return
         if kind == "activity":
             text = str(envelope.get("text") or "").strip()
             if text:
@@ -474,14 +487,21 @@ def _envelope_from_event(
         return None
 
     if kind.startswith("reasoning."):
-        # Assistant text is persisted in the placeholder, not in
-        # ``reasoning_events``. The rows here are explicit, policy-cleared
-        # operational telemetry (or operator guidance), never private CoT.
+        # Assistant text lives in the placeholder. Provider-emitted reasoning
+        # and the operational timeline each have their own durable event type.
         detail = reasoning_by_eid.get(eid) or {}
         text = str(detail.get("content") or "")
         if not text:
             return None
         detail_kind = str(detail.get("kind") or "")
+        if detail_kind == "provider_reasoning":
+            return {
+                "kind": "provider_reasoning",
+                "run_id": run_id,
+                "text": text,
+                "provider": str(detail.get("provider") or "openai-compatible"),
+                "step": max(0, int(detail.get("step") or 0)),
+            }
         if detail_kind == "operational_summary":
             return {"kind": "activity", "run_id": run_id, "text": text}
         if detail_kind == "operator_guidance":
@@ -860,19 +880,20 @@ async def _stream_chat(
     final_error: str | None = None
     paused_for_human = False
 
+    runner_stream = supervisor_runner(
+        prompt,
+        run_id=run_id,
+        conversation_id=conversation_id,
+        store=shared_state,
+        model=model,
+        conversation_history=conversation_history,
+        thread_id=conversation_id or run_id,
+        human_request_store=store,
+        resume_decisions=resume_decisions,
+        resume_from_checkpoint=resume_from_checkpoint,
+    )
     try:
-        async for envelope in supervisor_runner(
-            prompt,
-            run_id=run_id,
-            conversation_id=conversation_id,
-            store=shared_state,
-            model=model,
-            conversation_history=conversation_history,
-            thread_id=conversation_id or run_id,
-            human_request_store=store,
-            resume_decisions=resume_decisions,
-            resume_from_checkpoint=resume_from_checkpoint,
-        ):
+        async for envelope in runner_stream:
             if lease_lost.is_set():
                 # Another worker has fenced us or an operator cancelled the
                 # run.  Do not persist or execute another graph step.
@@ -955,6 +976,11 @@ async def _stream_chat(
         )
         final_state = "failed"
     finally:
+        # Close the runner in the request task before a HITL break. Relying on
+        # implicit async-generator finalization can move ContextVar cleanup to
+        # Starlette's finalizer task and lose the per-run context.
+        with suppress(Exception):
+            await runner_stream.aclose()
         lease_heartbeat_stop.set()
         lease_heartbeat.cancel()
         with suppress(asyncio.CancelledError):

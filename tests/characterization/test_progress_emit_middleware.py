@@ -2,7 +2,7 @@
 
 Two channels, one envelope format:
 * middleware awrap_tool_call → tool_intent / tool_result / tool_failed
-* runtime_adapter.translate_event → assistant_text / activity / run_state
+* runtime_adapter.translate_events → provider_reasoning / assistant_text / activity / run_state
 """
 import pytest
 from unittest.mock import MagicMock
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 pytest.importorskip("munin.core.middleware")
 
 from munin.core.middleware.progress_emit import ProgressEmitMiddleware
-from munin.core.runtime_adapter import translate_event
+from munin.core.runtime_adapter import translate_event, translate_events
 
 
 def _request(name: str, args: dict, call_id: str = "call-1"):
@@ -69,29 +69,50 @@ def test_chat_model_stream_translates_to_assistant_text_not_private_reasoning():
     assert "thinking about target" in envelope["text"]
 
 
-def test_model_stream_never_forwards_provider_reasoning_blocks_or_think_tags():
+def test_model_stream_preserves_explicit_provider_reasoning_separate_from_answer():
     state: dict = {}
     reasoning_block = type(
         "Chunk", (), {"content": [{"type": "reasoning", "text": "private"}]}
     )()
-    assert translate_event(
+    assert translate_events(
         {"event": "on_chat_model_stream", "data": {"chunk": reasoning_block}},
         run_id="run-t",
         thinking_state=state,
-    ) is None
+    ) == [{
+        "kind": "provider_reasoning",
+        "run_id": "run-t",
+        "text": "private",
+        "provider": "openai-compatible",
+        "step": 1,
+    }]
 
     first = type("Chunk", (), {"content": "<think>private"})()
     second = type("Chunk", (), {"content": " thought</think>visible"})()
-    assert translate_event(
+    assert translate_events(
         {"event": "on_chat_model_stream", "data": {"chunk": first}},
         run_id="run-t",
         thinking_state=state,
-    ) is None
-    assert translate_event(
+    ) == [{
+        "kind": "provider_reasoning",
+        "run_id": "run-t",
+        "text": "private",
+        "provider": "openai-compatible",
+        "step": 1,
+    }]
+    assert translate_events(
         {"event": "on_chat_model_stream", "data": {"chunk": second}},
         run_id="run-t",
         thinking_state=state,
-    ) == {"kind": "assistant_text", "run_id": "run-t", "text": "visible"}
+    ) == [
+        {
+            "kind": "provider_reasoning",
+            "run_id": "run-t",
+            "text": " thought",
+            "provider": "openai-compatible",
+            "step": 1,
+        },
+        {"kind": "assistant_text", "run_id": "run-t", "text": "visible"},
+    ]
 
 
 def test_chat_model_start_translates_to_safe_operational_activity():

@@ -70,6 +70,10 @@ export const Avatar = React.forwardRef<HTMLSpanElement, AvatarProps>(
         {...props}
       >
         {src ? (
+          // Avatar URLs may be operator-provided and intentionally do not use
+          // Next's server-side optimizer, which would need a broad remote host
+          // allowlist. The caller remains responsible for trusted sources.
+          // eslint-disable-next-line @next/next/no-img-element
           <img
             src={src}
             alt={name}

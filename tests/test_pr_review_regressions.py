@@ -468,11 +468,9 @@ def test_graph_diagnostics_imports_the_top_level_subagent_catalog(store, monkeyp
 # tests in this file.
 
 
-# test_repetition_nudge_accepts_one_changed_next_call was removed in Fase 2:
-# it exercised the MuninAgent.respond() repetition guard directly.  The guard
-# lives in the supervisor middleware chain now
-# (``RepetitionGuardMiddleware``) and is covered by
-# tests/characterization/test_repetition_guard_middleware.py.
+# The legacy content-only repetition guard was removed in favour of
+# Deep Agents/LangChain's model- and tool-call budget middleware. The
+# supervisor assembly tests cover that standard integration.
 
 
 def test_cors_preflight_bypasses_bearer_and_exposes_session_header():

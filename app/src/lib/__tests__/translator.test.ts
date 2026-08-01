@@ -17,6 +17,28 @@ function makeEnvelope(
 }
 
 describe("createTranslator - text part lifecycle", () => {
+  it("keeps provider-emitted reasoning in a separate AI SDK reasoning part", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({ kind: "provider_reasoning", text: "I will inspect the target.", step: 2 }),
+    );
+    expect(chunks).toEqual([
+      { type: "reasoning-start", id: "reasoning-run-x-2" },
+      { type: "reasoning-delta", id: "reasoning-run-x-2", delta: "I will inspect the target." },
+    ]);
+  });
+
+  it("ends reasoning before beginning the final assistant text", () => {
+    const { translate } = createTranslator("run-x");
+    translate(makeEnvelope({ kind: "provider_reasoning", text: "Checking evidence.", step: 1 }));
+    const chunks = translate(makeEnvelope({ kind: "assistant_text", text: "The check passed." }));
+    expect(chunks).toEqual([
+      { type: "reasoning-end", id: "reasoning-run-x-1" },
+      { type: "text-start", id: "text-run-x" },
+      { type: "text-delta", id: "text-run-x", delta: "The check passed." },
+    ]);
+  });
+
   it("emits text-start + text-delta for the first assistant text envelope", () => {
     const { translate } = createTranslator("run-x");
     const chunks = translate(makeEnvelope({ kind: "assistant_text", text: "Analyzing..." }));

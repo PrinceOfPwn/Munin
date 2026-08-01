@@ -1,6 +1,5 @@
 """One worker fails; others complete; batch not aborted."""
 import pytest
-import asyncio
 pytest.importorskip("munin.core.parallel.send_workers")
 
 from munin.core.parallel.send_workers import make_worker_node, WorkerState

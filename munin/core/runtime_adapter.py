@@ -41,73 +41,134 @@ def _history_to_messages(history: Iterable[dict] | None) -> list[Any]:
     return messages
 
 
-def _display_text(content: Any, thinking_state: dict[str, Any]) -> str:
-    """Return only normal assistant text, excluding provider private thought.
+def _trailing_tag_prefix(text: str, tag: str) -> int:
+    """Return the suffix length that could become ``tag`` in the next delta."""
+    lowered = text.lower()
+    for length in range(min(len(text), len(tag) - 1), 0, -1):
+        if tag.startswith(lowered[-length:]):
+            return length
+    return 0
 
-    Providers use both typed reasoning blocks and raw ``<think>`` conventions.
-    The state machine matters because a tag/body can be split across deltas.
+
+def _split_think_tags(content: str, thinking_state: dict[str, Any]) -> tuple[str, str]:
+    """Split provider-emitted ``<think>`` deltas into reasoning and answer.
+
+    This is deliberately limited to explicit provider output. It does not infer
+    latent chain-of-thought from ordinary assistant prose. Partial XML-like tags
+    are retained across chunks so a network boundary cannot leak tag fragments
+    into the final answer or truncate the visible provider reasoning.
     """
-    if isinstance(content, list):
-        visible: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                visible.append(block)
-            elif isinstance(block, dict) and str(block.get("type") or "") in {"text", "output_text"}:
-                text = block.get("text")
-                if isinstance(text, str):
-                    visible.append(text)
-        content = "".join(visible)
-    elif isinstance(content, dict):
-        if str(content.get("type") or "") not in {"text", "output_text"}:
-            return ""
-        content = content.get("text")
-    if not isinstance(content, str) or not content:
-        return ""
-
     pending = str(thinking_state.get("tag_prefix") or "") + content
     thinking_state["tag_prefix"] = ""
-    output: list[str] = []
+    reasoning: list[str] = []
+    visible: list[str] = []
     cursor = 0
     in_think = bool(thinking_state.get("in_think"))
-    lower = pending.lower()
+    lowered = pending.lower()
+
     while cursor < len(pending):
         if in_think:
-            end = lower.find("</think>", cursor)
+            end = lowered.find("</think>", cursor)
             if end < 0:
+                tail = pending[cursor:]
+                prefix = _trailing_tag_prefix(tail, "</think>")
+                reasoning.append(tail[:-prefix] if prefix else tail)
+                if prefix:
+                    thinking_state["tag_prefix"] = tail[-prefix:]
                 thinking_state["in_think"] = True
-                return "".join(output)
+                break
+            reasoning.append(pending[cursor:end])
             cursor = end + len("</think>")
             in_think = False
             thinking_state["in_think"] = False
             continue
-        start = lower.find("<think", cursor)
+
+        start = lowered.find("<think", cursor)
         if start < 0:
             tail = pending[cursor:]
-            for prefix_len in range(min(len(tail), len("<think") - 1), 0, -1):
-                if "<think".startswith(tail[-prefix_len:].lower()):
-                    output.append(tail[:-prefix_len])
-                    thinking_state["tag_prefix"] = tail[-prefix_len:]
-                    return "".join(output)
-            output.append(tail)
+            prefix = _trailing_tag_prefix(tail, "<think")
+            visible.append(tail[:-prefix] if prefix else tail)
+            if prefix:
+                thinking_state["tag_prefix"] = tail[-prefix:]
             break
-        output.append(pending[cursor:start])
-        closing = lower.find(">", start)
+        visible.append(pending[cursor:start])
+        closing = lowered.find(">", start)
         if closing < 0:
             thinking_state["tag_prefix"] = pending[start:]
-            return "".join(output)
+            break
         cursor = closing + 1
         in_think = True
         thinking_state["in_think"] = True
-    return "".join(output)
+
+    return "".join(reasoning), "".join(visible)
 
 
-def translate_event(
+def _block_text(block: dict[str, Any]) -> str:
+    for key in ("text", "content", "reasoning_content", "thinking"):
+        value = block.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _stream_parts(chunk: Any, thinking_state: dict[str, Any]) -> tuple[list[str], list[str], str]:
+    """Extract explicit provider reasoning and normal assistant text from a chunk."""
+    reasoning: list[str] = []
+    visible: list[str] = []
+    provider = ""
+    additional = getattr(chunk, "additional_kwargs", None)
+    if isinstance(additional, dict):
+        for key in ("reasoning_content", "reasoning", "thinking", "reasoning_summary"):
+            value = additional.get(key)
+            if isinstance(value, str) and value:
+                reasoning.append(value)
+        provider = str(additional.get("provider") or additional.get("model_provider") or "")
+    metadata = getattr(chunk, "response_metadata", None)
+    if isinstance(metadata, dict):
+        provider = provider or str(metadata.get("provider") or metadata.get("model_provider") or "")
+
+    content = getattr(chunk, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                tagged_reasoning, text = _split_think_tags(block, thinking_state)
+                if tagged_reasoning:
+                    reasoning.append(tagged_reasoning)
+                if text:
+                    visible.append(text)
+            elif isinstance(block, dict):
+                block_type = str(block.get("type") or "")
+                text = _block_text(block)
+                if not text:
+                    continue
+                if block_type in {"reasoning", "thinking", "reasoning_content", "reasoning_summary"}:
+                    reasoning.append(text)
+                elif block_type in {"text", "output_text"}:
+                    tagged_reasoning, answer = _split_think_tags(text, thinking_state)
+                    if tagged_reasoning:
+                        reasoning.append(tagged_reasoning)
+                    if answer:
+                        visible.append(answer)
+    elif isinstance(content, str) and content:
+        tagged_reasoning, text = _split_think_tags(content, thinking_state)
+        if tagged_reasoning:
+            reasoning.append(tagged_reasoning)
+        if text:
+            visible.append(text)
+
+    return reasoning, visible, provider or "openai-compatible"
+
+
+def translate_events(
     event: dict, *, run_id: str, thinking_state: dict[str, Any] | None = None
-) -> dict | None:
-    """Translate one LangGraph astream_events(v2) event into a Munin envelope.
+) -> list[dict]:
+    """Translate one LangGraph event into zero or more Munin envelopes.
 
-    Returns None for events with no user-facing meaning.
+    A provider chunk can carry both an explicit reasoning delta and normal
+    assistant text. Keeping them as distinct envelopes is essential for the
+    AI SDK UIMessage protocol and for durable replay.
     """
+    thinking_state = thinking_state if thinking_state is not None else {}
     event_type = event.get("event", "")
     name = event.get("name", "")
 
@@ -127,30 +188,39 @@ def translate_event(
                 if isinstance(actions, list):
                     requests.extend(action for action in actions if isinstance(action, dict))
             if requests:
-                return {"kind": "human_interrupt", "run_id": run_id, "actions": requests}
+                return [{"kind": "human_interrupt", "run_id": run_id, "actions": requests}]
 
     if event_type == "on_chat_model_stream":
         chunk = event.get("data", {}).get("chunk")
-        content = getattr(chunk, "content", None)
-        if content:
-            text = _display_text(content, thinking_state if thinking_state is not None else {})
-            # A model token is the assistant's response, not its private
-            # reasoning.  Never relabel it as chain-of-thought merely to make
-            # it visible in the UI.
-            if text:
-                return {"kind": "assistant_text", "run_id": run_id, "text": text}
-        return None
+        reasoning, text, provider = _stream_parts(chunk, thinking_state)
+        step = max(1, int(thinking_state.get("model_step") or 1))
+        envelopes: list[dict] = []
+        for delta in reasoning:
+            if delta:
+                envelopes.append(
+                    {
+                        "kind": "provider_reasoning",
+                        "run_id": run_id,
+                        "text": delta,
+                        "provider": provider,
+                        "step": step,
+                    }
+                )
+        for delta in text:
+            if delta:
+                envelopes.append({"kind": "assistant_text", "run_id": run_id, "text": delta})
+        return envelopes
 
     if event_type == "on_chat_model_start":
-        # This is deliberate operational telemetry: it tells the operator
-        # that the graph has entered a planning/model step without exposing
-        # hidden chain-of-thought or provider reasoning traces.
-        return {
-            "kind": "activity",
-            "run_id": run_id,
-            "stage": "planning",
-            "text": "Planning the next authorized action",
-        }
+        thinking_state["model_step"] = int(thinking_state.get("model_step") or 0) + 1
+        return [
+            {
+                "kind": "activity",
+                "run_id": run_id,
+                "stage": "planning",
+                "text": "Planning the next authorized action",
+            }
+        ]
 
     if event_type == "on_chain_end" and name in _ROOT_GRAPH_NAMES:
         output = event.get("data", {}).get("output")
@@ -159,26 +229,36 @@ def translate_event(
             messages = output.get("messages") or []
             if messages:
                 last = messages[-1]
-                final_text = _display_text(
-                    getattr(last, "content", "") or "",
-                    thinking_state if thinking_state is not None else {},
-                )
-        return {
-            "kind": "run_state",
-            "run_id": run_id,
-            "state": "completed",
-            "content": final_text,
-        }
+                _reasoning, text, _provider = _stream_parts(last, thinking_state)
+                final_text = "".join(text)
+        return [
+            {
+                "kind": "run_state",
+                "run_id": run_id,
+                "state": "completed",
+                "content": final_text,
+            }
+        ]
 
     if event_type == "on_chain_error":
-        return {
-            "kind": "run_state",
-            "run_id": run_id,
-            "state": "failed",
-            "error": str(event.get("data", {}).get("error", "unknown")),
-        }
+        return [
+            {
+                "kind": "run_state",
+                "run_id": run_id,
+                "state": "failed",
+                "error": str(event.get("data", {}).get("error", "unknown")),
+            }
+        ]
 
-    return None
+    return []
+
+
+def translate_event(
+    event: dict, *, run_id: str, thinking_state: dict[str, Any] | None = None
+) -> dict | None:
+    """Compatibility wrapper for single-envelope consumers and older tests."""
+    envelopes = translate_events(event, run_id=run_id, thinking_state=thinking_state)
+    return envelopes[0] if envelopes else None
 
 
 def _persist_human_interrupt(
@@ -289,33 +369,44 @@ async def supervisor_runner(
             while middleware_events:
                 yield middleware_events.pop(0)
 
-            envelope = translate_event(event, run_id=run_id, thinking_state=thinking_state)
-            if envelope is None:
-                continue
-            if envelope.get("kind") == "human_interrupt":
-                try:
-                    envelope = _persist_human_interrupt(
-                        store=human_request_store or store,
-                        run_id=run_id,
-                        actions=list(envelope.get("actions") or []),
-                    )
-                except Exception as exc:  # noqa: BLE001 - fail closed on a missing approval record
-                    envelope = {
-                        "kind": "run_state",
-                        "run_id": run_id,
-                        "state": "failed",
-                        "error": f"could not persist human approval request: {exc}",
-                    }
-            if progress_sink is not None:
-                try:
-                    progress_sink(envelope)
-                except Exception:  # noqa: BLE001 - observability must not sink a run
-                    pass
-            yield envelope
+            for envelope in translate_events(event, run_id=run_id, thinking_state=thinking_state):
+                if envelope.get("kind") == "human_interrupt":
+                    try:
+                        envelope = _persist_human_interrupt(
+                            store=human_request_store or store,
+                            run_id=run_id,
+                            actions=list(envelope.get("actions") or []),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - fail closed on a missing approval record
+                        envelope = {
+                            "kind": "run_state",
+                            "run_id": run_id,
+                            "state": "failed",
+                            "error": f"could not persist human approval request: {exc}",
+                        }
+                if progress_sink is not None:
+                    try:
+                        progress_sink(envelope)
+                    except Exception:  # noqa: BLE001 - observability must not sink a run
+                        pass
+                yield envelope
 
         while middleware_events:
             yield middleware_events.pop(0)
     finally:
-        _PE_SINK.reset(tok_pe_sink)
-        _PE_RUN_ID.reset(tok_pe_rid)
-        _OG_RUN_ID.reset(tok_og_rid)
+        # Starlette can close a streamed async generator from its disconnect
+        # finalizer task rather than the task that created it. ContextVar
+        # tokens are task-bound, so resetting one from that finalizer raises a
+        # noisy ``Token ... was created in a different Context`` exception.
+        # Clear the current context in that defensive case; the originating
+        # request context is discarded with its task and cannot leak into the
+        # next request.
+        for variable, token in (
+            (_PE_SINK, tok_pe_sink),
+            (_PE_RUN_ID, tok_pe_rid),
+            (_OG_RUN_ID, tok_og_rid),
+        ):
+            try:
+                variable.reset(token)
+            except ValueError:
+                variable.set(None)

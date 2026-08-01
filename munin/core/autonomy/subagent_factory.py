@@ -15,7 +15,6 @@ Kernel meta-tools to generated agents.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from .spec import SubagentSpec

@@ -13,9 +13,7 @@ against un-deferred annotations.
 """
 
 import inspect
-import json
 import textwrap
-from pathlib import Path
 
 
 def test_gen_prefix_and_rehydrate_active(isolated_workspace, store, monkeypatch):

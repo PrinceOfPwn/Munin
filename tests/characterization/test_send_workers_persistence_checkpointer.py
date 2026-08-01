@@ -2,7 +2,7 @@
 import pytest
 pytest.importorskip("munin.core.parallel.send_workers")
 
-from munin.core.parallel.send_workers import WorkerState, fanout
+from munin.core.parallel.send_workers import WorkerState
 
 
 def test_worker_state_is_typeddict():
@@ -15,7 +15,7 @@ def test_worker_state_is_typeddict():
 def test_aggregate_uses_operator_add_annotation():
     """The aggregate field uses Annotated[list, operator.add] for LangGraph reducer."""
     import operator
-    from typing import get_type_hints, Annotated, get_args
+    from typing import get_type_hints, get_args
     hints = get_type_hints(WorkerState, include_extras=True)
     agg_hint = hints["aggregate"]
     args = get_args(agg_hint)

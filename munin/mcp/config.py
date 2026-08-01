@@ -29,6 +29,11 @@ class Settings:
     llm_retry_attempts: int = 5
     llm_retry_base_delay: float = 5.0
     llm_retry_max_delay: float = 60.0
+    # Anti-runaway budgets for a single agent invocation. These are safety
+    # rails, not product limits: operators can tune or disable either one
+    # explicitly with ``0`` when a deployment has an external budget policy.
+    agent_model_call_limit: int = 24
+    agent_tool_call_limit: int = 64
     operator_language: str = "auto"
 
     # --- Passive intel providers ---
@@ -222,6 +227,8 @@ def get_settings() -> Settings:
         llm_retry_attempts=max(1, int(os.environ.get("LLM_RETRY_ATTEMPTS", "5"))),
         llm_retry_base_delay=max(0.0, float(os.environ.get("LLM_RETRY_BASE_DELAY", "5"))),
         llm_retry_max_delay=max(0.0, float(os.environ.get("LLM_RETRY_MAX_DELAY", "60"))),
+        agent_model_call_limit=max(0, int(os.environ.get("MUNIN_MODEL_CALL_LIMIT", "24"))),
+        agent_tool_call_limit=max(0, int(os.environ.get("MUNIN_TOOL_CALL_LIMIT", "64"))),
         operator_language=os.environ.get("MUNIN_OPERATOR_LANGUAGE", "auto").strip() or "auto",
         # Intel providers
         tavily_api_key=os.environ.get("TAVILY_API_KEY", "").strip(),

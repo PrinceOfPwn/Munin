@@ -1,7 +1,5 @@
 """Register → restart (new instance) → rebuild — identical runnable."""
 import pytest
-import tempfile
-import os
 pytest.importorskip("munin.core.autonomy.agent_registry")
 
 from munin.core.autonomy.agent_registry import AgentRegistry

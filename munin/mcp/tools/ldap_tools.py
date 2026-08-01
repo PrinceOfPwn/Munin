@@ -329,7 +329,6 @@ def get_user_groups(username: str, run_id: str = "") -> dict[str, Any]:
     if not username.strip():
         return _error("get_user_groups", "bad_input", "username required")
 
-    settings = _get_settings()
     esc = escape_filter_chars(username.strip())
 
     try:
@@ -420,15 +419,26 @@ def ldap_search(
     size_limit: int = 200,
     run_id: str = "",
 ) -> dict[str, Any]:
-    """Safe parametric LDAP search. filter_template uses Python str.format with {name} placeholders; every value in params_json is escaped with escape_filter_chars first."""
+    """Safe parametric LDAP search.
+
+    ``params_json`` accepts either an object for named placeholders
+    (``{"cn": "WEB01"}`` + ``{cn}``) or an array for positional placeholders
+    (``["WEB01"]`` + ``{0}``). Supporting both shapes keeps the tool
+    compatible with providers that emit native JSON arrays while retaining one
+    escaped, parameterized LDAP filter boundary.
+    """
     settings = _get_settings()
     base = base_dn.strip() or settings.ldap_base_dn
     try:
-        raw_params = json.loads(params_json or "{}")
-        if not isinstance(raw_params, dict):
-            raise ValueError("params_json must be an object")
-        escaped = {k: escape_filter_chars(str(v)) for k, v in raw_params.items()}
-        filter_str = filter_template.format(**escaped) if escaped else filter_template
+        raw_params = json.loads(params_json or "{}") if isinstance(params_json, str) else params_json
+        if isinstance(raw_params, dict):
+            escaped = {k: escape_filter_chars(str(v)) for k, v in raw_params.items()}
+            filter_str = filter_template.format(**escaped) if escaped else filter_template
+        elif isinstance(raw_params, list):
+            escaped_values = [escape_filter_chars(str(value)) for value in raw_params]
+            filter_str = filter_template.format(*escaped_values) if escaped_values else filter_template
+        else:
+            raise ValueError("params_json must be an object or array")
     except Exception as exc:
         return _error("ldap_search", "bad_input", str(exc))
 

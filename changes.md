@@ -1,6 +1,54 @@
 # Changes
 
-Living changelog and hand-off log for Munin. Newest entries first.
+Living changelog and hand-off log for Munin. Newest entries first. Entries
+record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
+for the current runtime contract.
+
+## 2026-08-01 - CI gates, canonical MCP endpoints, and provider reasoning replay
+
+This follow-up closes the remaining CI failures without adding a second
+application-specific agent loop:
+
+- The supervisor removes the custom repetition guard that aborted a healthy
+  live provider run after repeated output. It now uses LangChain's standard
+  model and tool call limit middleware, controlled by
+  `MUNIN_MODEL_CALL_LIMIT` and `MUNIN_TOOL_CALL_LIMIT` for a visible,
+  safety-only budget.
+- An explicitly emitted provider field (`reasoning_content`, `thinking`, or a
+  typed reasoning block) and explicit `<think>` blocks become separate
+  `provider_reasoning` envelopes. They are redacted and persisted with their
+  provider and model-step metadata, replayed from `reasoning_events`, and
+  translated to separate `reasoning-start`/`reasoning-delta`/`reasoning-end`
+  UI parts. They are never concatenated into the final assistant answer or
+  fabricated from graph/tool activity.
+- The Actions MCP probe addresses FastMCP directly at `/mcp/` and the Next BFF
+  at `/mcp`, refusing redirects with an actionable error. This fixes the
+  308 retry loop found by the E2E lab.
+- The E2E jobs pin `MUNIN_HTTPX_BINARY` to the exact ProjectDiscovery binary
+  installed in that job, so an image-provided command cannot shadow it. Smoke
+  failures now report a bounded stderr tail and return code without logging
+  command arguments or secrets.
+- CI installs from the committed Poetry lock, runs compile, fatal Ruff, the
+  backend suite, TypeScript, Vitest, configured Next lint and the production
+  frontend build. The real-provider smoke is now a post-merge/manual canary,
+  requires `ldap_search` and `httpx_probe`, and validates a non-empty final
+  answer. Its cleanup uses the shared fixture janitor instead of a broken
+  shell heredoc.
+- The web boundary now uses Next `15.5.21`, AI SDK `7.0.47` and
+  `@ai-sdk/react` `4.0.50`. The formerly interactive `next lint` command is
+  replaced by the standard ESLint CLI. The lockfile overrides Next's affected
+  `postcss` and `sharp` transitive packages to patched versions; the production
+  dependency audit reports zero known vulnerabilities.
+- Vitest now uses the supported 4.x release under Node 22, removing the
+  remaining known critical/high development-server vulnerabilities inherited
+  through its old Vite stack. The test suite is rerun after the major upgrade.
+- The live canary now exercises native HITL end-to-end: it resolves the
+  authenticated request with its one-time nonce, resumes the durable
+  LangGraph checkpoint through the replay route, and only passes on a final
+  completed answer. LDAP search accepts both safely escaped named and
+  positional JSON parameter shapes emitted by providers. Async generator
+  cleanup also handles cross-task ContextVar finalization without leaving
+  unhandled task exceptions.
 
 ## 2026-08-01 — Durable chat recovery after process restart
 

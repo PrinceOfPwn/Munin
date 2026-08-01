@@ -30,7 +30,6 @@ from .agent_registry import AgentRegistry
 from .spec import SubagentSpec
 from .subagent_factory import SubagentFactory
 from .tool_factory import ToolFactory
-from .workflow_factory import create_workflow
 from .workflow_registry import WorkflowRegistry
 from .workflow_spec import WorkflowSpec
 

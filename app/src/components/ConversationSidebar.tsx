@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState } from "react";
 import {
   LoaderCircle,
@@ -85,7 +86,7 @@ export default function ConversationSidebar({
   return (
     <aside className="hidden min-h-0 flex-col gap-3 border-r border-border bg-surface p-3 lg:flex">
       <div className="flex items-center gap-2 px-1">
-        <img
+        <Image
           src="/raven-mark.png"
           width={24}
           height={24}

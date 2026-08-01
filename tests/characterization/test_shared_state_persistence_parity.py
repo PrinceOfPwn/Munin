@@ -5,10 +5,8 @@ Asserts CURRENT behaviour at munin/mcp/shared_state.py and munin/mcp/persistence
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 
 
 def _make_store(tmp_path: Path):
@@ -38,10 +36,6 @@ def test_nine_mcp_side_tables_present(tmp_path):
         "episodic", "semantic", "procedural", "generated_graphs", "agent_wake_queue",
     }
     # Also present but not in the original 9 — verify they exist too
-    expected_mcp_all = expected_core | {
-        "runtime_cache", "conversations", "conversation_messages",
-        "conversation_artifacts", "provider_profiles",
-    }
     for name in expected_core:
         assert name in table_names, f"MCP table {name!r} missing"
 

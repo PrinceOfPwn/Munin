@@ -78,7 +78,7 @@ export function Providers({ children }: { children: ReactNode }) {
             children
           ) : (
             <div className="grid min-h-screen place-items-center bg-bg font-mono text-xs uppercase tracking-widest text-secondary">
-              Restoring the Raven's local cache…
+              Restoring the Raven&apos;s local cache…
             </div>
           )}
         </TooltipProvider>

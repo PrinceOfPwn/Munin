@@ -225,6 +225,13 @@ def _load_host_opsec_snapshot() -> dict[str, Any]:
 
 
 def _httpx_binary() -> str:
+    # Deployments which install the ProjectDiscovery binary in a dedicated
+    # location can make the selection deterministic.  This also prevents an
+    # unrelated ``httpx``/``pd-httpx`` already present on PATH from silently
+    # becoming the active reconnaissance tool.
+    configured = os.environ.get("MUNIN_HTTPX_BINARY", "").strip()
+    if configured:
+        return configured
     for candidate in ("pd-httpx", "/usr/local/bin/pd-httpx"):
         if command_exists(candidate) or Path(candidate).exists():
             return candidate
