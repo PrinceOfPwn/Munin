@@ -105,7 +105,7 @@ class CloakObserver:
             ) or {}
             final_url = str(data.get("url") or navigated)
             validate_public_url(final_url, resolve_host=False)
-            screenshot = page.screenshot(full_page=bool(full_page), type="webp", quality=78)
+            screenshot = page.screenshot(full_page=bool(full_page), type="png")
             if isinstance(screenshot, str):
                 screenshot = base64.b64decode(screenshot)
             return BrowserCapture(
