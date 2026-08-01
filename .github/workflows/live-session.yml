@@ -322,8 +322,11 @@ jobs:
           python3 - <<'PY'
           import json, os, sys, time, urllib.error, urllib.request
 
-          # Fase 3: MCP is now mounted at /mcp on the unified backend port.
-          url = 'http://127.0.0.1:8787/mcp'
+          # Fase 3 + issue #9 fix: MCP listens at /mcp/ (the sub-app's
+          # internal route is "/" so mounting under /mcp yields the public
+          # path /mcp/; the bare /mcp 307-redirects here). urllib does not
+          # follow 307 on POST, so talk to /mcp/ directly.
+          url = 'http://127.0.0.1:8787/mcp/'
           token = os.environ.get('MUNIN_MCP_AUTH_TOKEN', '')
           deadline = time.monotonic() + 90
           session_id = ''

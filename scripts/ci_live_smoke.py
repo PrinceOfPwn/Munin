@@ -30,7 +30,10 @@ APACHE_TARGET = os.environ.get("MUNIN_SMOKE_APACHE_TARGET", "apache")
 
 
 def _endpoint() -> str:
-    return BASE_URL if BASE_URL.endswith("/mcp") else f"{BASE_URL}/mcp"
+    base = BASE_URL.rstrip("/")
+    if base.endswith("/mcp"):
+        return base + "/"
+    return f"{base}/mcp/"
 
 
 def _read_rpc_response(response: Any) -> dict[str, Any]:

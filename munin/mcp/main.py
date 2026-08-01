@@ -1539,8 +1539,18 @@ def create_mcp_app(*, auth_token: str | None = None) -> Any:
     responsible for gating access (either via ``MUNIN_MCP_ALLOW_ANON=1`` or
     an outer middleware); otherwise we wrap the transport with the same
     bearer-token check used by the standalone ``munin mcp`` binary.
+
+    Issue #9 fix: the sub-app's internal ``Route`` is set to ``/`` (via
+    `MCP.settings.streamable_http_path`) so that mounting it under
+    ``Mount("/mcp", ...)`` produces the public path ``/mcp`` — not the
+    double-prefixed ``/mcp/mcp`` that the FastMCP default ``/mcp`` caused.
+    The host :mod:`munin.server` lifespan is then responsible for running
+    ``MCP.session_manager`` (Starlette does not propagate lifespans to
+    mounted sub-apps, so without it the session manager raises "Task group
+    is not initialized" on the first request).
     """
     token = (auth_token if auth_token is not None else SETTINGS.mcp_auth_token) or ""
+    MCP.settings.streamable_http_path = "/"
     app = MCP.streamable_http_app()
     if token:
         middleware = _make_auth_middleware(token)

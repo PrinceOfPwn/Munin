@@ -2,6 +2,56 @@
 
 Living changelog and hand-off log for Munin. Newest entries first.
 
+## 2026-08-01 — CI repair Part 2: fix double `/mcp` mount prefix + session-manager lifespan
+
+The Fase 3 unification (`munin serve` mounting the FastMCP streamable-http
+sub-app under `Mount("/mcp")`) shipped two latent bugs that made every
+`POST /mcp` return **404**, breaking both the e2e_lab MCP exercise and the
+live-LLM MCP catalog sanity check on CI. Verified against the FastMCP
+official docs (gofastmcp.com/deployment/http) and Context7 over the
+`mcp` Python SDK (modelcontextprotocol/python-sdk):
+
+1. **Double prefix `/mcp/mcp`.** `FastMCP("munin-mcp")` defaults
+   `streamable_http_path="/mcp"`, so its sub-app registers `Route("/mcp")`.
+   `Mount("/mcp", app=sub)` strips the `/mcp` prefix before delegating, so
+   the only public path that matched the inner route was `/mcp/mcp`. The
+   canonical fix (per Context7 quote: *"Setting `streamable_http_path` to
+   `/` makes the mount prefix the complete public path"*) is to set the
+   inner route to `/` so the public path becomes `/mcp/`.
+   - `munin/mcp/main.py:1543` `create_mcp_app` now sets
+     `MCP.settings.streamable_http_path = "/"` before building the app.
+
+2. **Session manager not initialized.** Starlette does not propagate
+   `startup`/`shutdown` lifespans to sub-apps mounted via `Mount`. Without
+   explicitly entering `MCP.session_manager.run()`, the first request to
+   the sub-app raised `RuntimeError("Task group is not initialized. Make
+   sure to use run().")`. The MCP Python SDK exposes
+   `mcp.session_manager` (lazily created after `streamable_http_app()`)
+   whose `run()` is an async context manager; the host Starlette app must
+   own it in its lifespan.
+   - `munin/server.py` `_lifespan` now `__aenter__`/`__aexit__`es the
+     session manager around the existing Discord + pool-shutdown hooks.
+
+3. **`/mcp` without trailing slash.** Even with the inner route at `/`,
+   a bare `POST /mcp` leaves the sub-app with an empty path that
+   `Route("/")` does not match (Starlette `Mount` only redirects
+   `/mcp` -> `/mcp/` when no inner route consumes it, AND the outer
+   `Mount("/", http_app)` would intercept the normalised request first).
+   Added an explicit `Route("/mcp", RedirectResponse("/mcp/", 307),
+   methods=[GET,POST,DELETE])` before the `Mount("/mcp")` so bare-path
+   clients are bumped cleanly; clients that follow 307 (fetch, curl -L,
+   the GUI same-origin proxy) work transparently.
+
+   `scripts/ci_live_smoke.py` `_endpoint()` now always returns the
+   trailing-slash form (`{base}/mcp/`), and the `live-session.yml`
+   "Verify Munin MCP is answering" verifier (which uses urllib and does
+   NOT follow 307 on POST) now POSTs to `http://127.0.0.1:8787/mcp/`.
+
+Validation: `python -m munin.server.create_app` builds; a uvicorn run on
+`127.0.0.1:8787` serves `POST /mcp/` -> 200 with `mcp-session-id` + SSE
+`event: message` JSON-RPC, `GET /health` -> 200; `tests/test_production_foundation.py`
+11/11 green.
+
 ## 2026-08-01 — CI repair: tests + smoke + workflow aligned with the Fase 2-4 contract
 
 The migration (issue #9) removed `claim_next_run` (replaced by the direct

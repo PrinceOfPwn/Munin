@@ -42,7 +42,7 @@ from typing import Any
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
 log = logging.getLogger("munin.server")
@@ -139,6 +139,21 @@ def create_app() -> Starlette:
 
     routes = [
         Route("/health", _build_health(mcp_module, shared_state, production_store)),
+        # Issue #9 fix: ``Mount("/mcp", app=mcp_app)`` strips the ``/mcp`` prefix
+        # before handing the remaining path to the FastMCP sub-app, whose
+        # internal route is now ``/`` (see :func:`munin.mcp.main.create_mcp_app`).
+        # A bare ``POST /mcp`` therefore leaves the sub-app with an empty path,
+        # which FastMCP's ``Route("/")`` does not match (Starlette ``Mount``
+        # only redirects ``/mcp`` -> ``/mcp/`` when no inner route consumes the
+        # empty remainder, but the catch-all ``Mount("/", http_app)`` below
+        # would intercept the redirect first). Register an explicit 307
+        # redirect for the bare path so clients that send ``/mcp`` are bumped
+        # to ``/mcp/`` where the streamable-http transport actually listens.
+        Route(
+            "/mcp",
+            lambda request: RedirectResponse("/mcp/", status_code=307),
+            methods=["GET", "POST", "DELETE"],
+        ),
         Mount("/mcp", app=mcp_app),
         Mount("/", app=http_app),
     ]
@@ -191,12 +206,27 @@ def create_app() -> Starlette:
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
             log.warning("server: close_pools failed during shutdown: %s", exc)
 
+    # ── MCP session manager (issue #9 fix) ──────────────────────────
+    # Starlette does not propagate the ``startup``/``shutdown`` lifespan
+    # events to sub-apps mounted via ``Mount``.  FastMCP's
+    # ``StreamableHTTPSessionManager`` is therefore only created lazily
+    # inside ``MCP.streamable_http_app()`` (already invoked by
+    # ``create_mcp_app`` above) and must be entered explicitly here; without
+    # it the first ``POST /mcp`` raises ``RuntimeError("Task group is not
+    # initialized. Make sure to use run().")``.  Mounting the sub-app is
+    # not enough — the host owns the lifespan.
+    mcp_session_ctx = mcp_module.MCP.session_manager.run()
+
     @asynccontextmanager
     async def _lifespan(app: Any) -> AsyncIterator[None]:
-        await _startup_discord()
-        yield
-        await _shutdown_discord()
-        await _shutdown_pools()
+        await mcp_session_ctx.__aenter__()
+        try:
+            await _startup_discord()
+            yield
+        finally:
+            await _shutdown_discord()
+            await _shutdown_pools()
+            await mcp_session_ctx.__aexit__(None, None, None)
 
     return Starlette(
         debug=False,
