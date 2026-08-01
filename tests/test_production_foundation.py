@@ -136,6 +136,60 @@ def test_split_store_hydrates_conversation_parents_before_creating_active_run(tm
         ).fetchone()
 
 
+def test_split_store_conversation_replay_sees_hot_active_run_after_hitl(tmp_path: Path):
+    """AI SDK resume must not return 204 while the run is hot-local.
+
+    HITL resolution changes the hot run from ``waiting_for_human`` to
+    ``queued``.  The durable conversation has no ``agent_runs`` row until
+    completion, so ``MuninStore.get_conversation`` must overlay the hot row.
+    """
+    from munin.production.chat import _claim_direct
+    from munin.production.store import MuninStore, ProductionStore
+
+    durable = ProductionStore.for_sqlite(tmp_path / "durable.sqlite", master_key=b"d" * 32)
+    hot = ProductionStore.for_sqlite(tmp_path / "hot.sqlite", master_key=b"d" * 32)
+    store = MuninStore(hot=hot, durable=durable)
+    operator = store.create_user(
+        username="split-hitl-operator", password="strong passphrase", role="operator"
+    )
+    conversation = store.create_conversation(owner_id=operator["id"], title="Split HITL")
+    turn = store.create_turn(
+        actor_id=operator["id"],
+        conversation_id=conversation["id"],
+        content="Run the approved check",
+        idempotency_key="split-hitl-turn-001",
+    )
+    run_id = turn["run"]["id"]
+    _claim_direct(store, run_id=run_id)
+    gate = store.request_human_decision(
+        run_id=run_id,
+        action="run approved check",
+        risk="high",
+        evidence=["scope confirmed"],
+        scope={"actions": [{"name": "nmap_scan", "args": {"target": "WEB01"}}]},
+        choices=["Approve once", "Reject"],
+    )
+
+    waiting = store.get_conversation(
+        actor_id=operator["id"], conversation_id=conversation["id"]
+    )
+    assert waiting["runs"][0]["state"] == "waiting_for_human"
+    assert waiting["messages"][1]["status"] == "waiting_for_human"
+
+    resolved = store.resolve_human_decision(
+        actor_id=operator["id"],
+        request_id=gate["id"],
+        choice="Approve once",
+        nonce=gate["nonce"],
+    )
+    assert resolved["state"] == "queued"
+    queued = store.get_conversation(
+        actor_id=operator["id"], conversation_id=conversation["id"]
+    )
+    assert queued["runs"][0]["state"] == "queued"
+    assert queued["messages"][1]["status"] == "queued"
+
+
 def test_run_claim_is_direct_exclusive_and_lease_expiry_recovers(production_store):
     from munin.production.chat import _claim_direct
 

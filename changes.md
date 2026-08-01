@@ -56,6 +56,11 @@ application-specific agent loop:
 - The standalone `Munin Live Session` workflow now points its MCP smoke at
   the unified `:8787` server instead of the retired `:8890` listener. The
   generated canary password is also masked before it is exported to Actions.
+- Split-store replay now overlays hot `agent_runs` and assistant-placeholder
+  status on the durable conversation aggregate. This prevents the HITL
+  approval hand-off from returning a false `204` while the detached run is
+  queued/running, so AI SDK `resumeStream()` can reattach and the agent keeps
+  acting autonomously after the approved checkpoint.
 
 ## 2026-08-01 — Durable chat recovery after process restart
 

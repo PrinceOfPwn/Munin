@@ -2753,6 +2753,63 @@ class MuninStore:
     # Run queries: hot first, then durable.
     # ------------------------------------------------------------------
 
+    def get_conversation(self, *, actor_id: str, conversation_id: str) -> dict[str, Any]:
+        """Return a conversation with the local-first run state overlaid.
+
+        ``MuninStore`` keeps an in-flight ``agent_runs`` row in the hot
+        SQLite database and migrates it to the durable database only after
+        completion.  Falling through to ``ProductionStore.get_conversation``
+        therefore makes a perfectly live run look as if it does not exist.
+        That is particularly harmful to AI SDK ``resume``: the HITL resolve
+        endpoint queues the run and the immediate GET replay probe sees a
+        false 204.
+
+        The durable store remains authoritative for the conversation and
+        messages.  Active hot rows are merged by id and their state is
+        projected onto assistant placeholders without mutating the durable
+        backend.  Once migration removes the hot row, the durable snapshot is
+        returned unchanged.
+        """
+        aggregate = self._durable.get_conversation(
+            actor_id=actor_id, conversation_id=conversation_id
+        )
+        if self._hot is self._durable:
+            return aggregate
+
+        with self._hot._read_only() as conn:  # noqa: SLF001
+            hot_rows = conn.execute(
+                "SELECT * FROM agent_runs WHERE conversation_id=? ORDER BY created_at_ms",
+                (conversation_id,),
+            ).fetchall()
+
+        hot_runs = {
+            str(row["id"]): ProductionStore._run_dict(row)  # noqa: SLF001
+            for row in hot_rows
+        }
+        merged_runs = {
+            str(run["id"]): dict(run) for run in aggregate.get("runs", [])
+        }
+        # Hot state wins while a run is local-first; this includes the
+        # waiting_for_human -> queued transition made by HITL resolution.
+        for run_id, hot_run in hot_runs.items():
+            merged_runs[run_id] = hot_run
+        aggregate["runs"] = sorted(
+            merged_runs.values(),
+            key=lambda row: (int(row.get("created_at_ms") or 0), str(row.get("id") or "")),
+        )
+
+        states_by_run = {
+            str(run.get("id")): str(run.get("state") or "")
+            for run in hot_runs.values()
+        }
+        for message in aggregate.get("messages", []):
+            if message.get("kind") != "assistant_placeholder":
+                continue
+            state = states_by_run.get(str(message.get("run_id") or ""))
+            if state:
+                message["status"] = state
+        return aggregate
+
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._hot._read_only() as conn:  # noqa: SLF001
             row = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
