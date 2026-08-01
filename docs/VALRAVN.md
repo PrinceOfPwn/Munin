@@ -92,7 +92,7 @@ Each capture creates an ephemeral context with:
 - downloads disabled;
 - service workers disabled;
 - private/internal destinations blocked;
-- WebP screenshot;
+- PNG screenshot;
 - bounded text and link extraction;
 - optional translation;
 - JSON evidence and SHA-256 artifact metadata.
