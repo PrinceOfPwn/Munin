@@ -1,6 +1,7 @@
 """Deep Agents supervisor → SSE bridge (Fase 1a of issue #9 migration).
 
-This module owns ``POST /api/chat`` and ``POST /api/chat/{run_id}/guidance``.
+This module owns ``POST /api/chat``, ``GET /api/chat/{conversation_id}/stream``
+and ``POST /api/chat/{run_id}/guidance``.
 It replaces the legacy two-hop coupling (``POST /turns`` + ``GET /events``)
 between the Next.js BFF and the Python backend: the AI SDK v5 request now
 drives ``supervisor_runner`` directly in-process, streaming the same Munin
@@ -54,13 +55,90 @@ log = logging.getLogger("munin.production.chat")
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "interrupted"}
 NON_TERMINAL_RUN_STATES = {"queued", "running", "waiting_for_human"}
-CHAT_LEASE_SECONDS = int(os.environ.get("MUNIN_CHAT_LEASE_SECONDS", str(4 * 3600)))
+CHAT_LEASE_SECONDS = int(os.environ.get("MUNIN_CHAT_LEASE_SECONDS", "120"))
+# A short renewable lease makes a crash recoverable without granting a new
+# process authority to steal a still-live worker.  Operators can increase the
+# duration for a high-latency deployment; the heartbeat keeps legitimate
+# long-running work alive either way.
+CHAT_LEASE_RENEW_SECONDS = float(
+    os.environ.get("MUNIN_CHAT_LEASE_RENEW_SECONDS", "30")
+)
+CHAT_RECOVERY_POLL_SECONDS = float(
+    os.environ.get("MUNIN_CHAT_RECOVERY_POLL_SECONDS", "5")
+)
 # How often the idempotent-replay SSE stream re-checks the durable/hot store
 # for new ``run_events`` and the current ``agent_runs.state``.  0.3s is
 # imperceptible in the UI of a multi-minute run; we intentionally avoid an
 # in-process pub/sub bus so replay survives across worker processes (see
 # :func:`_stream_idempotent_replay`).
 CHAT_REPLAY_POLL_SECONDS = float(os.environ.get("MUNIN_CHAT_REPLAY_POLL_SECONDS", "0.3"))
+
+# Active executions are independent of an HTTP/SSE subscriber. The durable
+# run-event log remains the cross-process replay source; this map only owns
+# the current local task and prevents duplicate launches in one process.
+_ACTIVE_RUN_TASKS: dict[str, asyncio.Task[None]] = {}
+
+
+class _DetachedChatRequest:
+    """Minimal request facade for a run that must outlive an SSE client."""
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+async def _renew_chat_lease(
+    *,
+    store: Any,
+    run_id: str,
+    lease_token: str,
+    stop: asyncio.Event,
+    lease_lost: asyncio.Event,
+) -> None:
+    """Keep an executor's lease alive; never revive a fenced/cancelled run."""
+    interval = max(
+        5.0,
+        min(CHAT_LEASE_RENEW_SECONDS, max(5.0, CHAT_LEASE_SECONDS / 3)),
+    )
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return
+        except TimeoutError:
+            pass
+        try:
+            current = bool(
+                store.renew_run_lease(
+                    run_id=run_id,
+                    lease_token=lease_token,
+                    lease_seconds=CHAT_LEASE_SECONDS,
+                )
+            )
+        except Exception:  # noqa: BLE001 - failure must not create a second owner
+            log.warning("chat: lease heartbeat failed run_id=%s", run_id, exc_info=True)
+            current = False
+        if not current:
+            lease_lost.set()
+            log.warning("chat: executor lost lease run_id=%s", run_id)
+            return
+
+
+async def _checkpoint_available(shared_state: Any, *, thread_id: str) -> bool | None:
+    """Return whether the configured async LangGraph saver has this thread.
+
+    ``None`` means that the saver could not be queried, which is distinct from
+    an empty checkpoint.  Recovery leaves those runs queued rather than risk a
+    duplicate external tool action on an unverifiable persistence backend.
+    """
+    saver = getattr(shared_state, "langgraph_checkpointer", None)
+    getter = getattr(saver, "aget_tuple", None)
+    if not callable(getter):
+        return False
+    try:
+        checkpoint = await getter({"configurable": {"thread_id": thread_id}})
+    except Exception:  # noqa: BLE001 - fail closed until the next recovery poll
+        log.warning("chat: could not query checkpoint run thread=%s", thread_id, exc_info=True)
+        return None
+    return checkpoint is not None
 
 
 def _now_ms() -> int:
@@ -168,7 +246,7 @@ def _persist_envelope(
     """Mirror an in-flight envelope to Turso (best-effort)."""
     kind = envelope.get("kind")
     try:
-        if kind == "reasoning":
+        if kind in {"assistant_text", "reasoning"}:
             text = str(envelope.get("text") or "")
             if text:
                 assistant_buffer.append(text)
@@ -176,6 +254,22 @@ def _persist_envelope(
                     store,
                     assistant_message_id=assistant_message_id,
                     content="".join(assistant_buffer),
+                )
+            return
+        if kind == "activity":
+            text = str(envelope.get("text") or "").strip()
+            if text:
+                # Persist only safe operational telemetry.  This is distinct
+                # from provider/private reasoning and supplies reconnecting
+                # clients with a faithful activity timeline.
+                store.append_reasoning_event(
+                    run_id=run_id,
+                    kind="operational_summary",
+                    content=text,
+                    provider="",
+                    persistence_enabled=True,
+                    agent_name="munin",
+                    step=0,
                 )
             return
         if kind == "tool_intent":
@@ -380,16 +474,25 @@ def _envelope_from_event(
         return None
 
     if kind.startswith("reasoning."):
-        # Live-stream reasoning is captured into the assistant placeholder
-        # by ``_persist_envelope`` — not written to ``reasoning_events`` —
-        # so most ``reasoning.<kind>`` rows we see here are audit-only
-        # (``operator_guidance`` and forge summaries).  Only surface a
-        # reasoning envelope when we actually have persisted content.
+        # Assistant text is persisted in the placeholder, not in
+        # ``reasoning_events``. The rows here are explicit, policy-cleared
+        # operational telemetry (or operator guidance), never private CoT.
         detail = reasoning_by_eid.get(eid) or {}
         text = str(detail.get("content") or "")
         if not text:
             return None
-        return {"kind": "reasoning", "run_id": run_id, "text": text}
+        detail_kind = str(detail.get("kind") or "")
+        if detail_kind == "operational_summary":
+            return {"kind": "activity", "run_id": run_id, "text": text}
+        if detail_kind == "operator_guidance":
+            return {"kind": "guidance", "run_id": run_id, "text": text}
+        return None
+
+    if kind == "human_request.created":
+        # The nonce is never persisted in clear text. Replay mints a fresh
+        # one for the authenticated participant via
+        # ``_pending_human_request_envelopes`` below.
+        return None
 
     if kind.startswith("human_request.") or kind.startswith("subagent."):
         # Pass through — the BFF normalizer folds ``payload`` into the
@@ -413,12 +516,46 @@ def _load_run_detail(store: Any, *, actor_id: str, run_id: str) -> dict[str, Any
         return {"reasoning": [], "tools": []}
 
 
+def _pending_human_request_envelopes(
+    store: Any, *, actor_id: str, run_id: str, emitted_ids: set[str]
+) -> list[dict[str, Any]]:
+    """Return replayable HITL cards with a fresh server-issued nonce."""
+    detail = _load_run_detail(store, actor_id=actor_id, run_id=run_id)
+    envelopes: list[dict[str, Any]] = []
+    for item in detail.get("human_requests") or []:
+        request_id = str(item.get("id") or "")
+        if not request_id or request_id in emitted_ids or item.get("state") != "waiting":
+            continue
+        try:
+            minted = store.reissue_human_decision_nonce(
+                actor_id=actor_id, request_id=request_id
+            )
+        except (KeyError, PermissionError):
+            continue
+        scope = item.get("scope") if isinstance(item.get("scope"), dict) else {}
+        actions = scope.get("actions") if isinstance(scope, dict) else []
+        names = [str(action.get("name") or "unknown") for action in actions if isinstance(action, dict)]
+        envelopes.append(
+            {
+                "kind": "human_request",
+                "run_id": run_id,
+                "request_id": request_id,
+                "tool_name": names[0] if len(names) == 1 else "multiple_tools",
+                "args": {"actions": actions},
+                "nonce": minted["nonce"],
+                "choices": item.get("choices") or ["approve", "reject"],
+            }
+        )
+        emitted_ids.add(request_id)
+    return envelopes
+
+
 def _current_placeholder_text(
     store: Any, *, actor_id: str, conversation_id: str, assistant_message_id: str
 ) -> str:
     """Snapshot the assistant placeholder body via ``get_conversation``.
 
-    Used only at connect time so the replay client sees the reasoning text
+    Used only at connect time so the replay client sees the assistant text
     accumulated so far.  Live increments during the poll loop are not
     re-streamed — the primary handler writes them straight to
     ``messages.content`` without emitting a ``run_events`` row, so there
@@ -483,7 +620,7 @@ async def _stream_idempotent_replay(
     conversation_id = str(run.get("conversation_id") or "")
     assistant_message_id = str(run.get("assistant_message_id") or "")
     current_state = str(run.get("state") or "queued")
-    initial_state = current_state if current_state in TERMINAL_STATES else "running"
+    initial_state = current_state if current_state in (TERMINAL_STATES | {"waiting_for_human"}) else "running"
 
     sequence += 1
     yield _sse_frame(
@@ -500,12 +637,14 @@ async def _stream_idempotent_replay(
     if placeholder:
         sequence += 1
         yield _sse_frame(
-            {"kind": "reasoning", "run_id": run_id, "text": placeholder},
+            {"kind": "assistant_text", "run_id": run_id, "text": placeholder},
             sequence=sequence,
         )
+    emitted_placeholder = placeholder
 
     cursor = 0
     terminal_observed = current_state in TERMINAL_STATES
+    emitted_human_request_ids: set[str] = set()
 
     while True:
         try:
@@ -548,15 +687,53 @@ async def _stream_idempotent_replay(
         # without an accompanying run_events row (defensive), still exit.
         try:
             latest = store.get_run(run_id)
-            if str(latest.get("state") or "") in TERMINAL_STATES:
+            latest_state = str(latest.get("state") or "")
+            if latest_state in TERMINAL_STATES:
                 # The corresponding ``run.<state>`` event should show up on
                 # the next tick; loop once more so we surface it verbatim.
                 terminal_observed = True
+            elif latest_state == "waiting_for_human":
+                for envelope in _pending_human_request_envelopes(
+                    store,
+                    actor_id=actor_id,
+                    run_id=run_id,
+                    emitted_ids=emitted_human_request_ids,
+                ):
+                    sequence += 1
+                    yield _sse_frame(envelope, sequence=sequence)
+                # A HITL request is durable and the graph is checkpointed.
+                # Close this viewer; the operator action starts a new durable
+                # replay stream after ``Command(resume=...)`` is launched.
+                break
         except KeyError:
             terminal_observed = True
 
         if terminal_observed:
             continue  # let the loop pick up the terminal event on next SELECT
+
+        # The detached executor keeps the current visible answer in the
+        # placeholder. Reading its suffix at the normal replay cadence gives
+        # reconnecting clients live text without a second in-memory token bus
+        # or one persisted event per token.
+        current_placeholder = _current_placeholder_text(
+            store,
+            actor_id=actor_id,
+            conversation_id=conversation_id,
+            assistant_message_id=assistant_message_id,
+        )
+        if current_placeholder != emitted_placeholder:
+            delta = (
+                current_placeholder[len(emitted_placeholder):]
+                if current_placeholder.startswith(emitted_placeholder)
+                else current_placeholder
+            )
+            if delta:
+                sequence += 1
+                yield _sse_frame(
+                    {"kind": "assistant_text", "run_id": run_id, "text": delta},
+                    sequence=sequence,
+                )
+            emitted_placeholder = current_placeholder
 
         if await request.is_disconnected():
             log.info("chat: replay client disconnected run_id=%s", run_id)
@@ -573,17 +750,23 @@ async def _stream_idempotent_replay(
         conversation_id=conversation_id,
         assistant_message_id=assistant_message_id,
     )
-    if final_content:
-        sequence += 1
-        yield _sse_frame(
-            {
-                "kind": "reasoning",
-                "run_id": run_id,
-                "text": final_content,
-                "replay_final": True,
-            },
-            sequence=sequence,
+    if final_content and final_content != emitted_placeholder:
+        final_delta = (
+            final_content[len(emitted_placeholder):]
+            if final_content.startswith(emitted_placeholder)
+            else final_content
         )
+        if final_delta:
+            sequence += 1
+            yield _sse_frame(
+                {
+                    "kind": "assistant_text",
+                    "run_id": run_id,
+                    "text": final_delta,
+                    "replay_final": True,
+                },
+                sequence=sequence,
+            )
 
     yield b"event: close\ndata: {}\n\n"
 
@@ -600,6 +783,8 @@ async def _stream_chat(
     conversation_history: list[dict[str, Any]],
     assistant_message_id: str,
     lease_token: str,
+    resume_decisions: list[dict[str, Any]] | None = None,
+    resume_from_checkpoint: bool = False,
 ) -> AsyncIterator[bytes]:
     from ..core.llm_client import LLMClient
     from ..core.runtime_adapter import supervisor_runner
@@ -636,6 +821,20 @@ async def _stream_chat(
         shared_state = SharedStateStore(settings)
         with suppress(Exception):
             shared_state.consume_pending_guidance = store.consume_pending_guidance  # type: ignore[assignment]
+            shared_state.authorize_approved_tool_call = store.authorize_approved_tool_call  # type: ignore[assignment]
+
+    lease_heartbeat_stop = asyncio.Event()
+    lease_lost = asyncio.Event()
+    lease_heartbeat = asyncio.create_task(
+        _renew_chat_lease(
+            store=store,
+            run_id=run_id,
+            lease_token=lease_token,
+            stop=lease_heartbeat_stop,
+            lease_lost=lease_lost,
+        ),
+        name=f"munin-chat-lease-{run_id}",
+    )
 
     yield b": munin-chat-stream v1\n\n"
     sequence = 0
@@ -659,6 +858,7 @@ async def _stream_chat(
     final_state = "completed"
     final_content = ""
     final_error: str | None = None
+    paused_for_human = False
 
     try:
         async for envelope in supervisor_runner(
@@ -669,7 +869,15 @@ async def _stream_chat(
             model=model,
             conversation_history=conversation_history,
             thread_id=conversation_id or run_id,
+            human_request_store=store,
+            resume_decisions=resume_decisions,
+            resume_from_checkpoint=resume_from_checkpoint,
         ):
+            if lease_lost.is_set():
+                # Another worker has fenced us or an operator cancelled the
+                # run.  Do not persist or execute another graph step.
+                final_state = "lease_lost"
+                break
             _persist_envelope(
                 store,
                 envelope,
@@ -680,6 +888,11 @@ async def _stream_chat(
 
             sequence += 1
             yield _sse_frame(envelope, sequence=sequence)
+
+            if envelope.get("kind") == "human_request":
+                paused_for_human = True
+                final_state = "waiting_for_human"
+                break
 
             if envelope.get("kind") == "run_state":
                 state = str(envelope.get("state") or "")
@@ -702,7 +915,7 @@ async def _stream_chat(
                 log.info("chat: client disconnected, aborting run_id=%s", run_id)
                 break
 
-        if not finalized:
+        if not finalized and not paused_for_human and not lease_lost.is_set():
             final_content = "".join(assistant_buffer) or "(no response)"
             _finalize(
                 store,
@@ -741,6 +954,11 @@ async def _stream_chat(
             sequence=sequence,
         )
         final_state = "failed"
+    finally:
+        lease_heartbeat_stop.set()
+        lease_heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await lease_heartbeat
 
     yield b"event: close\ndata: {}\n\n"
     log.info(
@@ -749,6 +967,131 @@ async def _stream_chat(
         final_state,
         actor_info.get("username") or actor_info.get("id"),
         final_error,
+    )
+
+
+async def _execute_chat_run_detached(**kwargs: Any) -> None:
+    """Drain a supervisor stream while persisting it, without an HTTP owner."""
+    run_id = str(kwargs["run_id"])
+    try:
+        async for _frame in _stream_chat(_DetachedChatRequest(), **kwargs):
+            # `_stream_chat` owns persistence and finalization. Connected
+            # clients receive those frames through the durable replay stream.
+            pass
+    except Exception:  # noqa: BLE001 - never leave a task failure invisible
+        log.exception("chat: detached executor crashed run_id=%s", run_id)
+    finally:
+        _ACTIVE_RUN_TASKS.pop(run_id, None)
+
+
+def _launch_chat_run(**kwargs: Any) -> None:
+    """Start at most one detached executor for an already-claimed run."""
+    run_id = str(kwargs["run_id"])
+    existing = _ACTIVE_RUN_TASKS.get(run_id)
+    if existing is not None and not existing.done():
+        return
+    _ACTIVE_RUN_TASKS[run_id] = asyncio.create_task(
+        _execute_chat_run_detached(**kwargs), name=f"munin-chat-{run_id}"
+    )
+
+
+async def recover_persisted_chat_runs(*, store: Any, shared_state: Any) -> list[str]:
+    """Claim and relaunch durable chat work after a server restart.
+
+    The store performs the only state mutation needed for crash recovery:
+    expired ``running`` leases are fenced and changed to ``queued``.  This
+    worker then claims queued rows atomically.  It never selects
+    ``waiting_for_human`` or ``cancelled`` rows; approved HITL rows use the
+    persisted ``Command`` decision while an orphaned ordinary run continues
+    from its LangGraph checkpoint using the same conversation thread id.
+    """
+    requeue = getattr(store, "requeue_expired_runs_for_resume", None)
+    candidates_for = getattr(store, "list_queued_chat_recovery_candidates", None)
+    if not callable(requeue) or not callable(candidates_for):
+        log.warning("chat: store does not support durable chat recovery")
+        return []
+
+    try:
+        expired = requeue()
+        if expired:
+            log.info("chat: queued %d expired run(s) for checkpoint recovery", len(expired))
+        candidates = candidates_for()
+    except Exception:  # noqa: BLE001 - startup recovery must not block serving
+        log.exception("chat: unable to enumerate durable recovery candidates")
+        return []
+
+    launched: list[str] = []
+    for candidate in candidates:
+        run_id = str(candidate["run_id"])
+        existing = _ACTIVE_RUN_TASKS.get(run_id)
+        if existing is not None and not existing.done():
+            continue
+
+        resume_decisions = candidate.get("resume_decisions")
+        resume_from_checkpoint = bool(candidate.get("resume_from_checkpoint"))
+        if resume_decisions is not None or resume_from_checkpoint:
+            checkpoint_state = await _checkpoint_available(
+                shared_state,
+                thread_id=str(candidate["conversation_id"]),
+            )
+            if checkpoint_state is None:
+                # A transient checkpoint-store failure must not turn into a
+                # fresh invocation that could duplicate a tool call.
+                continue
+            if resume_decisions is not None and not checkpoint_state:
+                log.error(
+                    "chat: HITL run has no checkpoint; leaving queued run_id=%s", run_id
+                )
+                continue
+            # An empty checkpoint means the process failed before LangGraph
+            # accepted the original input, so restarting the original turn is
+            # safe and is the only useful recovery action.
+            resume_from_checkpoint = bool(checkpoint_state and resume_from_checkpoint)
+
+        try:
+            execution = store.run_execution_context(run_id=run_id)
+            lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
+        except (KeyError, RuntimeError):
+            # Another server (or a live POST handler) won the fenced claim.
+            continue
+        except Exception:  # noqa: BLE001 - leave the queued row for the next poll
+            log.exception("chat: unable to claim recovery candidate run_id=%s", run_id)
+            continue
+
+        _launch_chat_run(
+            store=store,
+            shared_state=shared_state,
+            actor_info={"id": str(candidate["actor_id"])},
+            run_id=run_id,
+            conversation_id=str(candidate["conversation_id"]),
+            prompt=str(execution.get("message") or ""),
+            conversation_history=list(execution.get("history") or []),
+            assistant_message_id=assistant_message_id,
+            lease_token=lease_token,
+            resume_decisions=resume_decisions,
+            resume_from_checkpoint=resume_from_checkpoint,
+        )
+        launched.append(run_id)
+    return launched
+
+
+async def chat_recovery_loop(*, store: Any, shared_state: Any) -> None:
+    """Poll for expired owners for the lifetime of the ASGI process."""
+    while True:
+        try:
+            await recover_persisted_chat_runs(store=store, shared_state=shared_state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - one failed scan must not stop recovery
+            log.exception("chat: durable recovery scan failed")
+        await asyncio.sleep(max(1.0, CHAT_RECOVERY_POLL_SECONDS))
+
+
+def start_chat_recovery_worker(*, store: Any, shared_state: Any) -> asyncio.Task[None]:
+    """Create the process-local scanner after the checkpointer is ready."""
+    return asyncio.create_task(
+        chat_recovery_loop(store=store, shared_state=shared_state),
+        name="munin-chat-recovery",
     )
 
 
@@ -902,8 +1245,7 @@ def register_chat_routes(
         prompt = str(exec_ctx.get("message") or content)
         conversation_history = list(exec_ctx.get("history") or [])
 
-        stream = _stream_chat(
-            request,
+        _launch_chat_run(
             store=store,
             shared_state=shared_state,
             actor_info=current,
@@ -913,6 +1255,16 @@ def register_chat_routes(
             conversation_history=conversation_history,
             assistant_message_id=assistant_message_id,
             lease_token=lease_token,
+        )
+
+        # The request is now a subscriber, not the execution owner. Browser
+        # refreshes and transient network loss detach only this replay stream;
+        # the supervisor keeps running until it reaches a terminal state.
+        stream = _stream_idempotent_replay(
+            request,
+            store=store,
+            actor_id=current["id"],
+            run_id=run_id,
         )
 
         return StreamingResponse(
@@ -988,7 +1340,127 @@ def register_chat_routes(
 
         return JSONResponse({"ok": True, "data": entry}, status_code=201)
 
+    async def resolve_human_request(request: Request) -> Response:
+        """Resolve a persisted HITL decision as the authenticated operator.
+
+        This is intentionally a server-authorized resource mutation, not an
+        AI-SDK client-side tool approval: the nonce, participant membership,
+        expiry and single-use transition are verified by the production store.
+        A LangGraph interrupt/resume worker can consume the resulting durable
+        decision without trusting any model-supplied boolean.
+        """
+        try:
+            current = await actor_dependency(request, csrf=True)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        try:
+            data = await payload_reader(request)
+        except ValueError as exc:
+            return error_response(400, "invalid_body", str(exc))
+
+        choice = str(data.get("choice") or "").strip()
+        nonce = str(data.get("nonce") or "").strip()
+        if not choice or not nonce:
+            return error_response(400, "invalid_human_resolution", "choice and nonce are required")
+        request_id = str(request.path_params["request_id"])
+        try:
+            result = store.resolve_human_decision(
+                actor_id=current["id"],
+                request_id=request_id,
+                choice=choice,
+                nonce=nonce,
+                guidance=str(data.get("guidance") or data.get("reason") or ""),
+            )
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        except KeyError:
+            return error_response(404, "not_found", "human request not found")
+        except ValueError as exc:
+            return error_response(400, "invalid_human_resolution", str(exc))
+
+        if result.get("state") == "queued":
+            # Native Deep Agents HITL resumes its checkpoint with LangGraph
+            # ``Command``.  The store's resolved request (nonce, membership,
+            # choice) is the authority; the UI never submits a tool result.
+            try:
+                run = store.get_run(str(result["run_id"]))
+                lease_token, assistant_message_id = _claim_direct(
+                    store, run_id=str(result["run_id"])
+                )
+                _launch_chat_run(
+                    store=store,
+                    shared_state=shared_state,
+                    actor_info=current,
+                    run_id=str(result["run_id"]),
+                    conversation_id=str(run["conversation_id"]),
+                    prompt="",
+                    conversation_history=[],
+                    assistant_message_id=assistant_message_id,
+                    lease_token=lease_token,
+                    resume_decisions=[{"type": "approve"}]
+                    * int(result.get("decision_count") or 1),
+                )
+            except Exception as exc:  # noqa: BLE001 - do not report success for a stranded approval
+                log.exception("chat: HITL resume launch failed request_id=%s", request_id)
+                return error_response(500, "resume_failed", str(exc))
+        return JSONResponse({"ok": True, "data": result})
+
+    async def chat_resume(request: Request) -> Response:
+        """Reconnect AI SDK ``useChat({resume: true})`` to an active run.
+
+        AI SDK uses ``GET /api/chat/{chat_id}/stream``.  Munin's chat id is
+        the conversation id, so resolve the authenticated actor's active run
+        and replay the canonical persisted event log.  A 204 is the standard
+        signal that there is no stream left to resume.
+        """
+        try:
+            current = await actor_dependency(request, csrf=False)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+
+        conversation_id = str(request.path_params["conversation_id"])
+        try:
+            aggregate = store.get_conversation(
+                actor_id=current["id"], conversation_id=conversation_id
+            )
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        except KeyError:
+            return error_response(404, "not_found", "conversation not found")
+
+        active_runs = [
+            run for run in aggregate.get("runs", [])
+            if str(run.get("state") or "") in NON_TERMINAL_RUN_STATES
+        ]
+        if not active_runs:
+            return Response(status_code=204)
+        run = max(active_runs, key=lambda row: int(row.get("updated_at_ms") or 0))
+        run_id = str(run["id"])
+        return StreamingResponse(
+            _stream_idempotent_replay(
+                request, store=store, actor_id=current["id"], run_id=run_id
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+                "X-Munin-Run-Id": run_id,
+                "X-Munin-Idempotent-Replay": "true",
+            },
+        )
+
     routes.append(Route("/api/chat", chat, methods=["POST"]))
     routes.append(
+        Route("/api/chat/{conversation_id}/stream", chat_resume, methods=["GET"])
+    )
+    routes.append(
         Route("/api/chat/{run_id}/guidance", chat_guidance, methods=["POST"])
+    )
+    routes.append(
+        Route(
+            "/api/human-requests/{request_id}/resolve",
+            resolve_human_request,
+            methods=["POST"],
+        )
     )

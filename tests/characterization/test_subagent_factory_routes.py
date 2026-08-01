@@ -1,4 +1,4 @@
-"""Each of the 5 runtime types produces the right runnable."""
+"""Each supported runtime type produces the right runnable."""
 import pytest
 
 pytest.importorskip("munin.core.autonomy.subagent_factory")
@@ -51,11 +51,9 @@ async def test_compiled_langgraph_invocable_offline():
     assert result["content"] == "ok"
 
 
-def test_async_langgraph_raises_without_url(monkeypatch):
-    monkeypatch.delenv("MUNIN_LANGGRAPH_URL", raising=False)
-    factory = SubagentFactory(tools=[], model=_fake_model())
-    with pytest.raises(NotImplementedError):
-        factory.create_subagent(make_spec(runtime_type="async_langgraph"))
+def test_unimplemented_remote_runtime_is_rejected_by_persisted_schema():
+    with pytest.raises(Exception):
+        make_spec(runtime_type="async_langgraph")
 
 
 def test_unknown_runtime_raises():

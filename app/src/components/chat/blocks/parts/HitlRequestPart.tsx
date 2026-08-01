@@ -14,8 +14,8 @@ export interface HitlRequestPartProps {
   nonce?: string;
   choices?: string[];
   resolution?: "approved" | "rejected";
-  onApprove: (requestId: string, choice: string, nonce: string) => void;
-  onReject: (requestId: string, choice: string, nonce: string, reason: string) => void;
+  onApprove: (requestId: string, choice: string, nonce: string) => Promise<void>;
+  onReject: (requestId: string, choice: string, nonce: string, reason: string) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,25 +41,48 @@ export function HitlRequestPart({
 }: HitlRequestPartProps) {
   const [rejectReason, setRejectReason] = useState("");
   const [showRejectInput, setShowRejectInput] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [localResolution, setLocalResolution] = useState<"approved" | "rejected" | undefined>();
 
-  const resolved = Boolean(resolution);
+  const effectiveResolution = resolution ?? localResolution;
+  const resolved = Boolean(effectiveResolution);
   const effectiveChoices = choices.length > 0 ? choices : ["approve", "deny"];
 
-  function handleChoiceClick(choice: string) {
-    if (resolved) return;
-    const isApproval = choice === "approve" || choice === "allow" || choice === "accept";
+  async function handleChoiceClick(choice: string) {
+    if (resolved || pending) return;
+    const normalized = choice.trim().toLowerCase();
+    const isApproval = normalized === "approve" || normalized === "allow" || normalized === "accept";
     if (isApproval) {
-      onApprove(requestId, choice, nonce);
+      setPending(true);
+      try {
+        await onApprove(requestId, choice, nonce);
+        setLocalResolution("approved");
+      } catch {
+        // The caller presents the authenticated mutation error. Keep the
+        // card actionable so a nonce/transport failure is never mistaken for
+        // an approval.
+      } finally {
+        setPending(false);
+      }
     } else {
       setShowRejectInput(choice);
     }
   }
 
-  function handleRejectSubmit(choice: string) {
-    if (resolved) return;
-    onReject(requestId, choice, nonce, rejectReason);
-    setShowRejectInput(null);
-    setRejectReason("");
+  async function handleRejectSubmit(choice: string) {
+    if (resolved || pending) return;
+    setPending(true);
+    try {
+      await onReject(requestId, choice, nonce, rejectReason);
+      setLocalResolution("rejected");
+      setShowRejectInput(null);
+      setRejectReason("");
+    } catch {
+      // See approval path: retain the form and let the parent surface the
+      // server error without producing an unhandled event-handler promise.
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
@@ -67,13 +90,13 @@ export function HitlRequestPart({
       className={cn(
         "rounded-md border px-3 py-2 text-sm",
         resolved
-          ? resolution === "approved"
+          ? effectiveResolution === "approved"
             ? "border-success/40 bg-success/10"
             : "border-danger/40 bg-danger/10"
           : "border-warning/40 bg-warning/10"
       )}
       data-request-id={requestId}
-      role="alertdialog"
+      aria-busy={pending || undefined}
       aria-label={`Human approval required: ${toolName}`}
     >
       {/* Header */}
@@ -83,12 +106,12 @@ export function HitlRequestPart({
           <span
             className={cn(
               "rounded px-1.5 py-0.5 text-xs font-medium",
-              resolution === "approved"
+              effectiveResolution === "approved"
                 ? "bg-success/20 text-success"
                 : "bg-danger/20 text-danger"
             )}
           >
-            {resolution}
+            {effectiveResolution}
           </span>
         ) : (
           <span className="rounded bg-warning/20 px-1.5 py-0.5 text-xs font-medium text-warning">
@@ -109,13 +132,16 @@ export function HitlRequestPart({
         <div className="mt-2 flex flex-col gap-2">
           <div className="flex gap-2">
             {effectiveChoices.map((choice) => {
-              const isApproval = choice === "approve" || choice === "allow" || choice === "accept";
+              const normalized = choice.trim().toLowerCase();
+              const isApproval = normalized === "approve" || normalized === "allow" || normalized === "accept";
               return (
                 <button
                   key={choice}
-                  onClick={() => handleChoiceClick(choice)}
+                  type="button"
+                  onClick={() => void handleChoiceClick(choice)}
+                  disabled={pending}
                   className={cn(
-                    "rounded px-3 py-1 text-xs font-semibold transition-colors capitalize",
+                    "rounded px-3 py-1 text-xs font-semibold transition-colors capitalize disabled:cursor-wait disabled:opacity-60",
                     isApproval
                       ? "bg-success text-white hover:bg-success/80"
                       : "bg-danger text-white hover:bg-danger/80"
@@ -139,12 +165,14 @@ export function HitlRequestPart({
                   "focus:outline-none focus:ring-1 focus:ring-accent"
                 )}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleRejectSubmit(showRejectInput);
+                  if (e.key === "Enter") void handleRejectSubmit(showRejectInput);
                 }}
               />
               <button
-                onClick={() => handleRejectSubmit(showRejectInput)}
-                className="rounded bg-danger px-3 py-1 text-xs font-semibold text-white hover:bg-danger/80"
+                type="button"
+                disabled={pending}
+                onClick={() => void handleRejectSubmit(showRejectInput)}
+                className="rounded bg-danger px-3 py-1 text-xs font-semibold text-white hover:bg-danger/80 disabled:cursor-wait disabled:opacity-60"
               >
                 Confirm
               </button>

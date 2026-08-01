@@ -345,6 +345,11 @@ def audited_tool(
                 )
             return result
 
+        # Preserve the audited risk level on the FastMCP callable.  The
+        # Deep Agents builder derives its native HITL policy from this live
+        # registry metadata rather than from a stale second name list.
+        wrapper.__munin_audit_level__ = level  # type: ignore[attr-defined]
+        wrapper.__munin_tool_name__ = tool_name  # type: ignore[attr-defined]
         return wrapper
 
     return decorator

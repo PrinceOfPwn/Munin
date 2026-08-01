@@ -8,8 +8,6 @@ Routing:
   deep_agent              -> deepagents.create_deep_agent
   compiled_langgraph      -> langchain.agents.create_agent (CompiledStateGraph,
                              messages state = CompiledSubAgent-compatible)
-  async_langgraph         -> AsyncSubAgentProxy via langgraph-sdk (needs MUNIN_LANGGRAPH_URL)
-  swarm_member            -> create_agent + handoff tools
 
 There is deliberately no depth/count cap anywhere in this module (issue #9
 §4 "no arbitrary hard caps"): nesting is enabled by handing the Autonomy
@@ -36,8 +34,6 @@ class SubagentFactory:
             "persisted_subagent_dict": self._make_persisted_subagent_dict,
             "deep_agent": self._make_deep_agent,
             "compiled_langgraph": self._make_compiled_langgraph,
-            "async_langgraph": self._make_async_langgraph,
-            "swarm_member": self._make_swarm_member,
         }
         maker = router.get(spec.runtime_type)
         if maker is None:
@@ -98,18 +94,22 @@ class SubagentFactory:
             "name": spec.name,
             "description": spec.purpose,
             "system_prompt": spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
-            "tools": self._filter_tools(spec.tools),
+            "tools": self._filter_tools(spec.tools, may_create_child=spec.may_create_child),
             "model": self._resolve_model(spec),
         }
 
     def _make_deep_agent(self, spec: SubagentSpec) -> Any:
         from deepagents import create_deep_agent  # noqa: PLC0415
+        from ..tool_gateway import approval_policy_for_tools  # noqa: PLC0415
+
+        tools = self._filter_tools(spec.tools, may_create_child=spec.may_create_child)
 
         return create_deep_agent(
             name=spec.name,
             model=self._resolve_model(spec),
-            tools=self._filter_tools(spec.tools),
+            tools=tools,
             system_prompt=spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
+            interrupt_on=approval_policy_for_tools(tools),
         )
 
     def _make_compiled_langgraph(self, spec: SubagentSpec) -> Any:
@@ -123,29 +123,23 @@ class SubagentFactory:
 
         return create_agent(
             model=self._resolve_model(spec),
-            tools=self._filter_tools(spec.tools),
+            tools=self._filter_tools(spec.tools, may_create_child=spec.may_create_child),
             system_prompt=spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
             name=spec.name,
         )
 
-    def _make_async_langgraph(self, spec: SubagentSpec) -> Any:
-        raise NotImplementedError(
-            f"async_langgraph runtime for spec {spec.name!r} requires deploying "
-            "a graph that respects the spec's prompt, model, and tool restrictions. "
-            "Use deep_agent or compiled_langgraph instead."
-        )
-
-    def _make_swarm_member(self, spec: SubagentSpec) -> Any:
-        raise NotImplementedError(
-            f"swarm_member runtime for spec {spec.name!r} requires composing multiple "
-            "specialists via munin.core.coordination.swarm.build_swarm. Individual agents "
-            "cannot form a swarm - use deep_agent or compiled_langgraph instead."
-        )
-
     # ------------------------------------------------------------------
 
-    def _filter_tools(self, tool_names: list[str]) -> list[Any]:
-        if not tool_names:
-            return []
+    def _filter_tools(self, tool_names: list[str], *, may_create_child: bool = False) -> list[Any]:
         name_set = set(tool_names)
+        if may_create_child:
+            # Kernel-owned meta tools are safe to inherit as *capability
+            # constructors*. Any resulting side effect still encounters the
+            # gateway's scope/audit/HITL policy.
+            name_set |= {
+                "create_tool", "invoke_registered_tool", "list_registered_tools",
+                "inspect_registered_tool", "create_subagent", "invoke_registered_agent",
+                "list_registered_agents", "inspect_registered_agent", "create_workflow",
+                "invoke_registered_workflow", "list_registered_workflows", "schedule_workers",
+            }
         return [t for t in self._tools if getattr(t, "name", None) in name_set]

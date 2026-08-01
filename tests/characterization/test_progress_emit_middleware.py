@@ -2,7 +2,7 @@
 
 Two channels, one envelope format:
 * middleware awrap_tool_call → tool_intent / tool_result / tool_failed
-* runtime_adapter.translate_event → reasoning / run_state (text + lifecycle)
+* runtime_adapter.translate_event → assistant_text / activity / run_state
 """
 import pytest
 from unittest.mock import MagicMock
@@ -56,7 +56,7 @@ async def test_wrap_tool_call_emits_failure_and_reraises():
 # -- translate_event (runtime_adapter) ---------------------------------------
 
 
-def test_chat_model_stream_translates_to_reasoning():
+def test_chat_model_stream_translates_to_assistant_text_not_private_reasoning():
     from langchain_core.messages import AIMessageChunk
 
     event = {
@@ -65,8 +65,46 @@ def test_chat_model_stream_translates_to_reasoning():
         "data": {"chunk": AIMessageChunk(content="thinking about target")},
     }
     envelope = translate_event(event, run_id="run-t")
-    assert envelope["kind"] == "reasoning"
+    assert envelope["kind"] == "assistant_text"
     assert "thinking about target" in envelope["text"]
+
+
+def test_model_stream_never_forwards_provider_reasoning_blocks_or_think_tags():
+    state: dict = {}
+    reasoning_block = type(
+        "Chunk", (), {"content": [{"type": "reasoning", "text": "private"}]}
+    )()
+    assert translate_event(
+        {"event": "on_chat_model_stream", "data": {"chunk": reasoning_block}},
+        run_id="run-t",
+        thinking_state=state,
+    ) is None
+
+    first = type("Chunk", (), {"content": "<think>private"})()
+    second = type("Chunk", (), {"content": " thought</think>visible"})()
+    assert translate_event(
+        {"event": "on_chat_model_stream", "data": {"chunk": first}},
+        run_id="run-t",
+        thinking_state=state,
+    ) is None
+    assert translate_event(
+        {"event": "on_chat_model_stream", "data": {"chunk": second}},
+        run_id="run-t",
+        thinking_state=state,
+    ) == {"kind": "assistant_text", "run_id": "run-t", "text": "visible"}
+
+
+def test_chat_model_start_translates_to_safe_operational_activity():
+    envelope = translate_event(
+        {"event": "on_chat_model_start", "name": "ChatOpenAI", "data": {}},
+        run_id="run-t",
+    )
+    assert envelope == {
+        "kind": "activity",
+        "run_id": "run-t",
+        "stage": "planning",
+        "text": "Planning the next authorized action",
+    }
 
 
 def test_root_chain_end_translates_to_run_state_with_content():

@@ -17,38 +17,48 @@ function makeEnvelope(
 }
 
 describe("createTranslator - text part lifecycle", () => {
-  it("emits text-start + text-delta for the first reasoning envelope", () => {
+  it("emits text-start + text-delta for the first assistant text envelope", () => {
     const { translate } = createTranslator("run-x");
-    const chunks = translate(makeEnvelope({ kind: "reasoning", text: "Analyzing..." }));
+    const chunks = translate(makeEnvelope({ kind: "assistant_text", text: "Analyzing..." }));
     expect(chunks).toEqual([
       { type: "text-start", id: "text-run-x" },
       { type: "text-delta", id: "text-run-x", delta: "Analyzing..." },
     ]);
   });
 
-  it("reuses the same text id across consecutive reasoning deltas", () => {
+  it("reuses the same text id across consecutive assistant deltas", () => {
     const { translate } = createTranslator("run-x");
-    translate(makeEnvelope({ kind: "reasoning", text: "a" }));
-    const next = translate(makeEnvelope({ kind: "reasoning", text: "b" }));
+    translate(makeEnvelope({ kind: "assistant_text", text: "a" }));
+    const next = translate(makeEnvelope({ kind: "assistant_text", text: "b" }));
     // No new text-start on the second delta
     expect(next).toEqual([{ type: "text-delta", id: "text-run-x", delta: "b" }]);
   });
 
   it("closes the text part + emits finish on run_state completed", () => {
     const { translate, state } = createTranslator("run-x");
-    translate(makeEnvelope({ kind: "reasoning", text: "hi" }));
+    translate(makeEnvelope({ kind: "assistant_text", text: "hi" }));
     const chunks = translate(makeEnvelope({ kind: "run_state", state: "completed" }));
     expect(chunks).toContainEqual({ type: "text-end", id: "text-run-x" });
+    expect(chunks).toContainEqual({
+      type: "data-run-state",
+      id: "run-state",
+      data: { state: "completed", runId: "run-123" },
+    });
     expect(chunks).toContainEqual({ type: "finish" });
     expect(state.finished).toBe(true);
   });
 
   it("emits an error chunk (finito) for failed run_state, closing text first", () => {
     const { translate, state } = createTranslator("run-x");
-    translate(makeEnvelope({ kind: "reasoning", text: "boom" }));
+    translate(makeEnvelope({ kind: "assistant_text", text: "boom" }));
     const chunks = translate(makeEnvelope({ kind: "run_state", state: "failed", error: "OOM" }));
     expect(chunks[0]).toEqual({ type: "text-end", id: "text-run-x" });
-    expect(chunks[1]).toEqual({ type: "error", errorText: "OOM" });
+    expect(chunks[1]).toEqual({
+      type: "data-run-state",
+      id: "run-state",
+      data: { state: "failed", runId: "run-123" },
+    });
+    expect(chunks[2]).toEqual({ type: "error", errorText: "OOM" });
     expect(state.finished).toBe(true);
   });
 
@@ -244,13 +254,17 @@ describe("createTranslator - data-* parts", () => {
     const { translate } = createTranslator("run-x");
     const chunks = translate(makeEnvelope({ kind: "run_state", state: "queued" }));
     expect(chunks).toEqual([
-      { type: "data-run-state", id: "run-state", data: { state: "queued" } },
+      {
+        type: "data-run-state",
+        id: "run-state",
+        data: { state: "queued", runId: "run-123" },
+      },
     ]);
   });
 
   it("envelopes with empty text payloads produce no chunks", () => {
     const { translate } = createTranslator("run-x");
-    expect(translate(makeEnvelope({ kind: "reasoning", text: "" }))).toEqual([]);
+    expect(translate(makeEnvelope({ kind: "assistant_text", text: "" }))).toEqual([]);
     expect(translate(makeEnvelope({ kind: "note", text: "" }))).toEqual([]);
   });
 });

@@ -57,7 +57,11 @@ async function proxy(request: Request): Promise<Response> {
   // same port as the HTTP API, so the proxy target follows MUNIN_PRODUCTION_API_URL
   // (default 127.0.0.1:8787) instead of the retired :8890 MCP-only process.
   const upstreamBase = (process.env.MUNIN_PRODUCTION_API_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
-  const upstreamUrl = `${upstreamBase}${incomingUrl.pathname}${incomingUrl.search}`;
+  // FastMCP serves streamable HTTP at `/mcp/`. Next canonicalizes the browser
+  // route to `/mcp`, so normalize just the upstream target instead of sending
+  // a redirect that breaks MCP session initialization through the proxy.
+  const upstreamPath = incomingUrl.pathname === "/mcp" ? "/mcp/" : incomingUrl.pathname;
+  const upstreamUrl = `${upstreamBase}${upstreamPath}${incomingUrl.search}`;
 
   try {
     const upstream = await fetch(upstreamUrl, { method, headers, body });

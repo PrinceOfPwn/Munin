@@ -52,12 +52,14 @@ class AutonomyKernel:
         run_id: str = "",
         agent_id: str = "supervisor",
         tools_provider: Callable[[], list[Any]] | None = None,
+        checkpointer: Any = None,
     ):
         self._state = state
         self._model = model
         self._run_id = run_id
         self._agent_id = agent_id
         self._tools_provider = tools_provider or (lambda: [])
+        self._checkpointer = checkpointer
 
         self.tool_factory = ToolFactory(state, run_id=run_id, agent_id=agent_id)
         self.agent_registry = AgentRegistry(state=state)
@@ -100,7 +102,10 @@ class AutonomyKernel:
     ) -> dict[str, Any]:
         try:
             compiled = self.workflow_registry.rebuild_workflow(
-                workflow_id, tools=self._tools_provider(), model=self._model
+                workflow_id,
+                tools=self._tools_provider(),
+                model=self._model,
+                checkpointer=self._checkpointer,
             )
             row = self.workflow_registry.inspect_registered_workflow(workflow_id)
             version = row["version"]
@@ -143,7 +148,7 @@ class AutonomyKernel:
         builder.set_entry_point("start")
         builder.add_conditional_edges("start", lambda s: fanout("tool_worker", s["items"]))
         builder.add_edge("tool_worker", END)
-        graph = builder.compile()
+        graph = builder.compile(checkpointer=self._checkpointer)
 
         final = await graph.ainvoke(
             {"messages": [], "items": items, "aggregate": [], "worker_index": -1, "task_args": {}}
@@ -294,7 +299,12 @@ class AutonomyKernel:
         async def create_workflow(spec_json: str, persist: bool = False) -> str:
             try:
                 spec = WorkflowSpec.from_json(spec_json)
-                compiled = create_workflow(spec, tools=kernel._tools_provider(), model=kernel._model)
+                compiled = create_workflow(
+                    spec,
+                    tools=kernel._tools_provider(),
+                    model=kernel._model,
+                    checkpointer=kernel._checkpointer,
+                )
             except Exception as exc:  # noqa: BLE001
                 return _json({"ok": False, "error": f"workflow build failed: {exc}"})
             if persist:
@@ -349,7 +359,7 @@ class AutonomyKernel:
                "Full metadata + provenance for one registered tool.", InspectArgs),
             st(create_subagent, "create_subagent",
                "Materialize a specialist agent from a spec. runtime_type: compiled_langgraph "
-               "(default), deep_agent, persisted_subagent_dict, async_langgraph, swarm_member. "
+               "(default), deep_agent, or persisted_subagent_dict. "
                "persist=true registers it in the Agent Registry for later runs.",
                CreateSubagentArgs),
             st(invoke_registered_agent, "invoke_registered_agent",

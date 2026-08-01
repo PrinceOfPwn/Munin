@@ -14,8 +14,6 @@ RuntimeType = Literal[
     "persisted_subagent_dict",
     "deep_agent",
     "compiled_langgraph",
-    "async_langgraph",
-    "swarm_member",
 ]
 
 

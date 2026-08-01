@@ -475,6 +475,7 @@ async def _stream_run(
     final_content = ""
     outcome = "completed"
     ok = True
+    paused_for_human = False
     try:
         async for envelope in supervisor_runner(
             prompt,
@@ -484,10 +485,19 @@ async def _stream_run(
             model=model,
             conversation_history=conversation_history,
             thread_id=conversation_id or run_id,
+            human_request_store=store,
         ):
             kind = envelope.get("kind")
-            if kind == "reasoning":
+            if kind == "assistant_text":
                 session.add_reasoning(str(envelope.get("text") or ""))
+            elif kind == "human_request":
+                paused_for_human = True
+                outcome = "waiting_for_human"
+                ok = False
+                final_content = "Approval is required in the authenticated Munin console before this action can run."
+                with contextlib.suppress(Exception):
+                    await message.reply(final_content)
+                break
             elif kind == "tool_intent":
                 session.add_tool_event(
                     f"- calling `{envelope.get('tool_name') or 'unknown'}`"
@@ -517,12 +527,13 @@ async def _stream_run(
     finally:
         if not final_content:
             final_content = "".join(session.reasoning) or "(no response)"
-        _finalize(
-            store,
-            run_id=run_id, lease_token=lease_token,
-            content=final_content or "(no response)", outcome=outcome,
-            conversation_id=conversation_id,
-        )
+        if not paused_for_human:
+            _finalize(
+                store,
+                run_id=run_id, lease_token=lease_token,
+                content=final_content or "(no response)", outcome=outcome,
+                conversation_id=conversation_id,
+            )
         await session.close(final_content=final_content or "(no response)", ok=ok)
 
 

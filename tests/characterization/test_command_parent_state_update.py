@@ -1,4 +1,4 @@
-"""LangGraph Command and swarm_member route tests."""
+"""LangGraph Command exists; unsupported swarm stubs are not advertised."""
 import pytest
 
 def test_langgraph_command_exists():
@@ -9,12 +9,8 @@ def test_langgraph_command_exists():
     except ImportError:
         pytest.skip("langgraph.types.Command not in this version")
 
-def test_swarm_member_route(monkeypatch, fake_chat_model_factory):
-    monkeypatch.delenv("MUNIN_LANGGRAPH_URL", raising=False)
+def test_swarm_member_runtime_is_rejected_by_schema():
     pytest.importorskip("munin.core.autonomy.subagent_factory")
     from munin.core.autonomy.spec import SubagentSpec
-    from munin.core.autonomy.subagent_factory import SubagentFactory
-    factory = SubagentFactory(tools=[], model=fake_chat_model_factory())
-    spec = SubagentSpec(name="swarm_test", purpose="test", runtime_type="swarm_member")
-    with pytest.raises(NotImplementedError):
-        factory.create_subagent(spec)
+    with pytest.raises(Exception):
+        SubagentSpec(name="swarm_test", purpose="test", runtime_type="swarm_member")

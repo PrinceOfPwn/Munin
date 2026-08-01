@@ -1005,10 +1005,35 @@ class ProductionStore:
             self._require_participant(conn, actor_id=actor_id, conversation_id=artifact["conversation_id"])
             return _row(artifact)
 
-    # ``renew_lease`` was removed in Fase 2 (issue #9). The dispatcher owned
-    # the heartbeat loop; ``/api/chat`` now owns the run for the duration of
-    # the request and burns a lease long enough (``MUNIN_CHAT_LEASE_SECONDS``,
-    # default 4h) that mid-run renewals are not needed.
+    def renew_run_lease(
+        self, *, run_id: str, lease_token: str, lease_seconds: int | None = None
+    ) -> bool:
+        """Extend an active chat lease only for its current fenced owner.
+
+        A detached chat executor uses this small heartbeat rather than a
+        multi-hour lease.  A process that disappears therefore leaves a
+        recoverable lease after a bounded interval, while a still-running
+        worker cannot be stolen by a second server process.
+        """
+        now = _now_ms()
+        duration = max(
+            60,
+            int(lease_seconds or os.environ.get("MUNIN_CHAT_LEASE_SECONDS", "120")),
+        )
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT fencing_epoch FROM agent_runs WHERE id=? AND state='running' "
+                "AND lease_token=? AND lease_expires_at_ms>=?",
+                (run_id, lease_token, now),
+            ).fetchone()
+            if not row:
+                return False
+            changed = conn.execute(
+                "UPDATE agent_runs SET lease_expires_at_ms=?,updated_at_ms=? "
+                "WHERE id=? AND state='running' AND lease_token=? AND fencing_epoch=?",
+                (now + duration * 1000, now, run_id, lease_token, row["fencing_epoch"]),
+            )
+            return int(changed.rowcount) == 1
 
     def run_execution_context(self, *, run_id: str) -> dict[str, Any]:
         """Load the bounded durable transcript a worker is allowed to use."""
@@ -1033,6 +1058,108 @@ class ProductionStore:
         millis = int(when.timestamp() * 1000) if hasattr(when, "timestamp") else int(when)
         with self._transaction() as conn:
             conn.execute("UPDATE agent_runs SET lease_expires_at_ms=? WHERE id=?", (millis, run_id))
+
+    def requeue_expired_runs_for_resume(self) -> list[str]:
+        """Fence and requeue orphaned chat runs for checkpoint recovery.
+
+        This differs deliberately from :meth:`recover_expired_runs`, which
+        preserves the legacy dispatcher contract by terminally interrupting a
+        run.  The chat executor is LangGraph-backed: after a process crash the
+        graph checkpoint is authoritative, so the safe action is to clear the
+        expired owner and queue the run for a new worker.  ``waiting_for_human``
+        and cancelled runs are intentionally absent from the query.
+        """
+        requeued: list[str] = []
+        with self._transaction() as conn:
+            now = _now_ms()
+            rows = conn.execute(
+                "SELECT * FROM agent_runs WHERE state='running' "
+                "AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms < ?",
+                (now,),
+            ).fetchall()
+            for row in rows:
+                changed = conn.execute(
+                    "UPDATE agent_runs SET state='queued',lease_worker_id=NULL,"
+                    "lease_token=NULL,lease_expires_at_ms=NULL,"
+                    "state_version=state_version+1,updated_at_ms=? "
+                    "WHERE id=? AND state='running' AND fencing_epoch=? "
+                    "AND lease_expires_at_ms < ?",
+                    (now, row["id"], row["fencing_epoch"], now),
+                )
+                if int(changed.rowcount) != 1:
+                    continue
+                conn.execute(
+                    "UPDATE messages SET status='queued',updated_at_ms=?,version=version+1 "
+                    "WHERE id=?",
+                    (now, row["assistant_message_id"]),
+                )
+                self._append_event(
+                    conn,
+                    run_id=row["id"],
+                    kind="run.recovery_queued",
+                    payload={
+                        "reason": "lease_expired",
+                        "previous_fencing_epoch": int(row["fencing_epoch"]),
+                    },
+                )
+                requeued.append(str(row["id"]))
+        return requeued
+
+    def list_queued_chat_recovery_candidates(self) -> list[dict[str, Any]]:
+        """Return queued runs and the only safe way each may be resumed.
+
+        A resolved native HITL request is resumed with its persisted
+        ``Command(resume={"decisions": ...})`` shape.  A previously claimed
+        run with no pending human decision resumes from the last LangGraph
+        checkpoint.  A never-claimed run starts normally.  The method is
+        read-only; callers must still use the fenced direct-claim transition.
+        """
+        candidates: list[dict[str, Any]] = []
+        with self._read_only() as conn:
+            rows = conn.execute(
+                "SELECT id,actor_id,conversation_id,assistant_message_id,fencing_epoch "
+                "FROM agent_runs WHERE state='queued' ORDER BY created_at_ms,id"
+            ).fetchall()
+            for row in rows:
+                resolved = conn.execute(
+                    "SELECT response_json,scope_json FROM human_requests "
+                    "WHERE run_id=? AND state='resolved' "
+                    "ORDER BY resolved_at_ms DESC,id DESC LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                decisions: list[dict[str, str]] | None = None
+                if resolved:
+                    response = json.loads(resolved["response_json"] or "{}")
+                    choice = str(response.get("choice") or "").strip().lower()
+                    # Store transitions rejections to ``cancelled``. Keep a
+                    # defensive check here so a malformed legacy row can
+                    # never become an implicit approval during recovery.
+                    if choice.startswith("approve"):
+                        scope = json.loads(resolved["scope_json"] or "{}")
+                        actions = scope.get("actions") if isinstance(scope, dict) else []
+                        action_rows = (
+                            [action for action in actions if isinstance(action, dict)]
+                            if isinstance(actions, list)
+                            else []
+                        )
+                        # Native Deep Agents HITL always persists the exact
+                        # interrupted tool actions.  Older/manual gates do
+                        # not; never invent a ``Command`` decision for them.
+                        if action_rows:
+                            decisions = [{"type": "approve"}] * len(action_rows)
+                    else:
+                        continue
+                candidates.append(
+                    {
+                        "run_id": str(row["id"]),
+                        "actor_id": str(row["actor_id"]),
+                        "conversation_id": str(row["conversation_id"]),
+                        "assistant_message_id": str(row["assistant_message_id"]),
+                        "resume_decisions": decisions,
+                        "resume_from_checkpoint": bool(row["fencing_epoch"]) and not decisions,
+                    }
+                )
+        return candidates
 
     def recover_expired_runs(self) -> list[str]:
         recovered: list[str] = []
@@ -1372,13 +1499,101 @@ class ProductionStore:
                 raise PermissionError("human request is invalid, expired, or already resolved")
             response = {"choice": choice, "guidance": redact_text(guidance)[:4_000], "actor_id": actor_id}
             conn.execute("UPDATE human_requests SET state='resolved',response_json=?,resolved_at_ms=? WHERE id=? AND state='waiting'", (_json(response), now, request_id))
-            terminal = choice.lower().startswith("reject")
+            terminal = choice.lower().startswith(("reject", "deny", "cancel"))
             target = "cancelled" if terminal else "queued"
             conn.execute("UPDATE agent_runs SET state=?,state_version=state_version+1,updated_at_ms=? WHERE id=? AND state='waiting_for_human'", (target, now, request["run_id"]))
             conn.execute("UPDATE messages SET status=?,updated_at_ms=?,version=version+1 WHERE id=?", (target, now, request["assistant_message_id"]))
-            self._append_event(conn, run_id=request["run_id"], kind="human_request.resolved", payload={"human_request_id": request_id, "choice": choice, "guidance": response["guidance"]}, actor_id=actor_id)
+            scope = json.loads(request["scope_json"])
+            actions = scope.get("actions") if isinstance(scope, dict) else []
+            if not isinstance(actions, list):
+                actions = []
+            action_rows = [action for action in actions if isinstance(action, dict)]
+            action_names = [str(action.get("name") or "unknown") for action in action_rows]
+            self._append_event(
+                conn,
+                run_id=request["run_id"],
+                kind="human_request.resolved",
+                payload={
+                    # Keep a stable, displayable identity for UIMessage replay.
+                    # The nonce remains hash-only and is never included here.
+                    "human_request_id": request_id,
+                    "request_id": request_id,
+                    "choice": choice,
+                    "resolution": "rejected" if terminal else "approved",
+                    "tool_name": action_names[0] if len(action_names) == 1 else "multiple_tools",
+                    "args": {"actions": action_rows},
+                    "guidance": response["guidance"],
+                },
+                actor_id=actor_id,
+            )
             self._audit(conn, actor_id=actor_id, action="human_request.resolved", resource_type="human_request", resource_id=request_id, outcome="success", metadata={"choice": choice})
-            return {"id": request_id, "run_id": request["run_id"], "state": target, "choice": choice}
+            return {
+                "id": request_id,
+                "run_id": request["run_id"],
+                "state": target,
+                "choice": choice,
+                "decision_count": max(1, len(action_rows)),
+            }
+
+    def reissue_human_decision_nonce(self, *, actor_id: str, request_id: str) -> dict[str, Any]:
+        """Issue a fresh one-time nonce to an authorized replay subscriber.
+
+        The original nonce is intentionally never stored in clear text. A
+        reconnecting UI therefore receives a replacement after participant
+        verification; this makes a persisted HITL card actionable without
+        weakening the single-use transition in ``resolve_human_decision``.
+        """
+        now = _now_ms()
+        nonce = secrets.token_urlsafe(32)
+        with self._transaction() as conn:
+            request = conn.execute(
+                "SELECT h.*,r.conversation_id FROM human_requests h "
+                "JOIN agent_runs r ON r.id=h.run_id WHERE h.id=?",
+                (request_id,),
+            ).fetchone()
+            if not request:
+                raise KeyError(request_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
+            if request["state"] != "waiting" or int(request["expires_at_ms"]) < now:
+                raise PermissionError("human request is not awaiting a decision")
+            conn.execute(
+                "UPDATE human_requests SET nonce_hash=? WHERE id=? AND state='waiting'",
+                (self._token_hash(nonce), request_id),
+            )
+            self._audit(conn, actor_id=actor_id, action="human_request.nonce_reissued", resource_type="human_request", resource_id=request_id, outcome="success")
+        return {"id": request_id, "nonce": nonce}
+
+    def authorize_approved_tool_call(
+        self, *, run_id: str, tool_name: str, arguments: dict[str, Any]
+    ) -> bool:
+        """True only for the exact tool call approved in the active run.
+
+        This is a second, server-side guard for privileged functions such as
+        self-extension PR publication. It prevents an MCP client or a model
+        boolean from being treated as a human approval.
+        """
+        if not run_id or not tool_name:
+            return False
+        with self._read_only() as conn:
+            rows = conn.execute(
+                "SELECT scope_json,response_json,state FROM human_requests WHERE run_id=?",
+                (run_id,),
+            ).fetchall()
+        for row in rows:
+            if row["state"] != "resolved":
+                continue
+            response = json.loads(row["response_json"] or "{}")
+            if str(response.get("choice") or "").strip().lower() != "approve":
+                continue
+            scope = json.loads(row["scope_json"] or "{}")
+            actions = scope.get("actions") if isinstance(scope, dict) else []
+            for action in actions if isinstance(actions, list) else []:
+                if not isinstance(action, dict) or action.get("name") != tool_name:
+                    continue
+                approved_args = action.get("args")
+                if isinstance(approved_args, dict) and approved_args == arguments:
+                    return True
+        return False
 
     def request_run_cancellation(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         with self._transaction() as conn:
@@ -1927,7 +2142,7 @@ class MuninStore:
 
     # ------------------------------------------------------------------
     # Mirror helpers — write-through cache for durable rows the hot side
-    # needs (users, conversation_participants).
+    # needs (users, conversations, conversation_participants).
     # ------------------------------------------------------------------
 
     def _mirror_user(self, row: dict[str, Any]) -> None:
@@ -1973,6 +2188,94 @@ class MuninStore:
         except Exception:  # noqa: BLE001
             pass
 
+    def _hydrate_hot_conversation(self, *, conversation_id: str) -> None:
+        """Materialize one durable conversation's FK closure in the hot store.
+
+        Active ``agent_runs`` are local-first, but their ``conversation_id``
+        and ``actor_id`` still reference canonical conversation and user rows.
+        Mirroring only a participant is not enough: SQLite correctly rejects
+        it when the parent conversation was not copied first.  This writes the
+        complete, small parent closure atomically before a hot run is created.
+        """
+        if self._hot is self._durable:
+            return
+
+        with self._durable._read_only() as conn:  # noqa: SLF001
+            conversation = conn.execute(
+                "SELECT * FROM conversations WHERE id=?", (conversation_id,)
+            ).fetchone()
+            if not conversation:
+                return
+            participants = conn.execute(
+                "SELECT * FROM conversation_participants WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchall()
+            users = conn.execute(
+                """SELECT DISTINCT u.* FROM users u
+                   JOIN conversation_participants p ON p.user_id=u.id
+                   WHERE p.conversation_id=?
+                   UNION
+                   SELECT u.* FROM users u
+                   JOIN conversations c ON c.owner_id=u.id
+                   WHERE c.id=?""",
+                (conversation_id, conversation_id),
+            ).fetchall()
+
+        c = _row(conversation)
+        now = _now_ms()
+        with self._hot._transaction() as conn:  # noqa: SLF001
+            for user_row in users:
+                user = _row(user_row)
+                conn.execute(
+                    """INSERT INTO users
+                       (id,username,password_hash,role,disabled_at_ms,created_at_ms,updated_at_ms)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         username=excluded.username,password_hash=excluded.password_hash,
+                         role=excluded.role,disabled_at_ms=excluded.disabled_at_ms,
+                         updated_at_ms=excluded.updated_at_ms""",
+                    (
+                        user["id"], user["username"], user["password_hash"],
+                        user["role"], user.get("disabled_at_ms"),
+                        int(user.get("created_at_ms") or now),
+                        int(user.get("updated_at_ms") or now),
+                    ),
+                )
+            conn.execute(
+                """INSERT INTO conversations
+                   (id,owner_id,title,summary,status,tags_json,scope_json,last_activity_at_ms,
+                    archived_at_ms,deleted_at_ms,version,created_at_ms,updated_at_ms)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     owner_id=excluded.owner_id,title=excluded.title,summary=excluded.summary,
+                     status=excluded.status,tags_json=excluded.tags_json,scope_json=excluded.scope_json,
+                     last_activity_at_ms=excluded.last_activity_at_ms,
+                     archived_at_ms=excluded.archived_at_ms,deleted_at_ms=excluded.deleted_at_ms,
+                     version=excluded.version,updated_at_ms=excluded.updated_at_ms""",
+                (
+                    c["id"], c["owner_id"], c["title"], c.get("summary") or "",
+                    c.get("status") or "active", c.get("tags_json") or "[]",
+                    c.get("scope_json") or "{}", c["last_activity_at_ms"],
+                    c.get("archived_at_ms"), c.get("deleted_at_ms"),
+                    int(c.get("version") or 1), c["created_at_ms"], c["updated_at_ms"],
+                ),
+            )
+            for participant_row in participants:
+                participant = _row(participant_row)
+                conn.execute(
+                    """INSERT INTO conversation_participants
+                       (conversation_id,user_id,role,added_at_ms,removed_at_ms)
+                       VALUES (?,?,?,?,?)
+                       ON CONFLICT(conversation_id,user_id) DO UPDATE SET
+                         role=excluded.role,added_at_ms=excluded.added_at_ms,
+                         removed_at_ms=excluded.removed_at_ms""",
+                    (
+                        participant["conversation_id"], participant["user_id"],
+                        participant["role"], participant["added_at_ms"],
+                        participant.get("removed_at_ms"),
+                    ),
+                )
+
     def _hydrate_hot_user(self, username: str) -> None:
         """Fault-in a durable ``users`` row into the hot store on demand.
 
@@ -2000,20 +2303,7 @@ class MuninStore:
                 (conversation_id, actor_id),
             ).fetchone():
                 return
-        try:
-            with self._durable._read_only() as conn:  # noqa: SLF001
-                row = conn.execute(
-                    "SELECT role FROM conversation_participants WHERE conversation_id=? AND user_id=? AND removed_at_ms IS NULL",
-                    (conversation_id, actor_id),
-                ).fetchone()
-                if row:
-                    self._mirror_participant(
-                        conversation_id=conversation_id,
-                        user_id=actor_id,
-                        role=str(row["role"]),
-                    )
-        except Exception:  # noqa: BLE001
-            pass
+        self._hydrate_hot_conversation(conversation_id=conversation_id)
 
     # ------------------------------------------------------------------
     # Migration
@@ -2152,7 +2442,7 @@ class MuninStore:
 
     def create_conversation(self, *, owner_id: str, title: str, tags: list[str] | None = None, scope: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self._durable.create_conversation(owner_id=owner_id, title=title, tags=tags, scope=scope)
-        self._mirror_participant(conversation_id=result["id"], user_id=owner_id, role="owner")
+        self._hydrate_hot_conversation(conversation_id=result["id"])
         return result
 
     # ------------------------------------------------------------------
@@ -2177,6 +2467,10 @@ class MuninStore:
         if len(content) > 1_000_000:
             raise ValueError("message exceeds maximum size")
         request_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # A split deployment must have the local foreign-key closure in place
+        # before the durable messages are written and the active run is queued.
+        self._hydrate_hot_conversation(conversation_id=conversation_id)
 
         # --- idempotency: check hot then durable
         for backend in (self._hot, self._durable) if self._durable is not self._hot else (self._hot,):
@@ -2293,7 +2587,7 @@ class MuninStore:
         """
         import os as _os  # noqa: PLC0415
         import secrets as _secrets  # noqa: PLC0415
-        CHAT_LEASE_SECONDS = int(_os.environ.get("MUNIN_CHAT_LEASE_SECONDS", str(4 * 3600)))
+        CHAT_LEASE_SECONDS = int(_os.environ.get("MUNIN_CHAT_LEASE_SECONDS", "120"))
         with self._hot._transaction() as conn:  # noqa: SLF001
             row = conn.execute(
                 "SELECT * FROM agent_runs WHERE id=? AND state='queued'",
@@ -2350,6 +2644,10 @@ class MuninStore:
         except Exception:  # noqa: BLE001
             pass
 
+    def renew_run_lease(self, **kwargs: Any) -> bool:
+        """Heartbeat an active hot run without crossing the durable boundary."""
+        return self._hot.renew_run_lease(**kwargs)
+
     # ------------------------------------------------------------------
     # Hot in-progress event writes
     # ------------------------------------------------------------------
@@ -2387,6 +2685,23 @@ class MuninStore:
                 pass
         return self._hot.resolve_human_decision(**kwargs)
 
+    def reissue_human_decision_nonce(self, **kwargs: Any) -> dict[str, Any]:
+        actor_id = kwargs.get("actor_id")
+        request_id = kwargs.get("request_id")
+        if actor_id and request_id:
+            with suppress(Exception):
+                with self._hot._read_only() as conn:  # noqa: SLF001
+                    row = conn.execute(
+                        "SELECT r.conversation_id FROM human_requests h JOIN agent_runs r ON r.id=h.run_id WHERE h.id=?",
+                        (request_id,),
+                    ).fetchone()
+                if row:
+                    self._hydrate_hot_participant(actor_id=actor_id, conversation_id=str(row["conversation_id"]))
+        return self._hot.reissue_human_decision_nonce(**kwargs)
+
+    def authorize_approved_tool_call(self, **kwargs: Any) -> bool:
+        return self._hot.authorize_approved_tool_call(**kwargs)
+
     def request_run_cancellation(self, **kwargs: Any) -> dict[str, Any]:
         actor_id = kwargs.get("actor_id")
         run_id = kwargs.get("run_id")
@@ -2418,6 +2733,12 @@ class MuninStore:
 
     def recover_expired_runs(self) -> list[str]:
         return self._hot.recover_expired_runs()
+
+    def requeue_expired_runs_for_resume(self) -> list[str]:
+        return self._hot.requeue_expired_runs_for_resume()
+
+    def list_queued_chat_recovery_candidates(self) -> list[dict[str, Any]]:
+        return self._hot.list_queued_chat_recovery_candidates()
 
     def force_run_lease_expiry(self, run_id: str, when: Any) -> None:
         # Active runs live in hot; also apply to durable in case caller is

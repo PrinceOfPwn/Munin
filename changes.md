@@ -2,6 +2,39 @@
 
 Living changelog and hand-off log for Munin. Newest entries first.
 
+## 2026-08-01 — Durable chat recovery after process restart
+
+The AI SDK replay endpoint already persisted operator-visible run events, but
+the detached executor itself was process-local: a crash left a `running` row
+until its old four-hour lease expired, with no worker to resume the LangGraph
+checkpoint. The production chat path now uses a short renewable fenced lease
+and an ASGI-lifespan recovery scanner:
+
+- `ProductionStore.requeue_expired_runs_for_resume()` atomically changes only
+  expired `running` rows to `queued`, clears their owner token, and records
+  `run.recovery_queued`. It deliberately never selects `waiting_for_human` or
+  `cancelled` rows. `recover_expired_runs()` retains its legacy terminal
+  `interrupted` contract for dispatcher callers.
+- The scanner claims queued rows through the existing fenced direct-claim
+  transition. A run that has a LangGraph checkpoint continues with the same
+  conversation `thread_id` and `None` input; a run whose process died before
+  any checkpoint starts its original prompt once. A resolved native HITL row
+  resumes only with persisted `Command(resume={"decisions": [...]})`; an
+  unresolved HITL request is never auto-executed.
+- A renewal heartbeat means long-running work remains owned, while a dead
+  process becomes recoverable after `MUNIN_CHAT_LEASE_SECONDS` (120 seconds by
+  default) without another server stealing an active worker. Lease loss or an
+  operator cancellation prevents the stale executor from finalising output.
+- `human_request.resolved` now records a stable request id, approved/rejected
+  display state, approved tool name and sanitized action args for UIMessage
+  replay. It never includes the one-time nonce or provider/private reasoning.
+
+This follows the LangGraph persistence and Deep Agents HITL contracts: use a
+persistent checkpointer, retain the same `thread_id`, and resume an interrupt
+with `Command`. `tests/test_chat_recovery.py` covers fenced crash recovery,
+HITL non-autostart and approved-command recovery; the focused backend suite is
+green (19 passed) and the full backend suite is green (222 passed, 4 skipped).
+
 ## 2026-08-01 — CI repair Part 2: fix double `/mcp` mount prefix + session-manager lifespan
 
 The Fase 3 unification (`munin serve` mounting the FastMCP streamable-http

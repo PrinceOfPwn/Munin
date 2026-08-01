@@ -62,21 +62,32 @@ def extension_describe(slug: str, run_id: str = "") -> dict[str, Any]:
     return {"ok": True, "tool": "extension_describe", "mode": "sync", "summary": f"{slug}: {manifest.status}", "data": manifest.to_dict()}
 
 
-def extension_open_pr(slug: str, operator_approved: bool = False, run_id: str = "") -> dict[str, Any]:
+def extension_open_pr(slug: str, run_id: str = "") -> dict[str, Any]:
     """Open a PR for a validated proposal only after explicit human approval.
 
-    SECURITY: This tool is excluded from the autonomous subagent catalog.
-    Supervisor-only; requires server-verified HITL approval, not agent-supplied flag.
+    Requires an exact server-verified HITL approval for this run and slug.
+    A model-provided boolean and direct MCP invocation are never approvals.
     """
-    if operator_approved is not True or not isinstance(operator_approved, bool):
+    try:
+        from ..main import STATE  # noqa: PLC0415
+
+        authorizer = getattr(STATE, "authorize_approved_tool_call", None)
+        approved = callable(authorizer) and authorizer(
+            run_id=run_id,
+            tool_name="extension_open_pr",
+            arguments={"slug": slug},
+        )
+    except Exception:
+        approved = False
+    if not approved:
         return {
             "ok": False,
             "tool": "extension_open_pr",
             "mode": "sync",
-            "summary": "operator approval required (server-verified HITL, not agent flag)",
+            "summary": "server-verified approval for this PR action is required",
             "error": {"code": "approval_required", "message": "This operation requires explicit human approval through the HITL workflow"},
         }
-    result = _forge().open_pr(slug, operator_approved=operator_approved)
+    result = _forge().open_pr(slug, operator_approved=True)
     return {
         "ok": result.ok,
         "tool": "extension_open_pr",
@@ -93,3 +104,6 @@ def register(mcp: FastMCP) -> None:
     mcp.tool()(extension_list)
     mcp.tool()(extension_describe)
     mcp.tool()(extension_open_pr)
+
+
+extension_open_pr.__munin_audit_level__ = "admin"  # type: ignore[attr-defined]

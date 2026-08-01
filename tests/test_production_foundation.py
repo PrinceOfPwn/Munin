@@ -110,6 +110,32 @@ def test_turn_is_atomic_idempotent_and_rejects_reused_key_with_new_body(producti
         )
 
 
+def test_split_store_hydrates_conversation_parents_before_creating_active_run(tmp_path: Path):
+    """The local active-run FK closure must exist before the hot insert."""
+    from munin.production.store import MuninStore, ProductionStore
+
+    durable = ProductionStore.for_sqlite(tmp_path / "durable.sqlite", master_key=b"d" * 32)
+    hot = ProductionStore.for_sqlite(tmp_path / "hot.sqlite", master_key=b"d" * 32)
+    store = MuninStore(hot=hot, durable=durable)
+    operator = store.create_user(username="split-operator", password="strong passphrase", role="operator")
+    conversation = store.create_conversation(owner_id=operator["id"], title="Split active run")
+
+    turn = store.create_turn(
+        actor_id=operator["id"],
+        conversation_id=conversation["id"],
+        content="Run a safe check",
+        idempotency_key="split-store-turn-001",
+    )
+
+    assert store.get_run(turn["run"]["id"])["state"] == "queued"
+    with hot._read_only() as conn:  # noqa: SLF001 - FK closure regression check
+        assert conn.execute("SELECT 1 FROM conversations WHERE id=?", (conversation["id"],)).fetchone()
+        assert conn.execute(
+            "SELECT 1 FROM conversation_participants WHERE conversation_id=? AND user_id=?",
+            (conversation["id"], operator["id"]),
+        ).fetchone()
+
+
 def test_run_claim_is_direct_exclusive_and_lease_expiry_recovers(production_store):
     from munin.production.chat import _claim_direct
 
@@ -198,6 +224,45 @@ def test_human_gate_tools_subagents_retry_and_recorded_branch(production_store):
     assert comparison["diff"]["tool_egress"] == "disabled"
 
 
+def test_asgi_human_resolution_verifies_nonce_and_denies_terminal_run(production_store, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from munin.production.asgi import create_app
+
+    monkeypatch.setenv("MUNIN_ALLOWED_ORIGINS", "http://testserver")
+    monkeypatch.setenv("MUNIN_COOKIE_SECURE", "0")
+    client = TestClient(create_app(production_store))
+    assert client.post("/api/auth/bootstrap", json={"username": "hitl-admin", "password": "very secure test password"}).status_code == 201
+    login = client.post("/api/auth/login", json={"username": "hitl-admin", "password": "very secure test password"})
+    csrf = login.json()["csrf_token"]
+    headers = {"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin", "X-CSRF-Token": csrf}
+    conversation = client.post("/api/conversations", headers=headers, json={"title": "HITL"}).json()["data"]
+    actor = production_store.authenticate(login.cookies.get("munin_session"))
+    turn = production_store.create_turn(
+        actor_id=actor["id"],
+        conversation_id=conversation["id"],
+        content="Require a decision",
+        idempotency_key="hitl-http-001",
+    )
+    gate = production_store.request_human_decision(
+        run_id=turn["run"]["id"],
+        action="authorize active scan",
+        risk="high",
+        evidence=["scope confirmed"],
+        scope={"target": "approved"},
+        choices=["approve", "deny"],
+    )
+
+    response = client.post(
+        f"/api/human-requests/{gate['id']}/resolve",
+        headers=headers,
+        json={"choice": "deny", "nonce": gate["nonce"], "guidance": "Do not proceed"},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["state"] == "cancelled"
+    assert production_store.get_run(turn["run"]["id"])["state"] == "cancelled"
+
+
 def test_fixture_user_can_be_created_and_deleted_by_test(production_store):
     operator = production_store.create_user(username="llm_smoke_ci", password="fixture password v1", role="operator")
     assert production_store.authenticate(production_store.login(username="llm_smoke_ci", password="fixture password v1", ip_address="127.0.0.1", user_agent="pytest")["token"])["id"] == operator["id"]
@@ -243,6 +308,12 @@ def test_asgi_login_uses_cookie_session_and_csrf_for_turns(production_store, mon
 
     async def fake_chat_stream(request, **kwargs):  # noqa: ARG001 - stand-in for the real LLM run
         yield b": munin-chat-stream v1\n\n"
+        kwargs["store"].complete_run(
+            run_id=kwargs["run_id"],
+            lease_token=kwargs["lease_token"],
+            content="fake stream",
+            outcome="completed",
+        )
         envelope = _json.dumps(
             {"kind": "run_state", "run_id": kwargs["run_id"], "state": "completed", "content": "fake stream"}
         )
@@ -270,7 +341,11 @@ def test_asgi_login_uses_cookie_session_and_csrf_for_turns(production_store, mon
     assert turn.status_code == 200
     assert turn.headers["content-type"].startswith("text/event-stream")
     run_id = turn.headers["x-munin-run-id"]
-    assert production_store.get_run(run_id)["state"] == "running"
+    assert production_store.get_run(run_id)["state"] == "completed"
+    # AI SDK resume probes the conversation-scoped GET endpoint. A completed
+    # operation returns the protocol's "nothing to resume" status rather than
+    # the old 405 stub.
+    assert client.get(f"/api/chat/{conversation_id}/stream").status_code == 204
     assert client.post(
         "/api/chat",
         headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"},

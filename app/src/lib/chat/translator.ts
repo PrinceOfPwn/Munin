@@ -5,7 +5,9 @@ import type { UIMessageChunk } from "ai";
 // ---------------------------------------------------------------------------
 
 export type BackendEnvelopeKind =
+  | "assistant_text"
   | "reasoning"
+  | "activity"
   | "tool_intent"
   | "tool_started"
   | "tool_result"
@@ -26,6 +28,7 @@ export interface BackendEnvelope {
   run_id?: string;
   sequence?: number;
   text?: string;
+  stage?: string;
   tool_name?: string;
   tool_call_id?: string;
   input?: Record<string, unknown>;
@@ -84,10 +87,19 @@ export function createTranslator(runId: string): {
 
   function translate(envelope: BackendEnvelope): UIMessageChunk[] {
     switch (envelope.kind) {
+      case "assistant_text":
       case "reasoning":
-        // Assistant streamed text (never hidden chain-of-thought: the backend
-        // only forwards provider-explicit, policy-cleared content).
+        // `reasoning` is retained solely to render historical runs created
+        // before this protocol split. New backend output uses
+        // `assistant_text`; no private chain-of-thought is sent to the UI.
         return envelope.text ? textDeltas(envelope.text) : [];
+
+      case "activity":
+        return envelope.text ? [{
+          type: "data-activity",
+          id: `activity-${envelope.sequence ?? `${envelope.stage ?? "event"}-${envelope.text.slice(0, 48)}`}`,
+          data: { stage: envelope.stage ?? "working", text: envelope.text },
+        }] : [];
 
       case "tool_intent": {
         if (!envelope.tool_call_id || !envelope.tool_name) return [];
@@ -156,17 +168,29 @@ export function createTranslator(runId: string): {
 
       case "run_state": {
         const runState = envelope.state ?? "unknown";
+        const runStatePart: UIMessageChunk = {
+          type: "data-run-state",
+          id: "run-state",
+          // Keep the durable run identifier with every state transition. It
+          // lets the UI send operator guidance to a recovered stream rather
+          // than relying on a process-local identifier.
+          data: { state: runState, runId: envelope.run_id ?? runId },
+        };
         if (runState === "completed") {
           if (state.finished) return [];
           state.finished = true;
-          return [...closeText(), { type: "finish" }];
+          return [...closeText(), runStatePart, { type: "finish" }];
         }
         if (["failed", "cancelled", "interrupted"].includes(runState)) {
           if (state.finished) return [];
           state.finished = true;
-          return [...closeText(), { type: "error", errorText: envelope.error ?? `run ${runState}` }];
+          return [
+            ...closeText(),
+            runStatePart,
+            { type: "error", errorText: envelope.error ?? `run ${runState}` },
+          ];
         }
-        return [{ type: "data-run-state", id: "run-state", data: { state: runState } }];
+        return [runStatePart];
       }
 
       case "heartbeat":

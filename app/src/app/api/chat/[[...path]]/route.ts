@@ -19,6 +19,8 @@ const BACKEND = (process.env.MUNIN_PRODUCTION_API_URL || "http://127.0.0.1:8787"
 // replay stream on this branch without introducing a second translator.
 
 const DOTTED_KIND_MAP: Record<string, BackendEnvelope["kind"]> = {
+  "agent.text": "assistant_text",
+  "agent.activity": "activity",
   "agent.reasoning": "reasoning",
   "tool.intent": "tool_intent",
   "tool.started": "tool_started",
@@ -54,7 +56,7 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
 
   const normalized: BackendEnvelope = { kind: resolvedKind };
 
-  const topLevelFields = ["run_id", "sequence", "text", "tool_name", "tool_call_id", "input",
+  const topLevelFields = ["run_id", "sequence", "text", "stage", "tool_name", "tool_call_id", "input",
     "output", "error", "subagent_id", "name", "state", "request_id", "args", "resolution",
     "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds"];
 
@@ -71,6 +73,23 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
 
   if (event.payload && typeof event.payload === "object") {
     Object.assign(normalizedRecord, event.payload);
+  }
+
+  // Durable production events use `human_request_id` and a choice string;
+  // the UIMessage contract deliberately uses one stable id and an explicit
+  // approved/rejected resolution. Normalizing here means live and replayed
+  // HITL cards follow exactly the same protocol.
+  if (event.kind === "human_request.resolved") {
+    normalized.kind = "human_resolved";
+    if (!normalized.request_id && typeof normalizedRecord.human_request_id === "string") {
+      normalized.request_id = normalizedRecord.human_request_id;
+    }
+    if (!normalized.resolution && typeof normalizedRecord.choice === "string") {
+      const choice = normalizedRecord.choice.trim().toLowerCase();
+      normalized.resolution = choice.startsWith("reject") || choice.startsWith("deny") || choice.startsWith("cancel")
+        ? "rejected"
+        : "approved";
+    }
   }
 
   return normalized;
@@ -132,7 +151,10 @@ async function pumpChatStream(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      const frames = buffer.split("\n\n");
+      // Starlette normally emits LF, but proxies are allowed to normalize
+      // SSE framing to CRLF. Accept both without inventing a second stream
+      // parser or losing the final durable replay frame.
+      const frames = buffer.split(/\r?\n\r?\n/);
       buffer = frames.pop() ?? "";
       for (const frame of frames) {
         if (frame.includes("event: close")) return;
@@ -315,9 +337,6 @@ export async function POST(request: NextRequest) {
         message_id: body.messageId,
       }),
       cache: "no-store",
-      signal: request.signal,
-      // @ts-expect-error — Node fetch extension for streaming request bodies
-      duplex: "half",
     });
   } catch (err) {
     return NextResponse.json({ error: `backend unreachable: ${String(err)}` }, { status: 502 });
@@ -368,12 +387,42 @@ export async function POST(request: NextRequest) {
   return createUIMessageStreamResponse({ stream });
 }
 
-/** GET /api/chat/... — replay/resume was Arch-A-only; the Fase 1a supervisor
- * path is fully consumed by POST. Later phases can add a replay adapter here
- * that reads the durable run_events for a run and translates on-the-fly. */
-export async function GET() {
-  return NextResponse.json(
-    { error: "GET /api/chat is not supported in this release; use POST" },
-    { status: 405 },
-  );
+/** GET /api/chat/{conversationId}/stream — AI SDK `useChat({ resume: true })`.
+ * The backend resolves the actor's active run and replays its durable event
+ * log. A viewer disconnect must not abort the server-side operation. */
+export async function GET(request: NextRequest) {
+  const forwardHeaders = forwardAuthHeaders(request);
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${BACKEND}${new URL(request.url).pathname}`, {
+      method: "GET",
+      headers: {
+        Accept: "text/event-stream",
+        ...Object.fromEntries(forwardHeaders),
+      },
+      cache: "no-store",
+    });
+  } catch (err) {
+    return NextResponse.json({ error: `backend unreachable: ${String(err)}` }, { status: 502 });
+  }
+
+  if (upstream.status === 204) return new Response(null, { status: 204 });
+  if (!upstream.ok) {
+    const message = await upstream.text().catch(() => "chat resume failed");
+    return NextResponse.json({ error: message || "chat resume failed" }, { status: upstream.status });
+  }
+  if (!(upstream.headers.get("content-type") || "").includes("text/event-stream")) {
+    return NextResponse.json({ error: "backend returned a non-stream resume response" }, { status: 502 });
+  }
+
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      try {
+        await pumpChatStream(upstream.headers.get("x-munin-run-id"), upstream, writer);
+      } catch (err) {
+        writer.write({ type: "error", errorText: String(err) });
+      }
+    },
+  });
+  return createUIMessageStreamResponse({ stream });
 }

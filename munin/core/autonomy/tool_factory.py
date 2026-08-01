@@ -254,10 +254,9 @@ class ToolFactory:
                 handler = self._load_from_registry(name)
                 self._live[name] = handler
             else:
-                from ...subagents.base import build_tool_catalog  # noqa: TID252, PLC0415
+                from ..tool_gateway import lookup_catalog_handler  # noqa: PLC0415
 
-                catalog = build_tool_catalog(self._state, {name})
-                handler = catalog.get(name)
+                handler = lookup_catalog_handler(self._state, name)
                 if handler is None:
                     raise KeyError(f"Tool {name!r} not found in the Tool Registry or catalog")
         return run_maybe_async(handler, arguments)

@@ -34,10 +34,12 @@ or via the CLI convenience wrapper:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Any
 
 from starlette.applications import Starlette
@@ -61,6 +63,7 @@ def _bind_guidance(shared_state: Any, production_store: Any) -> None:
     """
     try:
         shared_state.consume_pending_guidance = production_store.consume_pending_guidance  # type: ignore[assignment]
+        shared_state.authorize_approved_tool_call = production_store.authorize_approved_tool_call  # type: ignore[assignment]
     except Exception as exc:  # noqa: BLE001 - guidance is best-effort
         log.warning("server: unable to bind guidance drain onto shared state: %s", exc)
 
@@ -206,6 +209,75 @@ def create_app() -> Starlette:
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
             log.warning("server: close_pools failed during shutdown: %s", exc)
 
+    # ``AsyncSqliteSaver.from_conn_string`` is an async context manager. It
+    # must remain entered for the whole application lifetime; its entered
+    # saver is then injected through SharedStateStore into the Deep Agents
+    # graph. This eliminates the previous production-only MemorySaver gap.
+    checkpoint_ctx: Any | None = None
+
+    async def _startup_checkpointer() -> None:
+        nonlocal checkpoint_ctx
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver  # noqa: PLC0415
+        except ImportError:
+            log.warning(
+                "server: langgraph-checkpoint-sqlite unavailable; using in-memory fallback"
+            )
+            return
+
+        configured = Path(settings.munin_checkpoint_db)
+        checkpoint_path = (
+            configured
+            if configured.is_absolute()
+            else Path(settings.workspace_root) / configured
+        )
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_ctx = AsyncSqliteSaver.from_conn_string(str(checkpoint_path))
+        shared_state.langgraph_checkpointer = await checkpoint_ctx.__aenter__()
+        # A graph can have been built by an early import/health call. Rebuild
+        # so the cached Deep Agents graph binds the durable saver.
+        from .core.supervisor import invalidate_supervisor_cache  # noqa: PLC0415
+
+        invalidate_supervisor_cache()
+        log.info("server: durable LangGraph checkpoints at %s", checkpoint_path)
+
+    async def _shutdown_checkpointer() -> None:
+        nonlocal checkpoint_ctx
+        if checkpoint_ctx is None:
+            return
+        try:
+            await checkpoint_ctx.__aexit__(None, None, None)
+        finally:
+            checkpoint_ctx = None
+            with suppress(Exception):
+                delattr(shared_state, "langgraph_checkpointer")
+
+    # A detached executor is intentionally process-local, but its ownership,
+    # event log and LangGraph checkpoint are durable.  Start the small scanner
+    # only after the async saver is entered, so a restart can safely continue
+    # expired work from the same thread without re-running HITL or competing
+    # with a still-valid lease.
+    chat_recovery_holder: dict[str, asyncio.Task[None]] = {}
+
+    async def _startup_chat_recovery() -> None:
+        try:
+            from .production.chat import start_chat_recovery_worker  # noqa: PLC0415
+
+            chat_recovery_holder["task"] = start_chat_recovery_worker(
+                store=production_store,
+                shared_state=shared_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - serving remains available
+            log.warning("server: durable chat recovery startup failed: %s", exc)
+
+    async def _shutdown_chat_recovery() -> None:
+        task = chat_recovery_holder.pop("task", None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
     # ── MCP session manager (issue #9 fix) ──────────────────────────
     # Starlette does not propagate the ``startup``/``shutdown`` lifespan
     # events to sub-apps mounted via ``Mount``.  FastMCP's
@@ -221,10 +293,14 @@ def create_app() -> Starlette:
     async def _lifespan(app: Any) -> AsyncIterator[None]:
         await mcp_session_ctx.__aenter__()
         try:
+            await _startup_checkpointer()
+            await _startup_chat_recovery()
             await _startup_discord()
             yield
         finally:
             await _shutdown_discord()
+            await _shutdown_chat_recovery()
+            await _shutdown_checkpointer()
             await _shutdown_pools()
             await mcp_session_ctx.__aexit__(None, None, None)
 

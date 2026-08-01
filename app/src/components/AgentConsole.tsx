@@ -23,7 +23,6 @@ import type {
   ChatStatus,
   DataUIPart,
   DynamicToolUIPart,
-  ReasoningUIPart,
   StepStartUIPart,
   TextUIPart,
   UIMessage,
@@ -35,7 +34,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "@/components/ui/sonner";
 
-import { ReasoningPart } from "@/components/chat/blocks/parts/ReasoningPart";
+import { OperationalTracePart } from "@/components/chat/blocks/parts/OperationalTracePart";
 import { ToolInvocationPart } from "@/components/chat/blocks/parts/ToolInvocationPart";
 import type { ToolInvocationState } from "@/components/chat/blocks/parts/ToolInvocationPart";
 import { SubagentPresencePart } from "@/components/chat/blocks/parts/SubagentPresencePart";
@@ -92,11 +91,15 @@ interface RunStateData {
   runId?: string;
 }
 
+interface ActivityData {
+  stage: string;
+  text: string;
+}
+
 // UIMessage part union helpers — the `parts` array on a UIMessage can contain
 // any of these at runtime; we distinguish them by their `type` string.
 type AnyUIPart =
   | TextUIPart
-  | ReasoningUIPart
   | DynamicToolUIPart
   | StepStartUIPart
   | DataUIPart<Record<string, unknown>>;
@@ -245,18 +248,6 @@ function PartRenderer({
     );
   }
 
-  // Reasoning part (chain-of-thought forwarded by backend)
-  if (part.type === "reasoning") {
-    const rp = part as ReasoningUIPart;
-    return (
-      <ReasoningPart
-        key={key}
-        id={key}
-        text={rp.text ?? ""}
-      />
-    );
-  }
-
   // Dynamic tool part — emitted when translator writes tool-input-start /
   // tool-input-available / tool-output-available / tool-output-error chunks.
   if (part.type === "dynamic-tool") {
@@ -339,6 +330,11 @@ function PartRenderer({
     return null;
   }
 
+  if (part.type === "data-activity") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ActivityData;
+    return <OperationalTracePart key={key} stage={d.stage ?? "working"} text={d.text ?? "Working"} />;
+  }
+
   if (part.type === "data-note") {
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as NoteData;
     return <NotePart key={key} text={d.text} />;
@@ -369,12 +365,34 @@ function PartRenderer({
 // Message part list
 // ---------------------------------------------------------------------------
 
-function MessagePartList({ message }: { message: UIMessage }) {
-  const hitlApprove: HitlRequestPartProps["onApprove"] = (id, choice, nonce) => {
-    void approveHitlRequest(id, choice, nonce);
+function MessagePartList({
+  message,
+  onHitlResolved,
+}: {
+  message: UIMessage;
+  onHitlResolved: () => Promise<void>;
+}) {
+  const hitlApprove: HitlRequestPartProps["onApprove"] = async (id, choice, nonce) => {
+    try {
+      await approveHitlRequest(id, choice, nonce);
+      void onHitlResolved().catch((error: unknown) => {
+        toast.error(error instanceof Error ? error.message : "Decision recorded; could not reconnect to the run");
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not record approval");
+      throw error;
+    }
   };
-  const hitlReject: HitlRequestPartProps["onReject"] = (id, choice, nonce, reason) => {
-    void rejectHitlRequest(id, choice, nonce, reason);
+  const hitlReject: HitlRequestPartProps["onReject"] = async (id, choice, nonce, reason) => {
+    try {
+      await rejectHitlRequest(id, choice, nonce, reason);
+      void onHitlResolved().catch((error: unknown) => {
+        toast.error(error instanceof Error ? error.message : "Decision recorded; could not refresh the run");
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not record rejection");
+      throw error;
+    }
   };
 
   return (
@@ -540,7 +558,7 @@ function ConsoleHeader({
 // ---------------------------------------------------------------------------
 
 function LiveConsole({ conversationId }: { conversationId: string }) {
-  const { messages, sendMessage, status, error } = useMuninChat({
+  const { messages, sendMessage, resumeStream, status, error } = useMuninChat({
     conversationId,
   });
 
@@ -635,6 +653,10 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     }
   }
 
+  async function resumeAfterHitl() {
+    await resumeStream();
+  }
+
   function archive() {
     // Archive lives behind the legacy PATCH endpoint (see Fase 1c/2). Fase 1b
     // keeps this a stub so the header UI is correct without dragging the
@@ -685,8 +707,8 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               <div className="space-y-1">
                 <h2 className="text-lg font-medium">Console ready</h2>
                 <p className="max-w-sm text-sm text-secondary">
-                  Type a message to start a live Munin stream. Reasoning, tool
-                  calls, subagent presence, and HITL requests will appear
+                  Type a message to start a live Munin stream. Activity traces,
+                  tool calls, subagent presence, and HITL requests will appear
                   in&nbsp;real-time.
                 </p>
               </div>
@@ -698,7 +720,7 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
 
           {messages.map((message) => (
             <MessageBubble key={message.id} role={message.role}>
-              <MessagePartList message={message} />
+              <MessagePartList message={message} onHitlResolved={resumeAfterHitl} />
             </MessageBubble>
           ))}
 
