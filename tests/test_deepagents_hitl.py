@@ -92,3 +92,22 @@ async def test_runtime_interrupt_becomes_durable_replayable_human_request(
     )
     assert resolved["state"] == "queued"
     assert resolved["decision_count"] == 1
+
+
+def test_runtime_recursion_budget_is_unlimited_by_default(monkeypatch):
+    from munin.core import runtime_adapter
+
+    monkeypatch.delenv("MUNIN_RECURSION_LIMIT", raising=False)
+    assert (
+        runtime_adapter._recursion_limit_from_environment()
+        == runtime_adapter.UNLIMITED_RECURSION_LIMIT
+    )
+
+    monkeypatch.setenv("MUNIN_RECURSION_LIMIT", "0")
+    assert (
+        runtime_adapter._recursion_limit_from_environment()
+        == runtime_adapter.UNLIMITED_RECURSION_LIMIT
+    )
+
+    monkeypatch.setenv("MUNIN_RECURSION_LIMIT", "17")
+    assert runtime_adapter._recursion_limit_from_environment() == 17

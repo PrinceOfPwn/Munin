@@ -61,6 +61,11 @@ application-specific agent loop:
   approval hand-off from returning a false `204` while the detached run is
   queued/running, so AI SDK `resumeStream()` can reattach and the agent keeps
   acting autonomously after the approved checkpoint.
+- The runtime no longer applies the small LangGraph recursion cap by default.
+  `MUNIN_RECURSION_LIMIT` accepts an explicit positive override; omitted,
+  `0`, or `unlimited` uses the framework-compatible unlimited sentinel while
+  leases, cancellation, approval, and standard model/tool middleware remain
+  the independent safety controls.
 
 ## 2026-08-01 — Durable chat recovery after process restart
 

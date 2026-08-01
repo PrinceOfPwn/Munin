@@ -18,7 +18,27 @@ from __future__ import annotations
 import os
 from typing import Any, AsyncIterator, Callable, Iterable
 
-DEFAULT_RECURSION_LIMIT = int(os.environ.get("MUNIN_RECURSION_LIMIT", "100"))
+# LangGraph requires an integer ``recursion_limit`` even when the application
+# deliberately does not impose a graph-step budget.  Use the largest practical
+# Python integer as the explicit "unlimited" sentinel instead of inheriting
+# LangGraph's small default (which aborts legitimate long-running agents).
+# Operator cancellation, run leases, tool approval, and the model/tool
+# middleware budgets remain the independent safety controls.
+UNLIMITED_RECURSION_LIMIT = 2**31 - 1
+
+
+def _recursion_limit_from_environment() -> int:
+    raw = os.environ.get("MUNIN_RECURSION_LIMIT", "unlimited").strip().lower()
+    if raw in {"", "0", "none", "infinite", "infinity", "unlimited"}:
+        return UNLIMITED_RECURSION_LIMIT
+    try:
+        value = int(raw)
+    except ValueError:
+        return UNLIMITED_RECURSION_LIMIT
+    return value if value > 0 else UNLIMITED_RECURSION_LIMIT
+
+
+DEFAULT_RECURSION_LIMIT = _recursion_limit_from_environment()
 
 _ROOT_GRAPH_NAMES = frozenset({"LangGraph", "munin", "munin_supervisor", "__end__"})
 
@@ -343,7 +363,13 @@ async def supervisor_runner(
 
     config = {
         "configurable": {"thread_id": thread_id or conversation_id or run_id},
-        "recursion_limit": max_iterations or DEFAULT_RECURSION_LIMIT,
+        # ``max_iterations`` is retained for explicit programmatic callers;
+        # omitted/zero values use the unlimited sentinel above.
+        "recursion_limit": (
+            max_iterations
+            if max_iterations and max_iterations > 0
+            else DEFAULT_RECURSION_LIMIT
+        ),
     }
 
     # Bind the per-invocation middleware overrides. The supervisor graph is
