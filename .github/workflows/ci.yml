@@ -319,6 +319,7 @@ jobs:
           username = f"llm_smoke_{os.environ['MUNIN_E2E_TEST_RUN_ID']}"
           password = secrets.token_urlsafe(24)
           store.create_user(username=username, password=password, role="operator")
+          print(f"::add-mask::{password}")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
               fh.write(f"MUNIN_LIVE_SMOKE_ADMIN={username}\n")
               fh.write(f"MUNIN_LIVE_SMOKE_PASSWORD={password}\n")

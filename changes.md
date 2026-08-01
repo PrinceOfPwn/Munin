@@ -49,6 +49,13 @@ application-specific agent loop:
   positional JSON parameter shapes emitted by providers. Async generator
   cleanup also handles cross-task ContextVar finalization without leaving
   unhandled task exceptions.
+- Replay polling now tolerates the intentional `204 No Content` hand-off
+  window immediately after HITL approval, so a detached runner can resume
+  before the smoke evaluates its terminal state. The prompt names
+  `httpx_probe` explicitly to make the live tool assertion deterministic.
+- The standalone `Munin Live Session` workflow now points its MCP smoke at
+  the unified `:8787` server instead of the retired `:8890` listener. The
+  generated canary password is also masked before it is exported to Actions.
 
 ## 2026-08-01 — Durable chat recovery after process restart
 

@@ -433,7 +433,11 @@ jobs:
           PY
 
       - name: Exercise full MCP lab contract
-        run: poetry run python scripts/ci_live_smoke.py --require-turso
+        # The unified server owns the MCP transport on :8787.  Keep the
+        # endpoint explicit here: the smoke script's local default (8890) is
+        # intentionally retained for older standalone MCP launches, but this
+        # workflow must exercise the post-migration server.
+        run: MUNIN_SMOKE_BASE_URL=http://127.0.0.1:8787 poetry run python scripts/ci_live_smoke.py --require-turso
 
       # Fase 3 (issue #9): the standalone ``Start Production Suite API`` step
       # was folded into ``Start unified Munin server`` above — ``munin serve``

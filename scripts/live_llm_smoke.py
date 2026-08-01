@@ -48,7 +48,8 @@ DEFAULT_PROMPT = os.environ.get(
     "MUNIN_LIVE_SMOKE_PROMPT",
     "Inspect the infrastructure belonging to the team-web device WEB01 and report "
     "which service listens on its port. Use an ldap_search to read the WEB01 record "
-    "from dc=akatsuki,dc=com first, then probe the service host/port it documents. "
+    "from dc=akatsuki,dc=com first, then use the httpx_probe tool explicitly against "
+    "the service host/port it documents (do not substitute nmap_scan). "
     "Summarize what you found in 3-4 sentences at the end.",
 )
 
@@ -205,24 +206,38 @@ def _parse_sse_envelopes(raw: str) -> list[dict[str, Any]]:
 def _resume_chat(
     jar: http.cookiejar.CookieJar, *, conversation_id: str
 ) -> list[dict[str, Any]]:
-    """Replay a waiting/resumed run through the canonical AI SDK stream route."""
-    req = urllib.request.Request(
-        f"{BASE_URL}/api/chat/{conversation_id}/stream",
-        headers={
-            "Accept": "application/json, text/event-stream",
-            "Origin": ORIGIN,
-            "Sec-Fetch-Site": "same-origin",
-        },
-        method="GET",
-    )
+    """Replay a waiting/resumed run through the canonical AI SDK stream route.
+
+    Resolving a HITL request wakes the detached runner asynchronously.  The
+    first replay request can therefore legitimately return ``204 No Content``
+    while the checkpoint is being resumed.  Poll until the durable stream has
+    events instead of treating that short hand-off window as a failed run.
+    """
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    try:
-        with opener.open(req, timeout=RUN_DEADLINE_SECONDS + 60) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
-        raise HttpError(f"GET /api/chat/{conversation_id}/stream -> {exc.code}: {body[:400]}", exc.code, body) from exc
-    return _parse_sse_envelopes(raw)
+    deadline = time.monotonic() + RUN_DEADLINE_SECONDS
+    while time.monotonic() < deadline:
+        req = urllib.request.Request(
+            f"{BASE_URL}/api/chat/{conversation_id}/stream",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Origin": ORIGIN,
+                "Sec-Fetch-Site": "same-origin",
+            },
+            method="GET",
+        )
+        try:
+            with opener.open(req, timeout=min(RUN_DEADLINE_SECONDS + 60, 90)) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
+            raise HttpError(f"GET /api/chat/{conversation_id}/stream -> {exc.code}: {body[:400]}", exc.code, body) from exc
+        envelopes = _parse_sse_envelopes(raw)
+        if envelopes:
+            return envelopes
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(
+        f"GET /api/chat/{conversation_id}/stream returned no replay events before the deadline"
+    )
 
 
 def _approve_pending_human_requests(
