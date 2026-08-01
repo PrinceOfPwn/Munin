@@ -12,11 +12,21 @@ const MCP_HEADERS = [
   "mcp-session-id",
 ] as const;
 
-const RESPONSE_HEADERS = [
-  "content-type",
-  "mcp-protocol-version",
-  "mcp-session-id",
-] as const;
+/**
+ * Headers that must not be forwarded from upstream to the client (hop-by-hop).
+ * All other response headers — including `mcp-session-id`, `mcp-protocol-version`,
+ * `content-type`, `cache-control`, and streaming hints — are forwarded as-is.
+ */
+const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 /**
  * Same-origin MCP proxy for the hosted GUI.
@@ -51,11 +61,16 @@ async function proxy(request: Request): Promise<Response> {
 
   try {
     const upstream = await fetch(upstreamUrl, { method, headers, body });
+    // Forward all upstream response headers except hop-by-hop ones. This
+    // ensures MCP protocol headers (`mcp-session-id`, `mcp-protocol-version`),
+    // content negotiation headers, and any streaming hints reach the client
+    // intact — a fixed allowlist would silently drop new MCP headers.
     const responseHeaders = new Headers();
-    for (const name of RESPONSE_HEADERS) {
-      const value = upstream.headers.get(name);
-      if (value) responseHeaders.set(name, value);
-    }
+    upstream.headers.forEach((value, name) => {
+      if (!HOP_BY_HOP_RESPONSE_HEADERS.has(name.toLowerCase())) {
+        responseHeaders.set(name, value);
+      }
+    });
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,

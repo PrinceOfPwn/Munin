@@ -172,10 +172,13 @@ jobs:
         working-directory: app
         env:
           NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN: "1"
+          MUNIN_PRODUCTION_API_URL: "http://127.0.0.1:8787"
         run: |
           npm ci --no-audit
           npm run build
-          nohup env NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN=1 npm run start -- --hostname 127.0.0.1 --port 3000 \
+          nohup env NEXT_PUBLIC_MUNIN_MCP_SAME_ORIGIN=1 \
+            MUNIN_PRODUCTION_API_URL=http://127.0.0.1:8787 \
+            npm run start -- --hostname 127.0.0.1 --port 3000 \
             </dev/null > /tmp/munin-gui-e2e.log 2>&1 &
           echo $! > /tmp/munin-gui-e2e.pid
           for i in $(seq 1 30); do
