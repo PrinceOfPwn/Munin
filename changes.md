@@ -2,6 +2,64 @@
 
 Living changelog and hand-off log for Munin. Newest entries first.
 
+## 2026-08-01 — CI repair: tests + smoke + workflow aligned with the Fase 2-4 contract
+
+The migration (issue #9) removed `claim_next_run` (replaced by the direct
+claim in `POST /api/chat`) and the `/turns` + `/api/runs/*` two-hop, and
+unified the two-process launch into `munin serve` — but tests, the live-LLM
+smoke and `ci.yml` still exercised the old contract, so CI ran red on
+`feat/issue9-deep-agents-migration` (3 jobs: backend tests, live LLM smoke,
+E2E GUI MCP proxy).
+
+### Backend tests (`tests/test_production_foundation.py`)
+- `test_run_claim_is_direct_exclusive_and_lease_expiry_recovers` (renamed from
+  `test_leased_run_rejects_late_worker_and_recovers_expired_claim`): claims
+  via `_claim_direct` (chat.py) instead of the removed `claim_next_run`;
+  asserts a second direct claim is rejected (`RuntimeError`) and the
+  lease-expiry → `recover_expired_runs` → `interrupted` path still works.
+- `test_human_gate_tools_subagents_retry_and_recorded_branch`: uses
+  `_claim_direct` and its `lease_token` for `complete_run`.
+- `test_asgi_login_uses_cookie_session_and_csrf_for_turns`: now drives
+  `POST /api/chat` (SSE, `X-Munin-Run-Id` header, run claimed to `running`)
+  with a monkeypatched `_stream_chat`, and asserts a missing CSRF token is
+  rejected with 403.
+- New `test_fixture_user_can_be_created_and_deleted_by_test` for the new
+  `delete_user_for_test` store method.
+
+### Production store (`munin/production/store.py`)
+- Added `delete_user_for_test(username)` (ProductionStore + MuninStore
+  façade): removes a CI fixture user (must start with `llm_smoke_`, refuses
+  anything else) plus its sessions, with audit row.
+
+### Live LLM smoke (`scripts/live_llm_smoke.py`)
+- Login no longer depends on `bootstrap_admin` (global-once on the shared
+  Turso → 401): CI pre-creates a per-run fixture user exported via
+  `MUNIN_LIVE_SMOKE_ADMIN` / `MUNIN_LIVE_SMOKE_PASSWORD`.
+- Replaced `POST /api/conversations/{id}/turns` + `GET /api/runs/*` polling
+  with `POST /api/chat`: reads the SSE stream to `close`, extracts
+  `X-Munin-Run-Id`, terminal `run_state` envelope and `tool_intent` count.
+- Conversations are tagged with `MUNIN_E2E_TEST_RUN_ID` (tags + scope) so the
+  janitor's exact-namespace cleanup can remove them.
+- `_classify_failure` reads the `run_state.error` envelope instead of the
+  removed run detail endpoint; `OSError` (socket timeouts) now surfaces as a
+  classified failure instead of crashing.
+
+### CI workflow (`.github/workflows/ci.yml`)
+- `e2e_lab` and `live-llm-smoke` launch the unified `munin serve` on :8787
+  (HTTP API at `/`, FastMCP at `/mcp`) instead of the pre-Fase-3 two-process
+  launch (`munin mcp` :8890 + `munin production-api` :8787); the GUI proxy
+  check now passes because the frontend route forwards to 8787 which actually
+  mounts `/mcp`.
+- MCP catalog smokes point at `MUNIN_SMOKE_BASE_URL=http://127.0.0.1:8787`.
+- `live-llm-smoke` now uses a valid `e2e_<run_id>_deadbeef` test namespace
+  (was `llm_smoke_…`, which `cleanup_test_run` rejected), creates the
+  fixture user via the store before the run, and deletes it in the `always()`
+  cleanup step.
+
+Validation: `tests/test_production_foundation.py` 11/11 pass locally
+(Windows venv); full-suite failures elsewhere are local-env artifacts
+(stale `langchain` without `create_agent`, LLM-dependent tests). YAML parses.
+
 ## 2026-07-31 — Fleet integration: bug fixes, singleton graph, delta sync, browser cache
 
 Hand-off log for the Deep Agents + AI SDK v5 migration follow-up (issue #9).

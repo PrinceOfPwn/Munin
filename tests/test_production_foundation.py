@@ -110,26 +110,31 @@ def test_turn_is_atomic_idempotent_and_rejects_reused_key_with_new_body(producti
         )
 
 
-def test_leased_run_rejects_late_worker_and_recovers_expired_claim(production_store):
+def test_run_claim_is_direct_exclusive_and_lease_expiry_recovers(production_store):
+    from munin.production.chat import _claim_direct
+
     operator = production_store.create_user(username="operator", password="strong passphrase", role="operator")
     conversation = production_store.create_conversation(owner_id=operator["id"], title="Web evidence")
     turn = production_store.create_turn(
         actor_id=operator["id"], conversation_id=conversation["id"], content="Collect evidence", idempotency_key="turn-002"
     )
-    claimed = production_store.claim_next_run(worker_id="worker-a", lease_seconds=1)
-    assert claimed and claimed["id"] == turn["run"]["id"]
+    run_id = turn["run"]["id"]
+    lease_token, _assistant_message_id = _claim_direct(production_store, run_id=run_id)
+    assert production_store.get_run(run_id)["state"] == "running"
+    with pytest.raises(RuntimeError, match="not queued"):
+        _claim_direct(production_store, run_id=run_id)
     assert production_store.complete_run(
-        run_id=claimed["id"],
+        run_id=run_id,
         lease_token="wrong-token",
         content="late result",
         outcome="completed",
     ) is False
 
-    production_store.force_run_lease_expiry(claimed["id"], datetime.now(UTC) - timedelta(seconds=1))
-    assert production_store.recover_expired_runs() == [claimed["id"]]
-    recovered = production_store.get_run(claimed["id"])
+    production_store.force_run_lease_expiry(run_id, datetime.now(UTC) - timedelta(seconds=1))
+    assert production_store.recover_expired_runs() == [run_id]
+    recovered = production_store.get_run(run_id)
     assert recovered["state"] == "interrupted"
-    events = production_store.list_run_events(claimed["id"])
+    events = production_store.list_run_events(run_id)
     assert [event["kind"] for event in events] == ["run.queued", "run.claimed", "run.interrupted"]
 
 
@@ -166,6 +171,8 @@ def test_reasoning_redaction_envelope_profiles_and_recorded_replay(production_st
 
 
 def test_human_gate_tools_subagents_retry_and_recorded_branch(production_store):
+    from munin.production.chat import _claim_direct
+
     operator = production_store.create_user(username="operator", password="strong passphrase", role="operator")
     conversation = production_store.create_conversation(owner_id=operator["id"], title="Durable operation")
     turn = production_store.create_turn(actor_id=operator["id"], conversation_id=conversation["id"], content="Validate only approved evidence", idempotency_key="turn-004")
@@ -178,8 +185,8 @@ def test_human_gate_tools_subagents_retry_and_recorded_branch(production_store):
     gate = production_store.request_human_decision(run_id=run_id, action="approve active validation", risk="high", evidence=["scope confirmed"], scope={"asset": "approved"}, choices=["Approve once", "Reject"])
     resolved = production_store.resolve_human_decision(actor_id=operator["id"], request_id=gate["id"], choice="Approve once", nonce=gate["nonce"], guidance="No destructive actions")
     assert resolved["state"] == "queued"
-    claimed = production_store.claim_next_run(worker_id="worker-b")
-    assert claimed and production_store.complete_run(run_id=run_id, lease_token=claimed["lease_token"], content="Evidence recorded\n```python\nprint('approved')\n```", outcome="completed")
+    lease_token, _ = _claim_direct(production_store, run_id=run_id)
+    assert production_store.complete_run(run_id=run_id, lease_token=lease_token, content="Evidence recorded\n```python\nprint('approved')\n```", outcome="completed")
     artifact = production_store.get_run_detail_for_actor(actor_id=operator["id"], run_id=run_id)["artifacts"][0]
     assert production_store.get_artifact(actor_id=operator["id"], artifact_id=artifact["id"])["language"] == "python"
     retry = production_store.retry_run(actor_id=operator["id"], run_id=run_id)
@@ -189,6 +196,17 @@ def test_human_gate_tools_subagents_retry_and_recorded_branch(production_store):
     comparison = production_store.compare_operation_branch(actor_id=operator["id"], branch_id=branch["id"])
     assert comparison["branch"]["replay_mode"] == "recorded"
     assert comparison["diff"]["tool_egress"] == "disabled"
+
+
+def test_fixture_user_can_be_created_and_deleted_by_test(production_store):
+    operator = production_store.create_user(username="llm_smoke_ci", password="fixture password v1", role="operator")
+    assert production_store.authenticate(production_store.login(username="llm_smoke_ci", password="fixture password v1", ip_address="127.0.0.1", user_agent="pytest")["token"])["id"] == operator["id"]
+    assert production_store.delete_user_for_test(username="llm_smoke_ci") is True
+    with pytest.raises(PermissionError):
+        production_store.login(username="llm_smoke_ci", password="fixture password v1", ip_address="127.0.0.1", user_agent="pytest")
+    assert production_store.delete_user_for_test(username="llm_smoke_ci") is False
+    with pytest.raises(ValueError, match="non-fixture"):
+        production_store.delete_user_for_test(username="admin")
 
 
 def test_job_manager_exposes_a_shutdown_lifecycle():
@@ -214,13 +232,24 @@ def test_test_namespace_cleanup_only_removes_its_exact_fixture(production_store)
 
 
 def test_asgi_login_uses_cookie_session_and_csrf_for_turns(production_store, monkeypatch):
+    import json as _json
+
     from starlette.testclient import TestClient
 
     from munin.production.asgi import create_app
 
     monkeypatch.setenv("MUNIN_ALLOWED_ORIGINS", "http://testserver")
     monkeypatch.setenv("MUNIN_COOKIE_SECURE", "0")
-    monkeypatch.setenv("MUNIN_PRODUCTION_AUTO_DISPATCH", "0")
+
+    async def fake_chat_stream(request, **kwargs):  # noqa: ARG001 - stand-in for the real LLM run
+        yield b": munin-chat-stream v1\n\n"
+        envelope = _json.dumps(
+            {"kind": "run_state", "run_id": kwargs["run_id"], "state": "completed", "content": "fake stream"}
+        )
+        yield f"id: 1\nevent: run-event\ndata: {envelope}\n\n".encode()
+        yield b"event: close\ndata: {}\n\n"
+
+    monkeypatch.setattr("munin.production.chat._stream_chat", fake_chat_stream)
     client = TestClient(create_app(production_store))
     assert client.post("/api/auth/bootstrap", json={"username": "admin", "password": "very secure test password"}).status_code == 201
     login = client.post("/api/auth/login", json={"username": "admin", "password": "very secure test password"})
@@ -234,9 +263,16 @@ def test_asgi_login_uses_cookie_session_and_csrf_for_turns(production_store, mon
     assert created.status_code == 201
     conversation_id = created.json()["data"]["id"]
     turn = client.post(
-        f"/api/conversations/{conversation_id}/turns",
+        "/api/chat",
         headers={**headers, "Idempotency-Key": "api-turn-1"},
-        json={"content": "Persist before work"},
+        json={"conversation_id": conversation_id, "content": "Persist before work"},
     )
-    assert turn.status_code == 201
-    assert turn.json()["data"]["run"]["state"] == "queued"
+    assert turn.status_code == 200
+    assert turn.headers["content-type"].startswith("text/event-stream")
+    run_id = turn.headers["x-munin-run-id"]
+    assert production_store.get_run(run_id)["state"] == "running"
+    assert client.post(
+        "/api/chat",
+        headers={"Origin": "http://testserver", "Sec-Fetch-Site": "same-origin"},
+        json={"conversation_id": conversation_id, "content": "no csrf"},
+    ).status_code == 403

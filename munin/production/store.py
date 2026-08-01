@@ -662,6 +662,20 @@ class ProductionStore:
             self._audit(conn, actor_id=user["id"], action="user.created", resource_type="user", resource_id=user["id"], outcome="success")
         return user
 
+    def delete_user_for_test(self, *, username: str) -> bool:
+        """Remove a CI fixture user (and its sessions) by exact username."""
+        normalized = username.strip().lower()
+        if not normalized.startswith("llm_smoke_"):
+            raise ValueError("refusing to delete a non-fixture user")
+        with self._transaction() as conn:
+            row = conn.execute("SELECT id FROM users WHERE username=?", (normalized,)).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (row["id"],))
+            conn.execute("DELETE FROM users WHERE id=?", (row["id"],))
+            self._audit(conn, actor_id=None, action="user.deleted", resource_type="user", resource_id=row["id"], outcome="success")
+        return True
+
     def bootstrap_admin(self, *, username: str, password: str) -> dict[str, Any] | None:
         with self._transaction() as conn:
             if conn.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
@@ -2047,6 +2061,12 @@ class MuninStore:
             except Exception:  # noqa: BLE001
                 pass
         return result
+
+    def delete_user_for_test(self, *, username: str) -> bool:
+        deleted = self._durable.delete_user_for_test(username=username)
+        if deleted:
+            self._hot.delete_user_for_test(username=username)
+        return deleted
 
     # ------------------------------------------------------------------
     # Auth (hot)

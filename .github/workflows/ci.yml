@@ -146,31 +146,28 @@ jobs:
           ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -f scripts/ldap_mock.ldif
           ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -f scripts/ldap_seed/60-web-lab.ldif
           curl --fail --silent --show-error --retry 15 --retry-connrefused http://127.0.0.1:80/ >/dev/null
-      - name: Start MCP server
-        run: |
-          # Use the installed entrypoint. Running main with `python -m` creates
-          # a second module instance, while extension modules import the
-          # canonical `munin.mcp.main` singleton to register their tools.
-          nohup munin mcp --transport streamable-http --host 127.0.0.1 --port 8890 \
-            </dev/null > /tmp/munin-e2e.log 2>&1 &
-          echo $! > /tmp/munin-e2e.pid
-      - name: Exercise MCP against online lab services
-        run: python scripts/ci_live_smoke.py --require-turso
-      - name: Start authenticated Production Suite API
+      - name: Start unified Munin server
+        # Fase 3 (issue #9): the pre-migration two-process launch (``munin mcp``
+        # on :8890 + ``munin production-api`` on :8787) is gone.  ``munin serve``
+        # boots the composed Starlette app that mounts the HTTP API at ``/`` and
+        # the FastMCP streamable-http transport at ``/mcp``, both on :8787.
         env:
           MUNIN_ALLOWED_ORIGINS: http://127.0.0.1:3000
           MUNIN_COOKIE_SECURE: "0"
-          MUNIN_PRODUCTION_AUTO_DISPATCH: "0"
         run: |
-          nohup munin production-api --host 127.0.0.1 --port 8787 \
-            </dev/null > /tmp/munin-production-api.log 2>&1 &
-          echo $! > /tmp/munin-production-api.pid
+          nohup env PYTHONUNBUFFERED=1 munin serve --host 127.0.0.1 --port 8787 \
+            </dev/null > /tmp/munin-e2e.log 2>&1 &
+          echo $! > /tmp/munin-e2e.pid
           for i in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:8787/health >/dev/null && exit 0
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              exit 0
+            fi
             sleep 1
           done
-          cat /tmp/munin-production-api.log
+          cat /tmp/munin-e2e.log
           exit 1
+      - name: Exercise MCP against online lab services
+        run: MUNIN_SMOKE_BASE_URL=http://127.0.0.1:8787 python scripts/ci_live_smoke.py --require-turso
       - name: Build and start the production GUI
         working-directory: app
         env:
@@ -203,7 +200,6 @@ jobs:
           path: |
             /tmp/munin-e2e.log
             /tmp/munin-gui-e2e.log
-            /tmp/munin-production-api.log
           retention-days: 7
 
   live-llm-smoke:
@@ -232,7 +228,7 @@ jobs:
       MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
       MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY || '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f' }}
-      MUNIN_E2E_TEST_RUN_ID: llm_smoke_${{ github.run_id }}_deadbeef
+      MUNIN_E2E_TEST_RUN_ID: e2e_${{ github.run_id }}_deadbeef
       MUNIN_MCP_AUTH_TOKEN: actions-e2e-lab-token
       # Real LLM provider credentials — these drive MuninAgent.respond.
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
@@ -284,30 +280,49 @@ jobs:
           ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -f scripts/ldap_mock.ldif
           ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" -f scripts/ldap_seed/60-web-lab.ldif
           curl --fail --silent --show-error --retry 15 --retry-connrefused http://127.0.0.1:80/ >/dev/null
-      - name: Start MCP server (tools for the agent)
+      - name: Create per-run live-LLM smoke user
+        # ``bootstrap_admin`` is global-once on the shared Turso, so the smoke
+        # logs in as a dedicated fixture user created through the store, and
+        # the janitor removes it again in the cleanup step below.
         run: |
-          nohup munin mcp --transport streamable-http --host 127.0.0.1 --port 8890 \
-            </dev/null > /tmp/munin-e2e.log 2>&1 &
-          echo $! > /tmp/munin-e2e.pid
-      - name: Start authenticated Production Suite API (auto-dispatch ON)
+          python3 - <<'PY'
+          import os
+          import secrets
+
+          from munin.mcp.config import get_settings
+          from munin.production.store import ProductionStore
+
+          settings = get_settings()
+          store = ProductionStore.for_settings(settings, master_key=ProductionStore.master_key_from_environment())
+          username = f"llm_smoke_{os.environ['MUNIN_E2E_TEST_RUN_ID']}"
+          password = secrets.token_urlsafe(24)
+          store.create_user(username=username, password=password, role="operator")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"MUNIN_LIVE_SMOKE_ADMIN={username}\n")
+              fh.write(f"MUNIN_LIVE_SMOKE_PASSWORD={password}\n")
+          print(f"created live-LLM smoke user {username}")
+          PY
+      - name: Start unified Munin server
+        # Fase 3 (issue #9): one process serves both the HTTP API (/) and the
+        # FastMCP transport (/mcp) on :8787 — the pre-migration two-process
+        # launch is gone.
         env:
           MUNIN_ALLOWED_ORIGINS: http://127.0.0.1:8787
           MUNIN_COOKIE_SECURE: "0"
-          # The turn handler itself spawns the dispatcher thread that runs
-          # MuninAgent.respond — no separate worker process needed.
-          MUNIN_PRODUCTION_AUTO_DISPATCH: "1"
         run: |
-          nohup munin production-api --host 127.0.0.1 --port 8787 \
-            </dev/null > /tmp/munin-production-api.log 2>&1 &
-          echo $! > /tmp/munin-production-api.pid
+          nohup env PYTHONUNBUFFERED=1 munin serve --host 127.0.0.1 --port 8787 \
+            </dev/null > /tmp/munin-e2e.log 2>&1 &
+          echo $! > /tmp/munin-e2e.pid
           for i in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:8787/health >/dev/null && exit 0
+            if curl -fsS http://127.0.0.1:8787/health >/dev/null; then
+              exit 0
+            fi
             sleep 1
           done
-          cat /tmp/munin-production-api.log
+          cat /tmp/munin-e2e.log
           exit 1
       - name: Exercise MCP against lab services (catalog sanity)
-        run: python scripts/ci_live_smoke.py --require-turso
+        run: MUNIN_SMOKE_BASE_URL=http://127.0.0.1:8787 python scripts/ci_live_smoke.py --require-turso
       - name: Live LLM ReAct smoke (1 turn, retry on provider transient)
         env:
           MUNIN_LIVE_SMOKE_ORIGIN: http://127.0.0.1:8787
@@ -317,6 +332,19 @@ jobs:
         run: |
           if [ -n "$MUNIN_DB_URL" ] && [ -n "$MUNIN_MASTER_KEY" ]; then
             python scripts/production_fixture_janitor.py --test-run-id "$MUNIN_E2E_TEST_RUN_ID"
+            if [ -n "$MUNIN_LIVE_SMOKE_ADMIN" ]; then
+              python3 - "$MUNIN_LIVE_SMOKE_ADMIN" <<'PY'
+              import sys
+
+              from munin.mcp.config import get_settings
+              from munin.production.store import ProductionStore
+
+              settings = get_settings()
+              store = ProductionStore.for_settings(settings, master_key=ProductionStore.master_key_from_environment())
+              store.delete_user_for_test(username=sys.argv[1])
+              print(f"removed live-LLM smoke user {sys.argv[1]}")
+              PY
+            fi
           fi
       - name: Upload live-LLM logs
         if: always()
@@ -325,5 +353,4 @@ jobs:
           name: live-llm-smoke-${{ github.run_id }}
           path: |
             /tmp/munin-e2e.log
-            /tmp/munin-production-api.log
           retention-days: 7
