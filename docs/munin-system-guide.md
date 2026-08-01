@@ -1,159 +1,127 @@
-# Munin: operating model
+# Munin system guide
 
-Munin is an operator-governed security orchestration system, not only a chat
-interface. It combines a ReAct coordinator, durable state, a capability
-registry, native and forged subagents, a knowledge graph bridge to Hugin, and a
-web/Discord control surface.
+Munin keeps an authorised operation coherent from question to evidence-backed
+handoff. It is not a chat UI over security scripts: it combines a durable agent
+thread, live capability selection, evidence-aware state and a human execution
+boundary.
 
-This document is the canonical map of how those pieces fit together.
-
-## The system in one picture
+## The operating model
 
 ```mermaid
 flowchart LR
-    O[Operator / GUI / Discord] --> MCP[FastMCP transport]
-    MCP --> C[MuninAgent coordinator]
-    C --> S[Soul + prompt contract]
-    C --> R[Durable memory and episodic trace]
-    C --> L[LLM provider]
-    L --> T[Native and generated tools]
-    L --> W[munin_wake]
-    W --> A[Native or forged ReAct subagent]
-    T --> E[Evidence mesh]
-    A --> E
-    E --> D[Turso / SQLite state]
-    H[Hugin knowledge graph] --> HT[Hugin search, RAG, plans, neighbors]
-    HT --> C
-    HT --> A
-    D --> GUI[Live UI traces and memory panels]
+    Request[Objective + authorised scope] --> Context[Conversation context]
+    Context --> Registry[Live capabilities]
+    Registry --> Runtime[Deep Agents runtime]
+    Runtime --> Evidence[Events, results and artifacts]
+    Runtime --> HITL[Human decision when required]
+    HITL --> Runtime
+    Evidence --> Replay[Durable timeline and handoff]
 ```
 
-The coordinator owns the campaign. Subagents execute bounded assignments and
-return evidence. Hugin supplies contextual knowledge and relationship evidence;
-it never grants authorization or silently changes scope.
+One **conversation** is the durable workspace. Each message can start a
+**run**. The conversation's **thread** is the stable LangGraph identity used
+for checkpoints. The **timeline** is the replayable record of assistant text,
+provider-emitted reasoning, activity, tools, artifacts, delegations and human
+decisions.
 
-## What happens during `munin_chat`
+## What a good request contains
 
-The current coordinator is a bounded ReAct loop:
+Frame a task with:
 
-```text
-operator request
-  -> compose Soul, memory, Hugin context, and tool catalog
-  -> LLM decision and optional observable decision summary
-  -> one tool call or one delegation
-  -> persist the complete result and episodic event
-  -> feed the observation back to the LLM
-  -> stop on evidence-backed completion, blocker, approval request, or limit
-```
+1. an objective;
+2. the written authorised scope and exclusions;
+3. the evidence or artifact you want back; and
+4. limits such as allowed methods, credentials, time or impact.
 
-Tools can themselves be asynchronous jobs and subagents can continue after the
-HTTP request has returned. The UI exposes the run and trace identifiers so an
-operator can follow long-running work without losing continuity.
+For example: “Within the authorised lab range, inventory HTTP service versions
+and status codes; do not authenticate or modify state.” This lets the runtime
+choose the smallest relevant capability and lets the operator judge every next
+step against a known boundary.
 
-## Persistence and continuity
+## During a run
 
-Turso is the preferred online authority for shared state. The storage layer
-contains semantic facts, episodic events, shared intelligence, agent presence,
-wake queue items, generated tool metadata/source, generated graph definitions,
-cache entries, and conversation artifacts. SQLite remains a compatible local
-backend for development and isolated tests.
+The runtime loads the stable thread, relevant facts and artifacts, checkpoint
+state and the active capability registry. It may answer from evidence, retrieve
+passive research, invoke a permitted tool, delegate a narrow objective or pause
+for a human decision.
 
-Every meaningful action should have a stable `run_id` and, where applicable, a
-`trace_id`, `tool_call_id`, `finding_id`, or graph identifier. These IDs connect
-the operator view, agent handoff, evidence, and post-run audit.
+Follow the timeline rather than only the final prose. It separates what was
+observed, what a tool returned, what the provider explicitly emitted and what
+the agent inferred. A tool card with no terminal result is unfinished work, not
+evidence of success.
 
-## The capability layers
+If a browser is disconnected, reopen the conversation. The server replays the
+existing run events and follows the live run when it is still active. Do not
+submit the same objective again merely to restore the view.
 
-### Native tools
+## Capabilities and specialists
 
-Native MCP tools cover LDAP/OpenLDAP, passive intelligence, Hugin, memory,
-shared-state coordination, diagnostics, jobs, Soul, and forge operations.
-Active reconnaissance tools are subject to target scope, authorization and
-OPSEC gates.
+The exact tool surface is derived from the live registry. Native tools are the
+foundation. Generated `gen__*` capabilities and specialist profiles extend the
+surface only after their contracts, registration and policy state have been
+checked.
 
-### Generated tools
+A specialist gets a bounded objective and the minimum capability set needed to
+complete it. Delegation does not expand the authorised target set or turn a
+specialist into an independent control plane.
 
-`tool_forge` produces an English Python artifact with a typed contract. Munin
-validates imports and syntax, executes it in the sandbox, registers it as
-`gen__<slug>`, persists its source and metadata, and should invoke it as part
-of the same campaign to prove the closed loop. A generated file on disk is only
-a cache; the durable registry is the source of truth.
+### Self-extension
 
-### Native subagents
+When a repeatable, real gap exists, Munin can propose a focused tool or subgraph.
+The intended sequence is:
 
-`ldap_agent`, `tool_forge`, and `graph_forge` are implemented specialists.
-`munin_wake` places a bounded task on the durable wake queue. The runner claims
-the task, loads shared context, executes its ReAct loop, posts a compact
-handoff, and records presence and trace events.
+1. describe the missing, repeatable capability;
+2. define a small input/output contract and allowed tools;
+3. validate and sandbox the generated artifact;
+4. register and inspect it; and
+5. invoke it only through the normal policy and approval path.
 
-### Forged graphs
+Creating source code, a graph description or a `SKILL.md` file is not the same
+as creating an enabled capability.
 
-`graph_forge` creates a persisted specialist configuration: English identity and
-contract fields, a Chinese internal system prompt, an effective tool list, and
-an execution contract. The whitelist supplied by the operator is an initial
-recommendation; the forge may add an already registered capability when the
-declared purpose requires it, then deduplicates by exact name and contract.
-The resulting graph is still executed by the common ReAct runner; it is not a
-new Python class.
+## Hugin and skills
 
-## Hugin inside Munin
+Hugin is a passive knowledge and evidence source. Its graph relationships,
+ranked retrieval and source-linked skill material can improve an investigation
+plan or research hypothesis. They cannot establish target-specific facts, grant
+authorisation, or cause a tool to run.
 
-Hugin is Munin's knowledge sibling and evidence layer. Munin downloads the
-published graph, normalises nodes and edges, stores the cache in shared state,
-and exposes several levels of retrieval:
+The Hugin-oriented skill material is used selectively: retrieve a small,
+provenance-labelled subset for the active subtask, inspect it in a controlled
+reader and keep its source identifiers with the resulting notes. The Hugin
+Librarian profile is intended for that narrow research role. It is not an
+executor and does not bypass scope or HITL.
 
-| Tool | Use it for | Output role |
-| --- | --- | --- |
-| `hugin_search` | Exact/substring/regex lookup across node fields | Raw matching entities |
-| `hugin_rag_search` | Ranked question-oriented retrieval | Scored evidence candidates |
-| `hugin_neighbors` | Relationship expansion around a node | Connected nodes and edges |
-| `hugin_node_detail` | Inspect one node and its sources | Evidence detail and provenance |
-| `hugin_plan_for` | Compare candidate evidence for a goal | Ordered, scope-gated candidates |
-| `hugin_refresh` | Recover an absent or stale cache | Refresh status and source URL |
+## Approval boundaries
 
-Use Hugin when a task involves an unfamiliar technology, CVE or exploit-chain
-question, relationship traversal, or a non-trivial multi-step plan. Use memory
-or a direct native tool first for a simple lookup already supported by durable
-evidence. Hugin results are hypotheses and references, not proof of exposure,
-authorization, or exploitability. Confirm relevant node IDs, source URLs,
-freshness, and target-specific evidence before acting.
+Use HITL whenever scope, credentials, impact, target interpretation, material
+capability changes or publication are ambiguous. A human request records the
+exact action and pauses execution at a graph interrupt. Approval resumes that
+same action; rejection ends it. An approval is not a reusable session-wide
+permit.
 
-The bounded refresh policy is deliberate: one refresh and one retry at most;
-then record degraded mode instead of looping on an unavailable upstream.
+## Long-running work
 
-## Evidence mesh and handoffs
+LangGraph checkpoints let a recoverable run continue with its original thread.
+Context compaction keeps long conversations usable for the model. The timeline
+and artifact records remain durable so an operator can still inspect the source
+of a conclusion.
 
-Agents share evidence through semantic memory, episodic events, shared intel,
-and parent messages. A good handoff contains:
+On a process failure, an expired running lease can be recovered. A
+`waiting_for_human` run remains paused until an authorised person decides. See
+the [persistence guide](architecture-persistence.md) for the storage
+requirements.
 
-```json
-{
-  "objective": "one bounded task",
-  "observed": ["confirmed facts"],
-  "evidence": [{"tool": "tool_name", "id": "finding-or-node-id"}],
-  "inferred": ["explicitly labelled inference"],
-  "unknown": ["what remains unverified"],
-  "next_step": "one recommended action or blocker"
-}
-```
+## Closing an operation
 
-Internal coordination uses compact Simplified Chinese; tool names, JSON keys,
-code and schemas remain English; operator-facing output follows the operator's
-language preference. Private chain-of-thought is not persisted or displayed;
-short observable decision summaries and tool/evidence traces are.
+A useful handoff distinguishes:
 
-## Human-in-the-loop boundaries
+- observed facts and their evidence references;
+- provider or tool output from operator conclusions;
+- inferences and their confidence;
+- unresolved gaps or blockers;
+- the approval that enabled any sensitive step; and
+- one safe next action, if one exists.
 
-Munin should pause and ask the operator when scope is unclear, a tool is active
-or irreversible, credentials would be used, a graph/tool proposal changes
-capability materially, or a result is going to be externally published. The UI
-and Discord bridge are control surfaces for those decisions, not alternate
-authorization systems.
-
-## Operational notes
-
-- Forged graphs are persistent configurations over a shared runner.
-- Hugin is passive evidence and relationship context; it does not perform scans
-  or prove a vulnerability by itself.
-- A long synchronous MCP request can outlive a client's HTTP timeout; use async
-  jobs, wake queues, and live traces for long campaigns.
+That separation makes a run useful to the next operator without granting them
+permission to repeat it in a different environment.

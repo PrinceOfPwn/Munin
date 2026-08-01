@@ -1,125 +1,57 @@
-# LLM Providers and Chinese-First Runtime
+# LLM provider contract
 
-Munin accepts any endpoint implementing OpenAI-style `/v1/chat/completions`
-through `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`. Its operating contract
-is provider-independent: internal coordination is Simplified Chinese, code and
-machine artifacts are English, and operator delivery follows
-`MUNIN_OPERATOR_LANGUAGE` or the latest operator message.
+Munin supports managed provider profiles and an environment fallback through an
+OpenAI-compatible endpoint. Provider selection changes model behaviour; it does
+not change Munin's server-side policy, capability checks or HITL protocol.
 
-```bash
-LLM_BASE_URL=https://<provider>/v1
-LLM_API_KEY=<provider-key>
-LLM_MODEL=<provider-model-id>
-MUNIN_OPERATOR_LANGUAGE=auto
-```
+## Configure a provider
 
-`auto` is recommended. Set `es`, `en`, `pt-BR`, or `zh-CN` when a deployment
-must always use one operator language.
+Set the endpoint, model and credentials in `.env` for the environment fallback,
+or create an authenticated provider profile in the web settings. Keep API keys
+on the backend: the browser sends a profile to the authenticated server and
+does not persist the secret in its local query cache.
 
-## Supported Chinese model families
+Every provider used for operational work should be tested for normal text,
+structured tool calls, streaming, timeout behaviour and the intended model.
 
-### GLM
+## Required behaviour
 
-GLM is a first-class profile. Any model id containing `glm` receives the same
-Chinese operating protocol, including GLM-5/5.x and GLM-4.x endpoints.
+A compatible provider must be able to:
 
-```bash
-LLM_BASE_URL=https://api.z.ai/api/paas/v4
-LLM_API_KEY=<z-ai-key>
-LLM_MODEL=glm-5
-```
+- return normal assistant content;
+- support the LangChain message and tool-call path used by the runtime;
+- stream deltas when the UI needs live progress; and
+- make errors and timeouts distinguishable from a completed answer.
 
-Z.AI documents OpenAI-style `tool_calls` and interleaved thinking across tool
-turns. Munin keeps model-native thinking private and exposes only decision
-summaries, tool progress, evidence, and outcomes.
+The capability registry is supplied by Munin. A provider cannot make a tool
+available by describing one in natural language.
 
-- [Z.AI Function Calling](https://docs.z.ai/guides/capabilities/function-calling)
-- [Z.AI Thinking Mode](https://docs.z.ai/guides/capabilities/thinking-mode)
-- [GLM-5](https://github.com/zai-org/GLM-5)
+## Provider-emitted reasoning
 
-### MiMo
+Some providers emit explicit fields such as `reasoning_content`, `reasoning`,
+`thinking` or `<think>`-tagged output. Munin keeps these deltas separate from
+final assistant text, persists the corresponding timeline event and restores it
+through replay.
 
-The supported open model is **MiMo-V2-Flash**, not the obsolete MiMo 7B
-example. Provider aliases such as `mimo-v2.5` also match the MiMo profile.
+This is intentionally limited to content the provider emits. Munin does not
+derive or reconstruct private reasoning from graph internals, tool calls or
+operational logs. Providers without an explicit reasoning channel simply have
+no reasoning part in the UI.
 
-```bash
-LLM_BASE_URL=https://<mimo-provider>/v1
-LLM_API_KEY=<provider-key>
-LLM_MODEL=mimo-v2-flash
-```
+## Timeouts and long-running work
 
-For self-hosted MiMo-V2-Flash, Xiaomi recommends SGLang with the `mimo` tool
-parser and a lower temperature for agentic tool use. If a provider returns
-`reasoning_content`, its adapter must preserve that field across multi-turn
-tool calls; it must never be displayed as operator-visible reasoning.
+Tune model request timeouts for the provider's real latency, while keeping run
+leases, cancellation and tool/HITL policy as independent controls. A slow model
+must not cause the client to submit a second identical turn: the conversation
+stream can be replayed while the server-owned run continues.
 
-- [MiMo-V2-Flash official repository](https://github.com/XiaomiMiMo/MiMo-V2-Flash)
+## Acceptance checklist
 
-### Qwen
+Before enabling a provider profile:
 
-Qwen3 and compatible Qwen endpoints are supported. The provider must expose
-tool calls as OpenAI-compatible structured calls; Munin does not ask the model
-to print textual ReAct/XML tool tags.
-
-```bash
-LLM_BASE_URL=https://<qwen-provider>/v1
-LLM_API_KEY=<provider-key>
-LLM_MODEL=qwen3-32b
-```
-
-- [Qwen Function Calling](https://qwen.readthedocs.io/en/stable/framework/function_call.html)
-
-The OFFX Qwen3.5 planner can also be served through vLLM/Ollama:
-
-```bash
-LLM_BASE_URL=http://localhost:8000/v1
-LLM_API_KEY=dummy
-LLM_MODEL=offx-qwen35-9b-dora-planner
-```
-
-### DeepSeek
-
-Use a DeepSeek chat model whose endpoint supports function calling. Do not
-select a reasoning-only variant that the provider documents as incompatible
-with tools.
-
-```bash
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_API_KEY=<deepseek-key>
-LLM_MODEL=deepseek-chat
-```
-
-- [DeepSeek API updates and function-calling support](https://api-docs.deepseek.com/updates)
-
-### Kimi, Yi, and other compatible Chinese models
-
-Model ids containing `kimi`, `moonshot`, or `yi` receive a named profile; all
-other endpoints use the generic `OpenAI-compatible` profile. The behavioral
-contract remains identical. Provider-specific chat templates and tool parsers
-must be configured at the serving layer, not imitated in the system prompt.
-
-## Why the prompt does not request visible chain-of-thought
-
-Munin uses concise Chinese for operational instructions and inter-agent
-handoffs, but it does not request or expose private reasoning. This avoids
-provider-specific reasoning formats and gives the GUI/Discord a stable,
-auditable surface:
-
-- objective and scope;
-- action/tool selected;
-- evidence and source identifiers;
-- risk or blocker;
-- next step.
-
-See [Prompt Architecture](prompt-architecture.md) for the exact contracts and
-few-shot design.
-
-## Sampling and timeout guidance
-
-- Coordinator/subagent tool use: start around `temperature=0.2-0.3`.
-- Code generation in `tool_forge`: `temperature=0.1`.
-- `LLM_TIMEOUT_FLOOR` defaults to `40s`; `LLM_TIMEOUT_CEILING` defaults to
-  `240s`.
-- Preserve the complete assistant tool-call message and every matching tool
-  result in multi-turn history.
-- Keep exactly one composed system message per request; Munin already does so.
+1. verify the endpoint and model identity;
+2. complete a streaming text response;
+3. complete a structured tool-call round trip in an isolated fixture;
+4. verify explicit reasoning handling if the provider offers it;
+5. test a timeout or provider error path; and
+6. confirm credentials never appear in browser storage, logs or artifacts.
