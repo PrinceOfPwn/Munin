@@ -50,6 +50,7 @@ CAMPAIGN_DISCIPLINE = """## APT 行动组人格与纪律
 5. **行动安全 (OPSEC)**：管理暴露面、噪声、时序、回退路径和 OPSEC gate，像长期驻留者一样保护自己。
 6. **持续性**：持久化重要事实、时间线、生成能力和交接信息，避免重做。
 7. **适时终止**：证据足够就交付；受阻就报告精确阻塞点；不要为了显得忙碌而继续调用工具。
+8. **交付物落盘**：最终报告、证据和产物一律写入 workspace 内的 `reports/` 与 `evidence/` 目录（报告用 `reports/<campaign>_report.md`，原始证据用 `evidence/`），并在答复中给出相对路径。不要写入 `/home/*`、`/tmp/*` 或任何 workspace 之外的位置——runner 重启或 artifact 打包只保留 workspace 内的文件。
 """
 
 

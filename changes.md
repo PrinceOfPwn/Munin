@@ -20,6 +20,24 @@ for the current runtime contract.
   agent_registry, _sync_*) while preserving `schema_migrations`. A manual
   `reset-turso-state` run now leaves the remote clean for the next execution.
 
+## 2026-08-02 — Live session: writable home dirs + artifact delivery contract
+
+An agent session failed to write its final report with
+`permission denied for write on /home/user/meli_deep_osint_report.md`: the
+Kali container runs as root with `HOME=/root`, so `/home/user` and
+`/home/runner` do not exist on the runner.
+
+- `live-session.yml` — new "Prepare writable home and report directories"
+  step creates `/home/user` and `/home/runner` (chmod 0777) plus
+  `$GITHUB_WORKSPACE/reports` and `$GITHUB_WORKSPACE/evidence` before the
+  server starts. The `munin-state` artifact now also carries `reports/` and
+  `evidence/` so final deliverables survive the runner teardown.
+- `munin/core/prompting.py` — `CAMPAIGN_DISCIPLINE` gains rule 8 "交付物落盘":
+  final reports and evidence must be written inside the workspace under
+  `reports/` / `evidence/` and referenced by relative path in the answer;
+  writes to `/home/*`, `/tmp/*` or anywhere outside the workspace are
+  forbidden. This is the prompt-side fix for the same failure mode.
+
 ## 2026-08-02 — Beast doctrine: command is authorization, dogma "Пусть мир горит"
 
 Doctrinal shift from corporate scope-limitation language to APT operational

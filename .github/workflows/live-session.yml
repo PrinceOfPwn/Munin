@@ -244,6 +244,21 @@ jobs:
           # Prime nuclei templates so the first tool call doesn't have to.
           nuclei -silent -ut 2>/dev/null || true
 
+      - name: Prepare writable home and report directories
+        run: |
+          # The Kali container runs as root with HOME=/root; /home/user and
+          # /home/runner do not exist.  Agent sessions that write final
+          # reports into the container home would otherwise fail with
+          # "permission denied for write".  Munin's own artifacts live under
+          # $GITHUB_WORKSPACE/reports (Settings.reports_root), created here
+          # too so report generation always has a target.
+          for d in /home/user /home/runner "$GITHUB_WORKSPACE/reports" "$GITHUB_WORKSPACE/evidence"; do
+              mkdir -p "$d"
+          done
+          chmod 0777 /home/user /home/runner 2>/dev/null || true
+          echo "HOME=${HOME:-/root}  GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+
+
       - name: Install Munin
         run: |
           poetry config virtualenvs.in-project true
@@ -676,6 +691,8 @@ jobs:
             data/soul_pending/
             data/wake_artifacts/
             munin/generated/
+            reports/
+            evidence/
           retention-days: 90
           if-no-files-found: warn
 
