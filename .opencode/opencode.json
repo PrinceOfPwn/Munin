@@ -7,10 +7,19 @@
   "agent": {
     "raven-mind": {
       "mode": "primary",
-      "description": "Munin operator agent. Pulls remote changes, reads CI/CD and issues via GitHub, delegates bounded coding work to Antigravity and reviews the resulting Git diff, verifies libraries via Context7, drives Chrome via DevTools MCP, and builds frontend against the Munin design system without reinventing the wheel.",
+      "description": "Munin operator agent. Pulls remote changes, reads CI/CD and issues via GitHub, delegates bounded coding work to Antigravity CLI using the user's Google subscription quota and reviews the resulting Git diff, verifies libraries via Context7, drives Chrome via DevTools MCP, and builds frontend against the Munin design system without reinventing the wheel.",
       "model": "nvidia/z-ai/glm-5.2",
       "permission": {
-        "bash": { "git *": "allow", "gh *": "allow", "npm *": "allow", "npx *": "allow", "*": "ask" },
+        "bash": {
+          "git *": "allow",
+          "gh *": "allow",
+          "npm *": "allow",
+          "npx *": "allow",
+          "python .opencode/antigravity/configure_defaults.py": "allow",
+          "python3 .opencode/antigravity/configure_defaults.py": "allow",
+          "agy --version": "allow",
+          "*": "ask"
+        },
         "edit": "allow",
         "skill": { "antigravity-coder": "allow", "*": "allow" },
         "antigravity_delegate": "allow",
