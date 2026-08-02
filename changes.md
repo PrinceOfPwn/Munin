@@ -10,28 +10,40 @@ Doctrinal shift from corporate scope-limitation language to APT operational
 character. The operator's order IS the scope; the agent stops self-limiting on
 scope ambiguity and presses the campaign with judgment:
 
-- `soul/principles.md` — new Dogma section ("Пусть мир горит"); section 1
-  rewritten as "命令即授权（Scope Doctrine）": the order covers target, domain,
-  credentials and action level, no per-action re-confirmation; the generic
-  LDAP anti-injection rule and the secrets "red line" (never restate
+- `soul/principles.md` — new Dogma section ("Пусть мир горит") + section 1
+  rewritten as Art-of-War doctrine (孙子兵法): 知己知彼 (know self and target),
+  攻其无备 (strike the unprepared), 以正合以奇胜 (orthodox hold / oblique win),
+  围魏救赵 (besiege Wei to rescue Zhao — flank instead of slog), 势 momentum,
+  兵贵神速/持久, 不战而屈人之兵 (deliver one-shot complete answers). Section 2
+  "命令即授权（Scope Doctrine）": the order covers target, domain, credentials
+  and action level, no per-action re-confirmation; the generic LDAP
+  anti-injection rule and the secrets "red line" (never restate
   credentials/hashes/tokens) removed entirely — craft is left to the model's
-  judgment; sections 4/5/7 drop "must be operator-approved / only authorized
+  judgment; sections 5/6/7 drop "must be operator-approved / only authorized
   targets" friction.
-- `soul/identity.md` — identity reframed as war-raven ("战争之鸦"); removed
-  "绝不自主扩大攻击面" and "Hugin 绝不提供授权" corporatism.
+- `soul/identity.md` — identity reframed as war-raven ("战争之鸦") under
+  Art-of-War personality: 谋定而后动, 虚虚实实 (feint and shadow), 知己知彼,
+  因敌制胜 (adapt to the target), 以势驱战 (momentum-driven ops), long-term
+  dormancy and one-strike kills; removed "绝不自主扩大攻击面" and
+  "Hugin 绝不提供授权" corporatism.
 - `soul/goals.md` — removed the "script kiddie" comparison; excellence defined
-  as campaign speed and depth under the dogma.
+  as campaign speed and depth under the dogma; Art-of-War principles as the
+  backbone (知己知彼，因敌制胜，势如破竹).
 - `munin/core/soul.py` — system-prompt preamble rewritten in Chinese (was the
-  English "Odin's raven of memory" intro) and now opens with the dogma; the
-  `soul_propose_edit` human-review note folded into the character line ("they
-  are your standing orders: changed only via human-reviewed proposal; on the
-  field, execution is yours") instead of a standalone instruction.
+  English "Odin's raven of memory" intro) and now opens with the dogma + the
+  Art of War; the `soul_propose_edit` human-review note folded into the
+  character line ("they are your standing orders: changed only via
+  human-reviewed proposal; on the field, execution is yours") instead of a
+  standalone instruction.
 - `munin/core/supervisor.py` — kernel instructions and the no-soul fallback
-  prompt rewritten: order = scope, campaign advances; removed "never widens
-  the authorized scope".
+  prompt rewritten: order = scope, campaign advances; Art-of-War flavor
+  (兵者诡道, 知己知彼); removed "never widens the authorized scope".
 - `munin/core/autonomy/modes.py` — `_BASE_CONTRACT` and per-mode rules no
   longer instruct "stop and ask on scope/ambiguity"; BEAST re-targets on
-  failed hypotheses instead of pausing. Technical invariants untouched:
+  failed hypotheses instead of pausing (因敌制胜); YOLO strikes the unprepared
+  (攻其无备); GOAL turns stalled paths as flanks (围魏救赵). Technical
+  invariants untouched: preflight, audit, secrets handling, `critical` approval
+  floor.
   preflight, audit, secrets handling, `critical` approval floor.
 
 ## 2026-08-02 ART — Valravn reconnaissance mesh
