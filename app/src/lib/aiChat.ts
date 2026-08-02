@@ -113,6 +113,18 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
     },
   });
 
+  // Operator-facing diagnostics: keep the browser console useful without
+  // dumping prompt/tool payloads (which may contain credentials or evidence).
+  useEffect(() => {
+    console.debug("[Munin stream]", {
+      conversationId,
+      status: chat.status,
+      messageCount: chat.messages.length,
+      partTypes: chat.messages.flatMap((message) => message.parts.map((part) => part.type)),
+      error: chat.error?.message ?? null,
+    });
+  }, [chat.error, chat.messages, chat.status, conversationId]);
+
   // `resumeStream()` replays assistant/run events, but UIMessage streams do
   // not recreate prior user messages. Hydrate the timeline from the local
   // cache first and fall back to the authoritative conversation aggregate so
@@ -176,6 +188,32 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
   }, [cache, chat, conversationId]);
 
   return chat;
+}
+
+/**
+ * Send operator guidance without asking `useChat` to parse a non-streaming
+ * acknowledgement as a UIMessage stream.  This is intentionally separate
+ * from `sendMessage`: guidance mutates the active run, it is not a new turn.
+ */
+export async function sendOperatorGuidance(
+  runId: string,
+  body: string,
+  targetAgentId?: string,
+): Promise<void> {
+  const token = currentCsrfToken();
+  const response = await fetch(`/api/chat/${encodeURIComponent(runId)}/guidance`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { "X-CSRF-Token": token } : {}),
+    },
+    body: JSON.stringify({ body, target_agent_id: targetAgentId }),
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload?.error?.message || payload?.error || `Guidance failed (${response.status})`);
+  }
 }
 
 // ---------------------------------------------------------------------------

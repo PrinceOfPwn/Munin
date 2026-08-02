@@ -318,8 +318,9 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         try:
             current = await actor(request)
             result = store.get_artifact(actor_id=current["id"], artifact_id=request.path_params["artifact_id"])
-            if request.query_params.get("download") == "true":
-                return Response(result["content"], media_type=result["media_type"], headers={"Content-Disposition": f"attachment; filename={result['filename']}"})
+            if request.query_params.get("download") == "true" or request.query_params.get("inline") == "true":
+                disposition = "attachment" if request.query_params.get("download") == "true" else "inline"
+                return Response(result["content"], media_type=result["media_type"], headers={"Content-Disposition": f"{disposition}; filename={result['filename']}"})
             return JSONResponse({"ok": True, "data": result})
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))

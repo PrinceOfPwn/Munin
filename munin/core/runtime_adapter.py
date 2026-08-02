@@ -402,6 +402,8 @@ async def supervisor_runner(
             messages.append(HumanMessage(content=prompt))
             input_value = {"messages": messages}
 
+        graph_finished = asyncio.Event()
+
         async def consume_graph() -> None:
             try:
                 async for event in supervisor.astream_events(input_value, config=config, version="v2"):
@@ -409,7 +411,11 @@ async def supervisor_runner(
             except BaseException as exc:  # noqa: BLE001 - surface through the generator task
                 await event_queue.put(("error", exc))
             finally:
-                await event_queue.put(("done", None))
+                # Do not enqueue a terminal sentinel here.  Async command
+                # tools can still be flushing stdout/stderr after the graph
+                # emits its final chain event; the progress pump owns the
+                # close barrier once those chunks are drained.
+                graph_finished.set()
 
         async def pump_job_progress() -> None:
             try:
@@ -420,6 +426,12 @@ async def supervisor_runner(
             while True:
                 for event in JOBS.progress_for_run(run_id, cursors):
                     await event_queue.put(("envelope", event))
+                if graph_finished.is_set() and not JOBS.has_active_run(run_id):
+                    # All queued output was emitted before this sentinel was
+                    # inserted.  The consumer can now close deterministically
+                    # without racing the final process-reader lines.
+                    await event_queue.put(("progress_done", None))
+                    return
                 await asyncio.sleep(0.2)
 
         graph_task = asyncio.create_task(consume_graph(), name=f"munin-graph-{run_id}")
@@ -427,7 +439,7 @@ async def supervisor_runner(
         try:
             while True:
                 source, payload = await event_queue.get()
-                if source == "done":
+                if source == "progress_done":
                     break
                 if source == "error":
                     raise payload

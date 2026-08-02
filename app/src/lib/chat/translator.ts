@@ -31,6 +31,7 @@ export interface BackendEnvelope {
   run_id?: string;
   sequence?: number;
   text?: string;
+  content?: string;
   stage?: string;
   tool_name?: string;
   tool_call_id?: string;
@@ -69,6 +70,7 @@ export interface TranslatorState {
   textStarted: boolean;
   reasoningId: string | null;
   finished: boolean;
+  textSegments: string[];
 }
 
 export function createTranslator(runId: string): {
@@ -80,7 +82,11 @@ export function createTranslator(runId: string): {
     textStarted: false,
     reasoningId: null,
     finished: false,
+    textSegments: [],
   };
+
+  let currentTextSegment = "";
+  let textSegmentNumber = 0;
 
   function textDeltas(text: string): UIMessageChunk[] {
     const chunks: UIMessageChunk[] = [];
@@ -89,20 +95,28 @@ export function createTranslator(runId: string): {
       chunks.push({ type: "text-start", id: state.textId });
     }
     chunks.push({ type: "text-delta", id: state.textId, delta: text });
+    currentTextSegment += text;
     return chunks;
   }
 
   function closeText(): UIMessageChunk[] {
     if (!state.textStarted) return [];
+    const id = state.textId;
     state.textStarted = false;
-    return [{ type: "text-end", id: state.textId }];
+    if (currentTextSegment) {
+      state.textSegments.push(currentTextSegment);
+      currentTextSegment = "";
+    }
+    textSegmentNumber += 1;
+    state.textId = `text-${runId}-${textSegmentNumber}`;
+    return [{ type: "text-end", id }];
   }
 
   function reasoningDeltas(text: string, step: number): UIMessageChunk[] {
     const id = `reasoning-${runId}-${step}`;
     const chunks: UIMessageChunk[] = [];
     if (state.reasoningId !== id) {
-      chunks.push(...closeReasoning());
+      chunks.push(...closeText(), ...closeReasoning());
       state.reasoningId = id;
       chunks.push({ type: "reasoning-start", id });
     }
@@ -118,6 +132,28 @@ export function createTranslator(runId: string): {
   }
 
   function translate(envelope: BackendEnvelope): UIMessageChunk[] {
+    function closeForNonText(): UIMessageChunk[] {
+      return closeText();
+    }
+
+    function finalTextDelta(content: string): string {
+      if (!content) return "";
+      const emitted = [...state.textSegments, currentTextSegment].join("");
+      if (content === currentTextSegment || emitted.endsWith(content)) return "";
+      if (currentTextSegment && content.startsWith(currentTextSegment)) {
+        return content.slice(currentTextSegment.length);
+      }
+      if (emitted && content.startsWith(emitted)) return content.slice(emitted.length);
+      // Provider adapters can return a final message that omits earlier
+      // tool-planning prose.  Avoid duplicating the longest overlap while
+      // still preserving a genuinely missing tail.
+      const max = Math.min(emitted.length, content.length);
+      for (let size = max; size > 0; size -= 1) {
+        if (emitted.endsWith(content.slice(0, size))) return content.slice(size);
+      }
+      return content;
+    }
+
     switch (envelope.kind) {
       case "assistant_text":
       case "reasoning":
@@ -134,7 +170,7 @@ export function createTranslator(runId: string): {
           : [];
 
       case "activity":
-        return envelope.text ? [...closeReasoning(), {
+        return envelope.text ? [...closeForNonText(), ...closeReasoning(), {
           type: "data-activity",
           id: `activity-${envelope.sequence ?? `${envelope.stage ?? "event"}-${envelope.text.slice(0, 48)}`}`,
           data: { stage: envelope.stage ?? "working", text: envelope.text },
@@ -143,7 +179,7 @@ export function createTranslator(runId: string): {
       case "tool_intent": {
         if (!envelope.tool_call_id || !envelope.tool_name) return [];
         return [
-          ...closeReasoning(),
+          ...closeForNonText(), ...closeReasoning(),
           { type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name, dynamic: true },
           { type: "tool-input-available", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name, input: envelope.input ?? {}, dynamic: true },
         ];
@@ -151,20 +187,24 @@ export function createTranslator(runId: string): {
 
       case "tool_started":
         if (!envelope.tool_call_id) return [];
-        return [...closeReasoning(), { type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name ?? "unknown", dynamic: true }];
+        return [...closeForNonText(), ...closeReasoning(), { type: "tool-input-start", toolCallId: envelope.tool_call_id, toolName: envelope.tool_name ?? "unknown", dynamic: true }];
 
       case "tool_result":
       case "tool_completed":
         if (!envelope.tool_call_id) return [];
-        return [...closeReasoning(), { type: "tool-output-available", toolCallId: envelope.tool_call_id, output: envelope.output ?? "", dynamic: true }];
+        // LangGraph's lifecycle event does not carry the tool payload. The
+        // progress middleware emits the authoritative result separately;
+        // avoid replacing it with an empty output part.
+        if (envelope.kind === "tool_completed" && envelope.output == null) return [];
+        return [...closeForNonText(), ...closeReasoning(), { type: "tool-output-available", toolCallId: envelope.tool_call_id, output: envelope.output ?? "", dynamic: true }];
 
       case "tool_failed":
         if (!envelope.tool_call_id) return [];
-        return [...closeReasoning(), { type: "tool-output-error", toolCallId: envelope.tool_call_id, errorText: envelope.error ?? "unknown error", dynamic: true }];
+        return [...closeForNonText(), ...closeReasoning(), { type: "tool-output-error", toolCallId: envelope.tool_call_id, errorText: envelope.error ?? "unknown error", dynamic: true }];
 
       case "tool_output":
         if (!envelope.text) return [];
-        return [{
+        return [...closeForNonText(), {
           type: "data-command-output",
           id: `command-output-${envelope.job_id ?? envelope.tool_call_id ?? envelope.tool_name ?? "tool"}-${envelope.sequence ?? 0}`,
           data: {
@@ -251,7 +291,14 @@ export function createTranslator(runId: string): {
         if (runState === "completed") {
           if (state.finished) return [];
           state.finished = true;
-          return [...closeReasoning(), ...closeText(), runStatePart, { type: "finish" }];
+          const missingTail = finalTextDelta(envelope.content ?? "");
+          return [
+            ...closeReasoning(),
+            ...(missingTail ? textDeltas(missingTail) : []),
+            ...closeText(),
+            runStatePart,
+            { type: "finish" },
+          ];
         }
         if (["failed", "cancelled", "interrupted"].includes(runState)) {
           if (state.finished) return [];

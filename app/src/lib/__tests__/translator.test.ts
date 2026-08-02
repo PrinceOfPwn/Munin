@@ -89,6 +89,26 @@ describe("createTranslator - text part lifecycle", () => {
     translate(makeEnvelope({ kind: "run_state", state: "completed" }));
     expect(translate(makeEnvelope({ kind: "run_state", state: "completed" }))).toEqual([]);
   });
+
+  it("flushes terminal content that arrived after the last streamed delta", () => {
+    const { translate } = createTranslator("run-x");
+    translate(makeEnvelope({ kind: "assistant_text", text: "before" }));
+    translate(makeEnvelope({
+      kind: "tool_intent",
+      tool_name: "execute_command",
+      tool_call_id: "tc-tail",
+      input: {},
+    }));
+    translate(makeEnvelope({ kind: "tool_result", tool_call_id: "tc-tail", output: "ok" }));
+    const chunks = translate(makeEnvelope({
+      kind: "run_state",
+      state: "completed",
+      content: "beforeafter",
+    }));
+    expect(chunks).toContainEqual({ type: "text-start", id: "text-run-x-1" });
+    expect(chunks).toContainEqual({ type: "text-delta", id: "text-run-x-1", delta: "after" });
+    expect(chunks).toContainEqual({ type: "text-end", id: "text-run-x-1" });
+  });
 });
 
 describe("createTranslator - tool parts", () => {

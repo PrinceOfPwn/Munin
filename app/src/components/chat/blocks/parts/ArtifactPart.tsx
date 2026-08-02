@@ -70,17 +70,27 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
   const filename = displayName(uri, artifactId);
   const label = mimeLabel(mimeType);
   const safeUri = isSafeUri(uri) ? uri : undefined;
+  const artifactUri = safeUri || `/api/production/artifacts/${encodeURIComponent(artifactId)}?download=true`;
+  const previewUri = `/api/production/artifacts/${encodeURIComponent(artifactId)}?inline=true`;
+  const isImage = mimeType.toLowerCase().startsWith("image/");
 
   return (
-    <a
-      href={safeUri}
+    <div className="flex max-w-full flex-col items-start gap-2">
+      {isImage && (
+        <div className="overflow-hidden rounded-md border border-border bg-bg">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={safeUri || previewUri} alt={filename} className="max-h-96 max-w-full object-contain" />
+        </div>
+      )}
+      <a
+      href={artifactUri}
       download={filename}
       target="_blank"
       rel="noopener noreferrer"
       className={cn(
         "inline-flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm",
         "transition-colors hover:bg-accent/10 hover:text-accent",
-        !safeUri && "pointer-events-none opacity-60"
+        !artifactUri && "pointer-events-none opacity-60"
       )}
       data-artifact-id={artifactId}
       aria-label={`Download ${filename}`}
@@ -102,11 +112,12 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
       </span>
 
       {/* Download arrow */}
-      {safeUri && (
+      {artifactUri && (
         <span aria-hidden className="text-muted">
           ↓
         </span>
       )}
-    </a>
+      </a>
+    </div>
   );
 }

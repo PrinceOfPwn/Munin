@@ -21,6 +21,13 @@ def test_bundled_skill_library_exposes_a_direct_deepagents_source():
     assert binding.permissions[0].operations == ["write"]
 
 
+def test_bundled_skill_frontmatter_identity_matches_package_directory():
+    library = bundled_skill_library()
+
+    assert library.validation_errors() == ()
+    assert "hugin-research" in library.available()
+
+
 def test_bundled_skill_library_rejects_arbitrary_paths():
     with pytest.raises(ValueError, match="Unknown bundled skill"):
         bundled_skill_library().bind(["../../unreviewed-prompt-tree"])
@@ -39,6 +46,7 @@ def test_bundled_skill_library_discovers_only_direct_child_packages(tmp_path):
     library = BundledSkillLibrary(root=tmp_path)
 
     assert library.available() == ("approved-skill",)
+    assert library.validation_errors() == ("category: missing SKILL.md",)
     assert library.bind(["approved-skill"]) is not None
     with pytest.raises(ValueError, match="Unknown bundled skill"):
         library.bind(["not-auto-mounted"])

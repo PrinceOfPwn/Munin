@@ -167,6 +167,24 @@ class JobManager:
         finally:
             self.lock.release()
 
+    def has_active_run(self, run_id: str) -> bool:
+        """Return whether a command belonging to ``run_id`` is still running.
+
+        The supervisor stream may reach its terminal graph event while an
+        asynchronous command is flushing its final stdout/stderr lines.  The
+        runtime uses this small read-only signal to keep the UI stream open
+        until those already-authorized output chunks have been delivered.
+        """
+        if not run_id or not self._acquire_lock():
+            return False
+        try:
+            return any(
+                job.run_id == run_id and job.status in {"queued", "running"}
+                for job in self.records.values()
+            )
+        finally:
+            self.lock.release()
+
     def _run_job(
         self,
         job_id: str,

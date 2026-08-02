@@ -61,6 +61,28 @@ def _deep_redact(value: Any) -> Any:
     return redact_secrets(value)
 
 
+def _render_tool_result(result: Any) -> str:
+    """Extract the human-visible payload from LangChain tool responses.
+
+    ``StructuredTool`` normally returns a ``ToolMessage`` whose useful value
+    lives in ``content`` (and, for ``content_and_artifact`` tools, in
+    ``artifact``).  Falling back to ``repr(ToolMessage)`` can render an empty
+    content field even when the structured result is available elsewhere.
+    """
+    content = getattr(result, "content", None)
+    if content not in (None, "", []):
+        value = content
+    else:
+        artifact = getattr(result, "artifact", None)
+        value = artifact if artifact not in (None, "", []) else result
+    if isinstance(value, str):
+        return value[:8_000]
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)[:8_000]
+    except (TypeError, ValueError):
+        return repr(value)[:8_000]
+
+
 class ProgressEmitMiddleware(AgentMiddleware):
     """Wrap every tool call with progress emission (non-blocking, best-effort)."""
 
@@ -113,7 +135,7 @@ class ProgressEmitMiddleware(AgentMiddleware):
             )
             return
         redacted_result = _deep_redact(result)
-        output = redacted_result if isinstance(redacted_result, str) else repr(redacted_result)[:4000]
+        output = _render_tool_result(redacted_result)
         self._emit(
             {
                 "kind": "tool_result",

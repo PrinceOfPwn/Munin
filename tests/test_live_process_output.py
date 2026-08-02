@@ -120,3 +120,33 @@ def test_tool_output_event_round_trips_through_run_event_log(tmp_path):
         "elapsed_ms": 900,
         "final": False,
     }
+
+
+def test_completed_tool_replay_joins_by_stable_call_id():
+    from munin.production.chat import _envelope_from_event
+
+    envelope = _envelope_from_event(
+        {
+            "id": "completion-event",
+            "kind": "tool.completed",
+            "payload": {"tool_call_id": "call-1"},
+        },
+        run_id="run-1",
+        tools_by_eid={},
+        tools_by_call_id={
+            "call-1": {
+                "id": "call-1",
+                "tool_name": "execute_command",
+                "result": {"summary": "final output"},
+            }
+        },
+        reasoning_by_eid={},
+    )
+
+    assert envelope == {
+        "kind": "tool_result",
+        "run_id": "run-1",
+        "tool_call_id": "call-1",
+        "tool_name": "execute_command",
+        "output": "final output",
+    }

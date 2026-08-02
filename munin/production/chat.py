@@ -443,6 +443,7 @@ def _envelope_from_event(
     *,
     run_id: str,
     tools_by_eid: dict[str, dict[str, Any]],
+    tools_by_call_id: dict[str, dict[str, Any]] | None = None,
     reasoning_by_eid: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Translate one ``run_events`` row into a Munin envelope.
@@ -488,8 +489,13 @@ def _envelope_from_event(
                 "elapsed_ms": int(payload.get("elapsed_ms") or 0),
                 "final": bool(payload.get("final")),
             }
-        detail = tools_by_eid.get(eid) or {}
         tool_call_id = payload.get("tool_call_id") if isinstance(payload, dict) else None
+        detail = tools_by_eid.get(eid) or {}
+        if not detail and tools_by_call_id and tool_call_id:
+            # A tool lifecycle appends one run-event per state, while the
+            # read-model row keeps the original running-event id.  Completed
+            # and failed replay events therefore need the stable call id.
+            detail = tools_by_call_id.get(str(tool_call_id)) or {}
         tool_call_id = tool_call_id or detail.get("id")
         tool_name = payload.get("tool") if isinstance(payload, dict) else None
         tool_name = tool_name or detail.get("tool_name") or "unknown"
@@ -717,6 +723,9 @@ async def _stream_idempotent_replay(
             tools_by_eid = {
                 str(row.get("event_id")): row for row in (detail.get("tools") or [])
             }
+            tools_by_call_id = {
+                str(row.get("id")): row for row in (detail.get("tools") or []) if row.get("id")
+            }
             reasoning_by_eid = {
                 str(row.get("event_id")): row for row in (detail.get("reasoning") or [])
             }
@@ -726,6 +735,7 @@ async def _stream_idempotent_replay(
                     event,
                     run_id=run_id,
                     tools_by_eid=tools_by_eid,
+                    tools_by_call_id=tools_by_call_id,
                     reasoning_by_eid=reasoning_by_eid,
                 )
                 if envelope is None:
@@ -1279,10 +1289,17 @@ def register_chat_routes(
             )
             for run in aggregate.get("runs", []):
                 if run.get("state") in NON_TERMINAL_RUN_STATES:
-                    return error_response(
-                        409,
-                        "run_in_progress",
-                        "a run is still active in this conversation — send guidance instead of a new turn",
+                    active_run_id = str(run.get("id") or run.get("run_id") or "")
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "run_in_progress",
+                                "message": "a run is still active in this conversation — send guidance instead of a new turn",
+                            },
+                            **({"active_run_id": active_run_id} if active_run_id else {}),
+                        },
+                        status_code=409,
                     )
         except (PermissionError, KeyError):
             # Fall through — create_turn will fail with the same auth check.

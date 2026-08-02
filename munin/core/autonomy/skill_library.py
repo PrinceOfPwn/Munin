@@ -36,6 +36,48 @@ class BundledSkillLibrary:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or Path(__file__).resolve().parents[2] / "agent_skills"
 
+    @staticmethod
+    def _frontmatter_name(path: Path) -> str | None:
+        """Read the package identity from the small YAML frontmatter block.
+
+        Skill discovery must not rely on a second name registry: a directory
+        and its ``SKILL.md`` are one package.  We only need the scalar
+        ``name`` field here, so a tiny parser is safer than making discovery
+        depend on an optional YAML package.
+        """
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        if not lines or lines[0].strip() != "---":
+            return None
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            if line.lstrip().startswith("name:"):
+                value = line.split(":", 1)[1].strip()
+                return value.strip("\"'") or None
+        return None
+
+    def validation_errors(self) -> tuple[str, ...]:
+        """Return deterministic errors for malformed or misnamed packages."""
+        if not self.root.is_dir():
+            return ()
+        errors: list[str] = []
+        for path in sorted(self.root.iterdir(), key=lambda item: item.name):
+            if not path.is_dir():
+                continue
+            skill_file = path / "SKILL.md"
+            if not skill_file.is_file():
+                errors.append(f"{path.name}: missing SKILL.md")
+                continue
+            declared = self._frontmatter_name(skill_file)
+            if declared != path.name:
+                errors.append(
+                    f"{path.name}: frontmatter name must equal folder name (got {declared!r})"
+                )
+        return tuple(errors)
+
     def available(self) -> tuple[str, ...]:
         """Return direct-child skill packages shipped with the application.
 
@@ -50,7 +92,9 @@ class BundledSkillLibrary:
             sorted(
                 path.name
                 for path in self.root.iterdir()
-                if path.is_dir() and (path / "SKILL.md").is_file()
+                if path.is_dir()
+                and (path / "SKILL.md").is_file()
+                and self._frontmatter_name(path / "SKILL.md") == path.name
             )
         )
 

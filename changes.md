@@ -36,6 +36,14 @@ the complete operating model.
   provider. No reasoning is inferred from internal runtime activity.
 - Tool output and the original operator message are restored with the durable
   conversation timeline after reconnect.
+- The stream bridge drains asynchronous command output before closing, flushes
+  an unterminated final SSE frame, and includes terminal content so the last
+  words cannot disappear at the UI boundary.
+- Stop is a viewer disconnect: a subsequent turn is forwarded as guidance to
+  the active durable run and reattaches its replay stream instead of returning
+  a dead-end 409. Tool results resolve by stable call id during replay.
+- Conversation titles can be renamed, exports can be downloaded, and image
+  artifacts have an inline preview through the authenticated artifact route.
 - Provider profiles are managed by the authenticated backend. Changing a
   compatible profile affects later turns while keeping the same conversation
   and durable history.
@@ -46,6 +54,9 @@ the complete operating model.
   tools and specialist profiles are discovered at run time.
 - Generated extensions need a narrow contract, validation, registration and
   normal invocation policy. A file on disk is not a registered tool.
+- Bundled Deep Agents skills are mounted only when `SKILL.md` frontmatter
+  `name` exactly matches its package directory; malformed packages stay out of
+  the agent's read-only filesystem.
 - Hugin and skills provide passive, provenance-linked research context. Use
   metadata selection and controlled reading for a bounded subtask; do not
   automatically load the corpus or treat it as authority to execute.
