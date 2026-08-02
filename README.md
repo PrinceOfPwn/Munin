@@ -224,6 +224,21 @@ filesystem cannot recover in-flight state after a host restart.
 - [Security notes](docs/security-notes.md) — boundaries and review checklist.
 - [GitHub Actions guide](docs/github-actions-tutorial.md) — temporary live sessions.
 
+## License
+
+Munin is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+The source is publicly available for personal study, research, experimentation,
+modification and other permitted noncommercial purposes.
+
+**Commercial use is not permitted.** Companies and individuals may not use
+Munin in paid products or services, internal commercial operations, consulting
+engagements, or any activity with an anticipated commercial application unless
+they obtain a separate commercial license from the copyright holder.
+
+Because this license restricts commercial use, Munin is source-available rather
+than open source under the Open Source Initiative definition. See the
+[LICENSE](LICENSE) file for the complete terms.
+
 ## Validate before use
 
 ```bash
