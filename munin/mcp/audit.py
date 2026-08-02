@@ -1,3 +1,4 @@
+# tags: [mcp, persistence, core, supervisor, store, AuditTrailLogger, redact_secrets, events.jsonl, timeline.md, _SECRET_PATTERNS, _SECRET_KEY_PATTERN, MUNIN_REDACTION_MODE, timeline_dir, _append_jsonl, _append_markdown]
 from __future__ import annotations
 
 import os

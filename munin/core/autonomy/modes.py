@@ -1,3 +1,4 @@
+# tags: [beast-mode, hitl-approval, core, orchestrator, subagent, OperationMode, ModePolicy, CRITICAL_APPROVAL_FLOOR, standard-mode, yolo-mode, goal-mode, parse_mode_policy, approval_levels, opsec-guardrail, call-limits]
 """
 Operation modes — explicit, operator-chosen autonomy contracts.
 

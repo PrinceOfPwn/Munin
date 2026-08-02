@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, tool-forge, subagent, workflow, ToolForgeSubagent, tool_forge, git_persist, ast_guard, codeact_sandbox, hot_reload, requested_tool_name, existing_match, procedural_persistence, dynamic_tool_generation]
 """MCP tool `tool_forge` — spawns the ReAct sub-agent that writes new Python tools.
 
 The heavy lifting (ReAct loop, langgraph-codeact sandbox, AST guard) lives in

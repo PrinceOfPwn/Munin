@@ -1,3 +1,4 @@
+# tags: [mcp, database, sqlite, turso, persistence, open_connection, _LibsqlConnectionProxy, LibsqlConnectionPool, open_pooled_connection, _classify, _RowProxy, _LibsqlCursorProxy, PoolCheckoutTimeout, describe_backend, _split_script]
 """Munin storage abstraction — local SQLite by default, Turso libsql opt-in.
 
 Why this layer exists

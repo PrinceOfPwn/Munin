@@ -1,3 +1,4 @@
+# tags: [memory, episodic-memory, shared-intel, coordination, core, runtime, orchestrator, ContextCandidate, select_context, should_compact, summary_provenance_payload, token-budgeting, source-provenance, context-compaction, candidate-scoring]
 """Context selection and compaction scheduling with source provenance."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, osint, recon, intel, scanning, tavily_search, api_tavily_com, bearer_auth, config_missing, isolated_requests_session, passive_web_search, domain_filtering, tavily_api_key, search_depth]
 """Tavily search — fixes the PR #1 bug: use ``Authorization: Bearer`` header and an isolated session.
 
 The PR #1 proposal put the API key in the JSON body (`api_key`) and reused the shared

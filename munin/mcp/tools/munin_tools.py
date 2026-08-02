@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, soul, memory, episodic-memory, subagent, orchestrator, list_generated_tools, munin_chat, munin_wake, soul_propose_edit, munin_read_source, munin_self_diagnose, read_wake_artifact, turso_conversation]
 """Munin-native MCP tools: wake/sleep orchestration, soul I/O, memory helpers, and
 the catalog of generated tools (`list_generated_tools`) that Munin queries every ReAct
 step before invoking `tool_forge`."""

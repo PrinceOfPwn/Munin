@@ -1,3 +1,4 @@
+# tags: [mcp, persistence, cicd, workflow, store, WikiGitSyncer, knowledge_sync_root, _copy_content, _write_index, _git_commit, _result, index.md, prepare, commit, push]
 from __future__ import annotations
 
 import shutil

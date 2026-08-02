@@ -1,3 +1,4 @@
+# tags: [core, subagent, workflow, tool-forge, runtime, AutonomyKernel, schedule_workers, create_subagent, create_tool, create_workflow, AgentRegistry, WorkflowRegistry, ToolFactory, SubagentFactory, langgraph-fanout]
 """
 Autonomy Kernel (issue #9 §2) — the minimal Munin-owned layer that lets the
 main Deep Agent AND any generated subagent create, invoke, persist, compose

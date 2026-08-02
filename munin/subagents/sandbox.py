@@ -1,3 +1,4 @@
+# tags: [tool-forge, subagent, runtime, core, evasion, injection, payload, SandboxResult, SandboxViolation, run_code, validate_source_file, _validate_ast, _HARD_BANNED_MODULES, _BANNED_ATTRS, _SAFE_BUILTIN_NAMES]
 """In-process Python sandbox used by `tool_forge`.
 
 **Security disclosure (read `docs/security-notes.md`):** this is NOT a real sandbox.

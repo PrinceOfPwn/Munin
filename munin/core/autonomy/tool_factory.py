@@ -1,3 +1,4 @@
+# tags: [tool-forge, mcp-tool, capabilities, persistence, sqlite, ToolFactory, gen__, run_maybe_async, create_tool, invoke_registered_tool, procedural_table, ast-sandbox, _normalize_tool_name, inspect_registered_tool, list_registered_tools]
 """
 Autonomy Kernel — Tool Factory.
 

@@ -1,3 +1,4 @@
+# tags: [workflow, langgraph, core, orchestrator, runtime, WorkflowSpec, StepInterrupt, CustomState, NodeKind, EdgeKind, Node, Edge, pydantic-model, recursion_limit, human-in-the-loop-interrupt]
 """WorkflowSpec — Pydantic model for LangGraph workflow definitions."""
 from __future__ import annotations
 from typing import Any, Literal

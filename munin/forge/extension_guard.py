@@ -1,3 +1,4 @@
+# tags: [tool-forge, evasion, hitl-approval, supervisor, runtime, GuardReport, validate_extension_diff, dangerous-additions-regex, git-apply-check, paths-in-diff, _DANGEROUS_ADDITIONS, is_allowed_target, normalise_path, binary-patch-forbidden, proposal-guard]
 """Structural guard for reviewable self-extension diffs.
 
 This is deliberately a proposal guard, not an execution sandbox.  Every

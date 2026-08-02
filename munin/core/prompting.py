@@ -1,3 +1,4 @@
+# tags: [core, orchestrator, soul, supervisor, capabilities, model_family, LANGUAGE_CONTRACT, CAMPAIGN_DISCIPLINE, HUGIN_PROTOCOL, COORDINATOR_FEW_SHOTS, chinese-first-prompts, hugin-integration, apt-persona, opsec-discipline, build_system_prompt]
 """Shared prompt contracts for Munin's Chinese-first agent runtime.
 
 The strings in this module are intentionally written in Simplified Chinese:

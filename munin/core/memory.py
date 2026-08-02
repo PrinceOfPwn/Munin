@@ -1,3 +1,4 @@
+# tags: [memory, episodic-memory, persistence, store, sqlite, Memory, log_step, semantic_remember, summarize_for_prompt, semantic-memory, procedural-memory, recall, known_facts, known_tools, known_graphs]
 """Munin memory — convenience API over :class:`SharedStateStore`.
 
 The store itself is the single source of truth (same SQLite file the OFFX bus uses).

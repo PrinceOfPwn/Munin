@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, tool-forge, hitl-approval, workflow, ExtensionForge, extension_forge, extension_list, extension_describe, extension_open_pr, self_extension, proposal_manifest, operator_review, pr_automation, server_verified_approval]
 """MCP surface for human-governed self-extension proposals."""
 
 from __future__ import annotations

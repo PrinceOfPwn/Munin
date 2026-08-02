@@ -1,3 +1,4 @@
+# tags: [soul, core, orchestrator, persistence, supervisor, SoulManager, as_system_prompt, soul.snapshot.json, soul_pending, snapshot, restore, pending_edits, clear_pending_edits, sha256-verification, soul_propose_edit]
 """Soul — Munin's identity, persisted as Markdown files under ``soul/``.
 
 At startup, Munin concatenates the soul files into its system prompt. The soul is

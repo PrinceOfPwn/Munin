@@ -1,3 +1,4 @@
+# tags: [parallel, worker-fanout, langgraph, core, orchestrator, fanout, make_worker_node, WorkerState, WorkerUpdate, MUNIN_SUGGESTED_WORKERS, langgraph-send, fanin-aggregator, operator.add-reducer, error-isolation, worker_index]
 """
 Send workers — native LangGraph fan-out replacing ThreadPoolExecutor parallel.py.
 

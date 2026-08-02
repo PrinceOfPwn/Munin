@@ -1,3 +1,4 @@
+# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance]
 """Durable production aggregate for conversations, operations, and identity.
 
 The existing ``SharedStateStore`` remains compatible with legacy MCP tools.

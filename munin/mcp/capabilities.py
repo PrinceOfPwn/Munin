@@ -1,3 +1,4 @@
+# tags: [capabilities, mcp, mcp-tool, registry, orchestrator, CAPABILITY_PROFILES, generated_tool_context, capabilities_catalog, Settings, directory_read, knowledge_graph, web_recon, network_service_recon, agent_composition, preflight_policy]
 """Declarative capability catalog and safe execution context for Munin.
 
 The catalog is intentionally independent of the MCP transport.  It gives agents a

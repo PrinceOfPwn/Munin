@@ -1,3 +1,4 @@
+# tags: [mcp, core, evasion, supervisor, runtime, ExecutionEngine, OpsecError, preflight, _detect_egress_ip, _INSTALL_HINTS, _REQUIRED_SERVICES, _REQUIRED_NFT_TABLES, execute_sync, execute_job, dependency_result]
 from __future__ import annotations
 
 import codecs

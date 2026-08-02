@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, tool-forge, subagent, langgraph, workflow, GraphForgeSubagent, WorkflowRegistry, create_workflow, graph_forge, list_generated_graphs, describe_generated_graph, drop_generated_graph, persist_graph_manifest, react_subagent_config]
 """MCP tool `graph_forge` — spawns the sub-agent that forges new ReAct graphs at runtime.
 
 Unlike `tool_forge` (which writes Python), `graph_forge` produces AGENT

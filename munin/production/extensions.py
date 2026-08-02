@@ -1,3 +1,4 @@
+# tags: [mcp-tool, capabilities, registry, web-ui, component, runtime, core, ExtensionManifest, parse_manifest, VALID_SLOTS, VALID_PERMISSIONS, flight-deck-widgets, manifest-validation, isolated-extensions, feature-flags]
 """Typed extension manifest validation for isolated Flight Deck widgets."""
 
 from __future__ import annotations

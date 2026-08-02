@@ -1,3 +1,4 @@
+# tags: [tool-forge, subagent, workflow, langgraph, orchestrator, runtime, core, hitl-approval, coordination, GraphForgeSubagent, generated_graphs, emit_forge_stage, forge_propose, forge_completed, tool_whitelist]
 """Graph-forge subagent — refines a natural-language spec into a ReAct subagent config.
 
 Produces (name, purpose, system_prompt, tool_whitelist) that gets persisted in

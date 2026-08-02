@@ -1,3 +1,4 @@
+# tags: [orchestrator, core, subagent, presence, worker-fanout, Orchestrator, try_claim_spawn_slot, enqueue_wake, _spawn_runner, wake, sleep, agent_wake_queue, subagent-runner-process, SharedStateStore, presence_metadata]
 """Orchestrator — Munin's wake/sleep and graph lifecycle controller.
 
 Design:

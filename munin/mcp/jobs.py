@@ -1,3 +1,4 @@
+# tags: [mcp, parallel, supervisor, runtime, orchestrator, JobManager, JobRecord, ThreadPoolExecutor, progress_for_run, add_progress, has_active_run, job_status, job_cancel, MAX_PENDING_PROGRESS_EVENTS, _compact_result]
 from __future__ import annotations
 
 import logging

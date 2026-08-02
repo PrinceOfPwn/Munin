@@ -1,3 +1,4 @@
+# tags: [subagent, workflow, runtime, coordination, memory, mcp-tool, capabilities, ReActSubagentBase, build_tool_catalog, SUBAGENT_TOOL_REGISTRY, list_subagent_tools, react-loop, state-bound-tools, task-claim, wake-queue]
 """Base class for Munin ReAct subagents.
 
 Every concrete subagent declares:

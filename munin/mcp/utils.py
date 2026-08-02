@@ -1,3 +1,4 @@
+# tags: [mcp, core, runtime, supervisor, orchestrator, utc_now_iso, truncate_text, stderr_tail, shell_join, json_dumps, ensure_parent, env_assignments, parse_targets, split_extra_args, bool_icon]
 from __future__ import annotations
 
 import json

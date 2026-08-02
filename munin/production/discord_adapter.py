@@ -1,3 +1,4 @@
+# tags: [coordination, runtime, core, subagent, hitl-approval, presence, shared-intel, discord.py, DiscordAdapter, on_message, _resolve_actor, DISCORD_FLUSH_INTERVAL, virtual-actor, rate-limiting, bot-integration]
 """Discord chat adapter (follow-up to Fase 2 of issue #9).
 
 Historically Munin shipped a ``discord_adapter.py`` whose only job was to

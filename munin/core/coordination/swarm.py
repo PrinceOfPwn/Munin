@@ -1,3 +1,4 @@
+# tags: [coordination, subagent, langgraph, core, orchestrator, build_swarm, langgraph_swarm, create_swarm, default_active_agent, multi-agent-swarm, swarm-compile, checkpointer, specialists, agent-coordination, langgraph-extension]
 """Swarm builder wrapping langgraph_swarm.create_swarm."""
 from __future__ import annotations
 from typing import Any

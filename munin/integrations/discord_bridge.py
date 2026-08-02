@@ -1,3 +1,4 @@
+# tags: [coordination, supervisor, orchestrator, runtime, presence, discord.py, DiscordBridge, post_to_discord, get_bridge, on_message, on_ready, asyncio.run_coroutine_threadsafe, user-allowlist, channel-id-filter, message-chunking]
 """An allowlisted Discord control plane for Munin.
 
 Discord is an operator interface, never an inter-agent backchannel.  Inbound

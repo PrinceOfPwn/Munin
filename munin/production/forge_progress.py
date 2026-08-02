@@ -1,3 +1,4 @@
+# tags: [tool-forge, subagent, hitl-approval, coordination, workflow, runtime, core, FORGE_STAGES, emit_forge_stage, ForgeFloatingChat, append_reasoning_event, stage-chips, budget-extension, stdout-tailing, operational-summary]
 """Standardised progress emission for forge-style subagents.
 
 The dispatcher and any forge subagent (tool-forge, graph-forge, extension-forge)

@@ -1,3 +1,4 @@
+# tags: [recon, intel, shared-intel, memory, database, core, runtime, hugin_tool, HuginRAG, plan_for, _cached_bundle, entity-ranking, hugin-cache, evidence-layer, graph-retrieval]
 """Graph-aware, local retrieval over Munin's persisted Hugin cache.
 
 The module deliberately builds on ``hugin_tool``'s Turso-backed cache instead

@@ -1,3 +1,4 @@
+# tags: [mcp, database, sqlite, turso, persistence, store, SharedStateStore, get_instance_id, presence_metadata, publish_intel, claim_task, upsert_presence, try_claim_spawn_slot, episodic, procedural]
 from __future__ import annotations
 
 import json

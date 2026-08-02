@@ -1,3 +1,4 @@
+# tags: [persistence, database, turso, sqlite, core, ConversationService, PreparedConversation, _FENCED_ARTIFACT, conversation_append_message, prepare_turn, complete_turn, rolling-summary, artifact-capture, SharedStateStore, history-shaping]
 """Durable, Turso-backed conversational state for Munin.
 
 The ReAct loop deliberately stays stateless between calls. This module supplies

@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, osint, mcp-tool, scanning, ValravnGateway, valravn_investigate_ioc, valravn_search_assets, valravn_investigate_cve, valravn_search_darkweb, valravn_investigate_network, valravn_search_historical_web, valravn_capture_web_evidence, threat_intelligence_mesh]
 """Valravn capability tools — unified reconnaissance and threat intelligence for Munin."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# tags: [subagent, hitl-approval, orchestrator, coordination, runtime, core, governance, AgentProfile, DEFAULT_AGENT_PROFILES, shadow_council_resolution, profile_catalog, recon-coordinator, web-specialist, opsec-scope-guardian, red-team-profiles]
 """Declarative Red Team agent profiles and a safe Shadow Council contract.
 
 Profiles are data, not prompt text.  The dispatcher resolves tools, models,

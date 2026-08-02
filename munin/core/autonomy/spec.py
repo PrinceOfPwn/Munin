@@ -1,3 +1,4 @@
+# tags: [subagent, core, orchestrator, runtime, persistence, SubagentSpec, RuntimeType, definition_json, pydantic-schema, interaction_topology, persistence_policy, deep_agent, compiled_langgraph, persisted_subagent_dict, to_json]
 """
 SubagentSpec — Pydantic model describing a subagent to be created.
 

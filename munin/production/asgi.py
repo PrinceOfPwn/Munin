@@ -1,3 +1,4 @@
+# tags: [runtime, core, web-ui, database, persistence, Starlette, SecurityHeaders, create_production_app, MUNIN_ALLOWED_ORIGINS, byok-encryption, session-auth, csrf-protection, asgi-boundary, cookie-security, provider-profiles]
 """Authenticated ASGI boundary for the Munin Production Suite.
 
 Fase 2 of the issue-#9 migration (Arch A → Arch B) removed the vast bulk of

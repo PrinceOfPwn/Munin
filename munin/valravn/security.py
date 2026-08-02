@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, security, evasion, injection, core, runtime, classify_indicator, validate_public_url, safe_artifact_dir, write_artifact, onion_to_gateway, ssrf-protection, indicator-classification]
 """Input classification, artifact confinement and browser safety checks."""
 
 from __future__ import annotations

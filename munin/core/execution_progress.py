@@ -1,3 +1,4 @@
+# tags: [core, runtime, capabilities, mcp-tool, orchestrator, emit_tool_progress, tool_progress_scope, tool_call_scope, munin_tool_progress_callback, active_tool_identity, munin_active_tool_name, munin_active_tool_call_id, operator-safe-events, contextvars, lifecycle-milestones]
 """Operator-safe progress events shared by long-running Munin tools.
 
 This module deliberately carries lifecycle milestones only.  It is not a

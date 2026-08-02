@@ -1,3 +1,4 @@
+# tags: [core, runtime, orchestrator, supervisor, capabilities, llm_stream_scope, emit_llm_stream, has_llm_stream_observer, munin_llm_stream_callback, live-telemetry, reasoning-deltas, text-deltas, request-scoped, contextvars, best-effort-emission]
 """Request-scoped live telemetry for OpenAI-compatible model streams.
 
 The production dispatcher installs a callback while a ReAct run is executing.

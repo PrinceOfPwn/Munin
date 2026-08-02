@@ -1,3 +1,4 @@
+# tags: [tool-forge, mcp-tool, capabilities, subagent, workflow, runtime, core, hitl-approval, coordination, ToolForgeSubagent, emit_forge_stage, signature_to_json_schema, safe_slug, iterative-tool-generation, procedural-table]
 """Tool-forge subagent — writes and validates new Python tools iteratively.
 
 Strategy (deliberately explicit — no LangGraph magic here for full control):
