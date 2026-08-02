@@ -13,6 +13,13 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> ·
+  <a href="README.es.md">Español</a> ·
+  <a href="README.pt-BR.md">Português (BR)</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   <a href="https://www.python.org/"><img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white"></a>
   <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white"></a>
   <a href="https://langchain-ai.github.io/langgraph/"><img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C"></a>
@@ -24,20 +31,41 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><strong>Quick start</strong></a> ·
+  <a href="#verified-v100-configuration"><strong>Verified setup</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
   <a href="#operation-lifecycle"><strong>Lifecycle</strong></a> ·
   <a href="#operation-modes"><strong>Modes</strong></a> ·
-  <a href="#documentation"><strong>Documentation</strong></a>
+  <a href="#quick-start"><strong>Quick start</strong></a>
 </p>
 
 > **Authorised use only.** Munin is designed for legitimate security research, threat intelligence and controlled red-team operations. You are responsible for obtaining permission, defining scope, protecting credentials, reviewing impact and complying with applicable law. A healthy server or successful tool call does not establish authorisation.
 
+## Verified v1.0.0 configuration
+
+> [!IMPORTANT]
+> The tested and verified operating configuration for **Munin v1.0.0** is the **web GUI running through GitHub Actions with MiMo V2.5** as the model.
+>
+> Other providers, models, deployment targets and control surfaces may work, but they are not part of the v1.0.0 verified configuration unless explicitly documented.
+
+| Component | Verified configuration |
+| --- | --- |
+| Version | **Munin v1.0.0** |
+| Interface | **Web GUI** |
+| Execution environment | **GitHub Actions** |
+| Model | **MiMo V2.5** |
+
+```mermaid
+flowchart LR
+    User[Operator] --> GUI[Munin Web GUI]
+    GUI --> Actions[GitHub Actions runner]
+    Actions --> Server[Munin runtime v1.0.0]
+    Server --> Model[MiMo V2.5]
+    Server --> Timeline[Durable events and evidence]
+```
+
 ## Why Munin exists
 
-Most agent systems are built around a temporary chat window. Security operations are not.
-
-They last hours or days. They cross tools, models and interfaces. They require evidence, approvals, recovery, auditability and a clear record of what the agent actually did.
+Most agent systems are built around a temporary chat window. Security operations are not. They last hours or days, cross tools and models, and require evidence, approvals, recovery, auditability and a reliable account of what the agent actually did.
 
 **Munin turns that work into a durable operation instead of a disposable conversation.**
 
@@ -70,30 +98,30 @@ flowchart LR
 
 ### Durable autonomous operations
 
-Runs preserve executable state through LangGraph checkpoints, while a separate event timeline records messages, evidence, tools, artifacts, approvals and operator decisions. A browser reconnects to the same operation instead of silently starting another one.
+LangGraph checkpoints preserve executable state while a separate timeline records messages, evidence, tools, artifacts, approvals and operator decisions. A reconnect returns to the same operation instead of silently creating another one.
 
 ### Human control at the execution boundary
 
-Approval is part of the runtime, not a suggestion in the prompt. Sensitive actions pause with the exact proposed capability and arguments. Approval resumes that action; rejection or expiry cannot mutate into an unrelated call.
+Approval is part of the runtime, not a suggestion inside the prompt. Sensitive actions pause with the exact capability and arguments. Approval resumes that action; rejection or expiry cannot silently mutate into something else.
 
 ### One runtime, multiple control surfaces
 
-Use the web console for the full operational timeline, expose live capabilities to MCP clients, or interact remotely through Discord. Every surface reaches the same server-side policy, identity, state and approval layer.
+The web console, MCP clients and Discord all reach the same server-side identity, policy, state and approval layer.
 
-### Live, extensible capability registry
+### Live capability composition
 
-Munin discovers native tools, reviewed skills, generated capabilities and bounded specialist profiles at runtime. Generated tools use the `gen__*` namespace and must pass validation, registration and the same policy checks as native capabilities.
+Munin composes native tools, reviewed skills, generated capabilities and bounded specialists at runtime. Generated tools use the `gen__*` namespace and must pass validation, registration and the same policy checks as native capabilities.
 
 ### Evidence-first observability
 
-Assistant messages, provider-emitted reasoning, tool lifecycle, streamed output, delegations, artifacts and human requests remain separate events. Munin does not invent hidden reasoning from internal state or collapse the operation into a vague status string.
+Assistant messages, provider-emitted reasoning, tool lifecycle, streamed output, delegations, artifacts and human requests remain separate, replayable events.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
     subgraph Interfaces[Control surfaces]
-        Web[Web console]
+        Web[Web GUI]
         Discord[Discord]
         MCPClient[MCP client]
     end
@@ -109,7 +137,7 @@ flowchart TB
     subgraph Runtime[Agent runtime]
         Graph[Deep Agents + LangGraph]
         Registry[Live capability registry]
-        Specialists[Bounded specialist agents]
+        Specialists[Bounded specialists]
         Generated[Generated gen__ capabilities]
     end
 
@@ -120,14 +148,11 @@ flowchart TB
         Archive[Optional libSQL / Turso archive]
     end
 
-    Web --> API
+    Web --> API --> Server
     Discord --> Server
-    MCPClient --> MCP
-    API --> Server
-    MCP --> Server
+    MCPClient --> MCP --> Server
     Server --> Identity
-    Server --> Policy
-    Policy --> Graph
+    Server --> Policy --> Graph
     Graph --> Registry
     Registry --> Specialists
     Registry --> Generated
@@ -137,13 +162,13 @@ flowchart TB
     Timeline --> Archive
 ```
 
-Munin separates four concerns that are often blurred together:
+Munin keeps four concerns separate:
 
 | Layer | Responsibility |
 | --- | --- |
-| **Knowledge** | Research context, relationships, technique references and hypotheses |
+| **Knowledge** | Research context, relationships, references and hypotheses |
 | **Authority** | Scope, identity, approvals and policy enforcement |
-| **Execution** | Tools, specialist delegation, generated capabilities and agent state |
+| **Execution** | Tools, delegation, generated capabilities and agent state |
 | **Evidence** | Events, artifacts, outputs, decisions and recovery history |
 
 ## Operation lifecycle
@@ -163,17 +188,11 @@ stateDiagram-v2
     Running --> Completed: evidence-backed result
     Running --> Failed: unrecoverable error
     Running --> Cancelled: operator cancellation
-    Failed --> Recovering: checkpoint + valid lease policy
+    Failed --> Recovering: checkpoint + valid recovery policy
     Recovering --> Running: resume exact run
     Completed --> [*]
     Cancelled --> [*]
 ```
-
-1. The operator creates or resumes a conversation and provides an objective, authorised scope and desired evidence.
-2. Munin loads the stable thread, current evidence and live capability registry.
-3. The runtime can answer, delegate, call a permitted tool, request approval or stop with an evidence-backed result.
-4. Every meaningful transition is persisted and streamed to connected clients.
-5. Completed, failed and cancelled runs remain auditable; interrupted runs may recover from checkpoints and leases.
 
 ## Persistence and recovery
 
@@ -202,17 +221,13 @@ sequenceDiagram
 
 SQLite is the fast transactional store for active conversations, runs and events. LangGraph checkpoints use persistent SQLite by default. A libSQL or Turso archive can mirror durable records for longer-lived continuity.
 
-Production deployments must persist both the hot store and checkpoint path. A disposable filesystem cannot recover in-flight state after a restart.
-
 ## Operation modes
-
-All modes use the same supervised runtime. They change the autonomy contract, not the hard security invariants.
 
 | Mode | Best for | Approval behaviour |
 | --- | --- | --- |
 | **Standard** | Careful interactive operations | Per-action approvals |
-| **YOLO** | Fast work inside a trusted, bounded environment | Skips routine approvals; admin and critical actions remain protected |
-| **GOAL** | Persistent objectives that must survive refreshes or restarts | Durable goal, TODO state and scheduled re-evaluation |
+| **YOLO** | Fast work inside a trusted, bounded environment | Skips routine approvals; critical actions remain protected |
+| **GOAL** | Persistent objectives that survive refreshes or restarts | Durable goal, TODO state and scheduled re-evaluation |
 | **BEAST** | Deep planning and specialist delegation | Expanded budgets with explicit scope and anti-runaway controls |
 
 ```mermaid
@@ -221,14 +236,11 @@ flowchart LR
     YOLO[YOLO] --> Guardrails
     Goal[GOAL] --> Guardrails
     Beast[BEAST] --> Guardrails
-
     Guardrails --> Preflight[Preflight validation]
     Guardrails --> Critical[Critical approval floor]
     Guardrails --> Audit[Durable audit trail]
     Guardrails --> Redaction[Token redaction]
 ```
-
-The `critical` approval floor, preflight validation, audit trail and token redaction remain enforced across every mode.
 
 ## Hugin and Valravn
 
@@ -241,21 +253,15 @@ Authority + orchestration]
     Munin -->|authorised tool call| Valravn[Valravn
 External reconnaissance mesh]
     Valravn -->|IOC, CVE, asset and web evidence| Munin
-    Munin --> Timeline[Durable timeline]
-    Munin --> Reports[Reports and evidence]
-
     Scope[Operator scope] --> Munin
     Approval[Human approval] --> Munin
-
-    Hugin -. does not grant .-> Authority[Execution authority]
-    Valravn -. does not grant .-> Authority
-    Scope --> Authority
-    Approval --> Authority
+    Munin --> Timeline[Durable timeline]
+    Munin --> Reports[Reports and evidence]
 ```
 
-[Hugin](https://github.com/PrinceOfPwn/Hugin) is Munin's knowledge sibling: a passive graph of source-linked security research and relationships. Munin includes the reviewed `hugin-research` skill to retrieve a small, relevant and provenance-labelled subset for a bounded task.
+[Hugin](https://github.com/PrinceOfPwn/Hugin) is Munin's knowledge sibling: a passive graph of source-linked security research and relationships.
 
-[Valravn](munin/valravn/) is the external reconnaissance mesh. It exposes IOC and CVE enrichment, asset search through sources such as Shodan, Censys, ZoomEye, Netlas and LeakIX, historical-web pivots, routing and RPKI context, dark-web search and browser evidence capture through `valravn_*` MCP tools.
+[Valravn](munin/valravn/) is the external reconnaissance mesh, exposing IOC/CVE enrichment, asset search, historical-web pivots, routing and RPKI context, dark-web search and browser evidence capture through `valravn_*` tools.
 
 Neither research context nor tool availability grants permission to act. Scope and approval remain independent runtime controls.
 
@@ -268,7 +274,7 @@ Neither research context nor tool availability grants permission to act. Scope a
 - Node.js and npm
 - An OpenAI-compatible LLM endpoint
 
-### 1. Configure the environment
+### 1. Configure
 
 ```bash
 cp .env.example .env
@@ -276,14 +282,14 @@ cp .env.example .env
 
 Set a strong `MUNIN_MASTER_KEY`, `MUNIN_MCP_AUTH_TOKEN`, an allowed local origin and your model provider configuration.
 
-### 2. Start the unified server
+### 2. Start the server
 
 ```bash
 poetry install
 poetry run munin serve --host 127.0.0.1 --port 8787
 ```
 
-### 3. Start the web console
+### 3. Start the GUI
 
 ```bash
 cd app
@@ -295,23 +301,13 @@ Open `http://localhost:3000`. MCP clients connect to `http://127.0.0.1:8787/mcp/
 
 > Keep Munin bound to loopback unless you have configured a protected reverse proxy, explicit origin policy, authentication and persistent storage.
 
-## Before an operational session
-
-- Confirm `/health` and authenticated web access.
-- Verify that the selected LLM provider completes a structured tool-call round trip.
-- Inspect the live capability surface instead of relying on a copied list.
-- Confirm written authorisation, target boundaries and required preflight.
-- Use persistent hot and checkpoint storage when the run must survive restarts.
-- Confirm who can approve, reject and cancel sensitive actions.
-
 ## Skills and self-extension
 
 ```mermaid
 flowchart LR
     Skill[Reviewed SKILL.md] --> Registry[Capability registry]
-    Spec[SubagentSpec explicitly lists skill] --> Specialist[Bounded specialist]
+    Spec[SubagentSpec lists skill] --> Specialist[Bounded specialist]
     Registry --> Specialist
-
     Draft[Generated capability] --> Contract[Narrow contract]
     Contract --> Validation[Validation]
     Validation --> Registration[Registration as gen__*]
@@ -319,16 +315,7 @@ flowchart LR
     Policy --> Runtime[Available to runtime]
 ```
 
-A `SKILL.md` file provides instructions and context; it does not become executable authority by existing on disk.
-
-To add a reviewed skill:
-
-1. Create `munin/agent_skills/<skill-name>/SKILL.md` with matching Agent Skills YAML frontmatter.
-2. Keep supporting material in the same directory and reference it from `SKILL.md`.
-3. Commit and review the package.
-4. Expose it only to specialist profiles whose `SubagentSpec` explicitly lists the skill.
-
-Generated capabilities follow the same rule: narrow contract, validation, registration, policy enforcement and visible provenance.
+A `SKILL.md` file provides instructions and context; it does not become executable authority simply by existing on disk.
 
 ## Validation
 
@@ -362,6 +349,4 @@ Because commercial use is restricted, Munin is **source-available**, not open so
 
 ---
 
-<p align="center">
-  <em>What was once seen is never forgotten.</em>
-</p>
+<p align="center"><em>What was once seen is never forgotten.</em></p>
