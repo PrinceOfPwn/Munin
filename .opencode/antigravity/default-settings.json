@@ -25,7 +25,13 @@
       "command(bun run (test|lint|build|typecheck))",
       "command(node)",
       "command(rg)",
-      "command(grep)"
+      "command(grep)",
+      "command(ls)",
+      "command(dir)",
+      "command(Get-ChildItem)",
+      "command(Test-Path)",
+      "command(cat)",
+      "command(type)"
     ],
     "deny": [
       "command(git add)",
