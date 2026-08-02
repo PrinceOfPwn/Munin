@@ -419,8 +419,16 @@ async def supervisor_runner(
 
         async def pump_job_progress() -> None:
             try:
-                from ..mcp.jobs import JOBS  # noqa: PLC0415
+                # JOBS is created alongside the live FastMCP catalog in
+                # ``mcp.main``. Importing it from ``mcp.jobs`` raises and,
+                # if swallowed, would leave the graph consumer waiting for a
+                # terminal progress sentinel forever.
+                from ..mcp.main import JOBS  # noqa: PLC0415
             except Exception:  # pragma: no cover - lightweight/runtime tests
+                # Some isolated adapter tests intentionally do not bootstrap
+                # FastMCP. They still need a deterministic close barrier.
+                await graph_finished.wait()
+                await event_queue.put(("progress_done", None))
                 return
             cursors: dict[str, int] = {}
             while True:
