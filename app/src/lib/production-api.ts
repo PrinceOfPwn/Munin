@@ -164,6 +164,13 @@ export const productionApi = {
       })
     ).data;
   },
+  async exportConversation(id: string) {
+    return (
+      await request<{ data: unknown }>(
+        `conversations/${encodeURIComponent(id)}/export`,
+      )
+    ).data;
+  },
 };
 
 /** Snapshot of the current CSRF token — hooks that need to include it in

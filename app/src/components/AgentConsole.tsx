@@ -7,12 +7,17 @@ import {
   useState,
 } from "react";
 import type { FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import remarkGfm from "remark-gfm";
 import {
   Archive,
   Bot,
   CheckCircle,
+  Download,
   LoaderCircle,
   MessageSquare,
+  Pencil,
   Send,
   Sparkles,
   Square,
@@ -46,16 +51,20 @@ import type { HitlRequestPartProps } from "@/components/chat/blocks/parts/HitlRe
 import { ArtifactPart } from "@/components/chat/blocks/parts/ArtifactPart";
 import { NotePart } from "@/components/chat/blocks/parts/NotePart";
 import { GuidancePart } from "@/components/chat/blocks/parts/GuidancePart";
+import { CommandOutputPart } from "@/components/chat/blocks/parts/CommandOutputPart";
+import { ToolHeartbeatPart } from "@/components/chat/blocks/parts/ToolHeartbeatPart";
+import { HeartbeatPart } from "@/components/chat/blocks/parts/HeartbeatPart";
 import { ProviderSwitcher } from "@/components/ProviderSwitcher";
 
 import {
   approveHitlRequest,
   rejectHitlRequest,
+  sendOperatorGuidance,
   useMuninChat,
 } from "@/lib/aiChat";
 import { useConversations } from "@/lib/queries";
 import { productionApi, type ProviderProfile } from "@/lib/production-api";
-import { cn, formatDuration } from "@/lib/utils";
+import { cn, formatDuration, isTerminalRun } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Custom data part shapes emitted by the Munin BFF translator
@@ -99,6 +108,25 @@ interface RunStateData {
 interface ActivityData {
   stage: string;
   text: string;
+}
+
+interface CommandOutputData {
+  jobId?: string;
+  toolCallId?: string;
+  toolName: string;
+  stream: "stdout" | "stderr" | "meta";
+  text: string;
+  elapsedMs?: number;
+  final?: boolean;
+}
+
+interface ToolHeartbeatData {
+  jobId?: string;
+  toolCallId?: string;
+  toolName: string;
+  elapsedMs?: number;
+  lastOutputMs?: number;
+  text?: string;
 }
 
 // UIMessage part union helpers — the `parts` array on a UIMessage can contain
@@ -249,7 +277,15 @@ function PartRenderer({
             : "border border-border bg-surface text-body",
         )}
       >
-        <p className="whitespace-pre-wrap">{tp.text}</p>
+        {role === "user" ? (
+          <p className="whitespace-pre-wrap">{tp.text}</p>
+        ) : (
+          <div className="prose prose-invert max-w-none prose-p:my-1 prose-headings:mb-2 prose-headings:mt-3 prose-pre:my-2 prose-pre:overflow-auto prose-code:text-accent">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+              {tp.text}
+            </ReactMarkdown>
+          </div>
+        )}
       </div>
     );
   }
@@ -332,8 +368,35 @@ function PartRenderer({
   }
 
   if (part.type === "data-heartbeat") {
-    // Transient heartbeats are not rendered inline.
-    return null;
+    const d = (part as DataUIPart<Record<string, unknown>>).data as { ts?: number };
+    return d.ts ? <HeartbeatPart key={key} ts={d.ts} /> : null;
+  }
+
+  if (part.type === "data-command-output") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as CommandOutputData;
+    return (
+      <CommandOutputPart
+        key={key}
+        toolName={d.toolName ?? "command"}
+        stream={d.stream ?? "stdout"}
+        text={d.text ?? ""}
+        elapsedMs={d.elapsedMs}
+        final={d.final}
+      />
+    );
+  }
+
+  if (part.type === "data-tool-heartbeat") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ToolHeartbeatData;
+    return (
+      <ToolHeartbeatPart
+        key={key}
+        toolName={d.toolName ?? "command"}
+        elapsedMs={d.elapsedMs}
+        lastOutputMs={d.lastOutputMs}
+        text={d.text}
+      />
+    );
   }
 
   if (part.type === "reasoning") {
@@ -502,6 +565,8 @@ function ConsoleHeader({
   onActivateProvider,
   onCreateProvider,
   onArchive,
+  onRename,
+  onExport,
 }: {
   conversationId: string;
   title: string;
@@ -522,19 +587,68 @@ function ConsoleHeader({
     model: string;
     api_key: string;
   }) => Promise<void>;
-  onArchive: () => void;
+  onArchive: () => Promise<void>;
+  onRename: (title: string) => Promise<void>;
+  onExport: () => Promise<void>;
 }) {
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(title);
+  const savingTitle = useRef(false);
+
+  useEffect(() => {
+    if (!editingTitle) setDraftTitle(title);
+  }, [editingTitle, title]);
+
+  async function saveTitle() {
+    if (savingTitle.current) return;
+    const nextTitle = draftTitle.trim();
+    if (!nextTitle || nextTitle === title) {
+      setEditingTitle(false);
+      return;
+    }
+    savingTitle.current = true;
+    try {
+      await onRename(nextTitle);
+    } catch {
+      // The parent already reports the API failure to the operator.
+    } finally {
+      savingTitle.current = false;
+      setEditingTitle(false);
+    }
+  }
+
   return (
     <header className="flex items-center justify-between gap-4 border-b border-border bg-surface px-6 py-4">
       <div className="min-w-0 space-y-1">
         <p className="font-mono text-[0.65rem] uppercase tracking-widest text-muted">
-          AGENT CONSOLE / AI SDK v5 / LIVE STREAM
+          AGENT CONSOLE / LIVE
         </p>
         <div className="flex min-w-0 items-center gap-2">
           <TerminalSquare className="h-5 w-5 shrink-0 text-accent" />
-          <h1 className="min-w-0 truncate text-xl font-medium tracking-tight">
-            {title}
-          </h1>
+          {editingTitle ? (
+            <input
+              autoFocus
+              value={draftTitle}
+              onChange={(event) => setDraftTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void saveTitle();
+                if (event.key === "Escape") setEditingTitle(false);
+              }}
+              onBlur={() => void saveTitle()}
+              className="min-w-0 rounded border border-accent/50 bg-bg px-2 py-1 text-xl font-medium tracking-tight outline-none"
+              aria-label="Conversation title"
+            />
+          ) : (
+            <button
+              type="button"
+              className="group flex min-w-0 items-center gap-1 text-left"
+              onClick={() => setEditingTitle(true)}
+              title="Rename conversation"
+            >
+              <h1 className="min-w-0 truncate text-xl font-medium tracking-tight">{title}</h1>
+              <Pencil className="h-3.5 w-3.5 shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+            </button>
+          )}
           <Badge variant={stateBadgeVariant(conversationStatus)}>
             {conversationStatus}
           </Badge>
@@ -586,10 +700,13 @@ function ConsoleHeader({
         <Button
           variant="outline"
           size="sm"
-          onClick={onArchive}
+          onClick={() => void onArchive()}
           disabled={conversationStatus === "archived"}
         >
           <Archive className="h-3.5 w-3.5" /> Archive
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => void onExport()} title="Export conversation">
+          <Download className="h-3.5 w-3.5" /> Export
         </Button>
       </div>
     </header>
@@ -622,6 +739,8 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   const [providerProfiles, setProviderProfiles] = useState<ProviderProfile[]>([]);
   const [providerBusy, setProviderBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null);
+  const followTailRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -687,13 +806,32 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     return () => window.clearTimeout(handle);
   }, [draftKey, draftReady, input]);
 
-  // Auto-scroll to the bottom when new messages arrive.
+  // Follow the live tail only while the operator is already near it. Calling
+  // scrollIntoView on every token steals the reading position.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]",
+    );
+    if (!viewport) return;
+    const onScroll = () => {
+      const distance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      followTailRef.current = distance < 96;
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => viewport.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!followTailRef.current) return;
+    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages]);
 
   const isStreaming = status === "streaming" || status === "submitted";
   const insight = useStreamInsight(messages);
+  const runIsActive = Boolean(
+    insight.activeRunId && !isTerminalRun(insight.runState ?? ""),
+  );
   const elapsedSeconds = useElapsedSeconds(isStreaming);
 
   async function submitTurn(event?: FormEvent) {
@@ -704,11 +842,15 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(draftKey);
     }
+    if (runIsActive) {
+      await sendGuidance(text);
+      return;
+    }
     await sendMessage({ text });
   }
 
-  async function sendGuidance() {
-    const text = input.trim();
+  async function sendGuidance(guidanceText = input.trim()) {
+    const text = guidanceText.trim();
     if (!text) return;
     if (!insight.activeRunId) {
       toast.error("No active run to guide");
@@ -719,22 +861,13 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       window.localStorage.removeItem(draftKey);
     }
     try {
-      await sendMessage({
-        // The AI SDK v5 `sendMessage` accepts an arbitrary parts array; the
-        // BFF (Fase 1a) intercepts `data-operator-guidance` and forwards it
-        // to `POST /api/chat/{run_id}/guidance` out-of-band. It never
-        // becomes a new user turn on the timeline.
-        parts: [
-          {
-            type: "data-operator-guidance",
-            data: {
-              runId: insight.activeRunId,
-              body: text,
-            },
-          },
-        ],
-      } as Parameters<typeof sendMessage>[0]);
+      await sendOperatorGuidance(insight.activeRunId, text);
       toast.success("Guidance queued for the active run");
+      // Stop detaches the browser reader; it must not strand the durable
+      // executor. Reattach immediately when there is no live reader left.
+      if (!isStreaming) {
+        await resumeStream();
+      }
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Guidance failed");
     }
@@ -744,14 +877,44 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     await resumeStream();
   }
 
-  function archive() {
-    // Archive lives behind the legacy PATCH endpoint (see Fase 1c/2). Fase 1b
-    // keeps this a stub so the header UI is correct without dragging the
-    // legacy production-api dependency into the new shell.
-    toast.message("Archive coming in phase 3", {
-      description:
-        "The legacy PATCH endpoint stays behind the FlightDeckStable shell during the parity window.",
-    });
+  async function archive() {
+    if (!conversationMeta) return;
+    try {
+      await productionApi.archiveConversation(conversationId, conversationMeta.version, true);
+      await conversationsQuery.refetch();
+      toast.success("Conversation archived");
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not archive conversation");
+    }
+  }
+
+  async function renameConversation(title: string) {
+    if (!conversationMeta) return;
+    try {
+      await productionApi.renameConversation(conversationId, conversationMeta.version, title);
+      await conversationsQuery.refetch();
+      toast.success("Conversation renamed");
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not rename conversation");
+      throw cause;
+    }
+  }
+
+  async function exportConversation() {
+    try {
+      const payload = await productionApi.exportConversation(conversationId);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = `${conversationTitle.replace(/[^a-z0-9._-]+/gi, "-") || "munin-conversation"}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 0);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not export conversation");
+    }
   }
 
   const conversationTitle =
@@ -776,6 +939,8 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         onActivateProvider={activateProvider}
         onCreateProvider={createProvider}
         onArchive={archive}
+        onRename={renameConversation}
+        onExport={exportConversation}
       />
 
       {/* Service degraded banner — reflects `useChat.error`. */}
@@ -785,11 +950,24 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
           <span>
             Service degraded · stream error: {error?.message ?? "unknown"}
           </span>
+          {runIsActive && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="ml-auto h-7 border-warning/40 px-2 text-warning hover:bg-warning/10"
+              onClick={() => void resumeAfterHitl().catch((cause) => {
+                toast.error(cause instanceof Error ? cause.message : "Could not reconnect to the active run");
+              })}
+            >
+              Reconnect
+            </Button>
+          )}
         </div>
       )}
 
       {/* Message stream */}
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea ref={scrollAreaRef} className="min-h-0 flex-1">
         <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8">
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
@@ -804,7 +982,7 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
                   in&nbsp;real-time.
                 </p>
               </div>
-              <p className="rounded-md border border-border bg-surface px-4 py-2 font-mono text-[0.65rem] text-muted">
+              <p className="hidden">
                 Transport: /api/chat · AI SDK v5 UIMessageStream
               </p>
             </div>
@@ -842,7 +1020,7 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  if (isStreaming && insight.activeRunId) {
+                  if (runIsActive) {
                     void sendGuidance();
                   } else {
                     void submitTurn();
@@ -859,11 +1037,16 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
             <div className="flex flex-col gap-2">
               <Button
                 type="submit"
-                disabled={!input.trim() || isStreaming}
+                disabled={!input.trim() || (isStreaming && !runIsActive)}
                 className="shrink-0"
               >
-                {isStreaming ? (
+                {isStreaming && !runIsActive ? (
                   <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : runIsActive ? (
+                  <>
+                    <Sparkles className="h-4 w-4" />
+                    Guide
+                  </>
                 ) : (
                   <>
                     <Send className="h-4 w-4" />
@@ -876,12 +1059,12 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
                 variant="outline"
                 size="sm"
                 onClick={() => void sendGuidance()}
-                disabled={!input.trim() || !isStreaming || !insight.activeRunId}
+                disabled={!input.trim() || !runIsActive}
                 className="shrink-0"
                 title={
-                  isStreaming
+                  runIsActive
                     ? "Send as operator guidance to the active run"
-                    : "Guidance is only available while a run is streaming"
+                    : "Guidance is only available while a run is active"
                 }
               >
                 <Sparkles className="h-4 w-4" />
@@ -889,11 +1072,6 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               </Button>
             </div>
           </form>
-          <small className="block text-[0.65rem] text-muted">
-            Streams via <code className="font-mono">/api/chat</code> (AI SDK v5
-            BFF). Draft auto-saves locally per conversation. Turso remains the
-            authoritative archive.
-          </small>
         </div>
       </footer>
     </div>
@@ -918,9 +1096,6 @@ function NoConversationState() {
             its live AI SDK console stream.
           </p>
         </div>
-        <p className="rounded-md border border-border bg-surface px-4 py-2 font-mono text-[0.65rem] text-muted">
-          CONSOLE / AI SDK v5 / BFF transport active
-        </p>
       </div>
     </div>
   );
@@ -935,20 +1110,17 @@ function NoConversationState() {
  *
  * Mounts `useMuninChat` against the active conversation and renders every
  * message part through the corresponding part-renderer component. This is the
- * visible UI surface wired to the BFF route at `/api/chat` (Fase 1a) and the
- * translator in `lib/chat/translator.ts`.
+ * visible UI surface wired to the durable chat stream and its event translator.
  *
- * Fase 1b extensions:
- *   - Header shows the conversation title + status + Archive button (stub).
+ * The console provides:
+ *   - Header shows the conversation title + status + Archive button.
  *   - Inline run status: elapsed timer, current run state, last tool call —
  *     derived from `useChat.status` and stream parts (no polling).
  *   - Draft auto-save per conversation id in localStorage.
- *   - Send-as-guidance button — emits a `data-operator-guidance` UI part that
- *     the BFF intercepts and forwards to `POST /api/chat/{run_id}/guidance`.
+ *   - Send-as-guidance button — uses the dedicated guidance mutation and
+ *     reconnects the durable stream after a stopped browser reader.
  *
- * The legacy `ConversationView` (driven by `useRunEvents`) is kept alive in
- * parallel during the parity window; the entrypoint switch and deletion
- * happen in Fase 1c and Fase 2.
+ * Legacy event rendering remains isolated from this durable stream surface.
  */
 export default function AgentConsole({ conversationId }: AgentConsoleProps) {
   if (!conversationId) {

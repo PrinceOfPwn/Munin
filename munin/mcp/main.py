@@ -383,13 +383,22 @@ def _submit_command_job(
     artifacts: list[str] | None = None,
 ) -> dict[str, Any]:
     started_at = utc_now_iso()
+    try:
+        from ..core.execution_progress import active_tool_identity  # noqa: PLC0415
+        from ..core.middleware.progress_emit import ACTIVE_RUN_ID  # noqa: PLC0415
+
+        _active_name, tool_call_id = active_tool_identity()
+        trusted_run_id = str(ACTIVE_RUN_ID.get() or "")
+    except Exception:  # pragma: no cover - direct MCP calls have no graph context
+        tool_call_id = ""
+        trusted_run_id = ""
 
     def on_finish(job: Any) -> None:
         result = job.result or {}
         data = result.get("data", {}) or {}
         try:
             AUDIT.record(
-                run_id=run_id,
+                run_id=trusted_run_id,
                 tool=tool,
                 level=level,
                 mode="async",
@@ -412,6 +421,8 @@ def _submit_command_job(
         level=level,
         target=target,
         command_preview=command[:200],
+        run_id=trusted_run_id,
+        tool_call_id=tool_call_id,
         fn=lambda current_job: ENGINE.execute_job(
             job=current_job,
             tool=tool,

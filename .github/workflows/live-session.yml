@@ -171,30 +171,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Turso persists registry rows, but generated Python/JSON sources still
-      # need to cross ephemeral runner boundaries. Restore the full durable
-      # file set in both SQLite and Turso modes.
-      - name: Restore Munin durable files from last session
-        if: ${{ inputs.persist_state }}
-        id: state_restore
-        continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: live-session.yml
-          workflow_conclusion: ""      # accept success or failure — we want the freshest state
-          name: munin-state
-          path: .
-          if_no_artifact_found: warn
-
-      - name: Show restored state summary
-        if: ${{ inputs.persist_state }}
-        run: |
-          if [ -f data/shared_state.sqlite ]; then
-              echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
-          fi
-          restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
-          echo "✓ Restored ${restored_sources} generated source file(s)"
-
       - name: Install Munin runtime + offensive toolchain
         run: |
           apt-get update -qq
@@ -224,6 +200,30 @@ jobs:
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
           poetry --version
+
+      - name: Restore Munin durable files from last session
+        if: ${{ inputs.persist_state }}
+        id: state_restore
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MUNIN_RESTORE_ALLOWED_ACTORS: ${{ vars.MUNIN_RESTORE_ALLOWED_ACTORS || github.repository_owner }}
+        run: |
+          python3 scripts/restore_munin_artifact.py \
+            --workflow live-session.yml \
+            --artifact munin-state \
+            --branch "$GITHUB_REF_NAME" \
+            --allowed-actor "$MUNIN_RESTORE_ALLOWED_ACTORS" \
+            --destination "$GITHUB_WORKSPACE"
+
+      - name: Show restored state summary
+        if: ${{ inputs.persist_state }}
+        run: |
+          if [ -f data/shared_state.sqlite ]; then
+              echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
+          fi
+          restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
+          echo "✓ Restored ${restored_sources} generated source file(s)"
 
       - name: Verify offensive toolchain is present
         run: |
