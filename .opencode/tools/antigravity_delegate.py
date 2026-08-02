@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
-
 MAX_CAPTURE_CHARS = 80_000
+DEFAULT_AGENT_TIMEOUT = 1_200
 
 
 @dataclass
@@ -138,19 +137,66 @@ def _run_validation(command: str, workspace: Path, timeout: int) -> CommandResul
         )
 
 
-async def delegate(request: dict[str, Any]) -> dict[str, Any]:
+def _parse_agy_output(stdout: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"raw_output": _truncate(stdout)}
+
+    if isinstance(payload, dict):
+        return payload
+    return {"result": payload}
+
+
+def _run_antigravity(
+    workspace: Path,
+    prompt: str,
+    timeout: int,
+    agent_name: str | None,
+) -> CommandResult:
+    agy = shutil.which("agy")
+    if not agy:
+        raise RuntimeError(
+            "Antigravity CLI (`agy`) is not installed or is not available on PATH"
+        )
+
+    argv = [agy, "--print", prompt, "--output-format", "json"]
+    if agent_name:
+        argv.extend(["--agent", agent_name])
+
+    try:
+        result = _run(argv, cwd=workspace, timeout=timeout)
+        return CommandResult(
+            command="agy --print <delegated-task> --output-format json",
+            exit_code=result.returncode,
+            stdout=_truncate(result.stdout),
+            stderr=_truncate(result.stderr),
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return CommandResult(
+            command="agy --print <delegated-task> --output-format json",
+            exit_code=124,
+            stdout=_truncate(stdout),
+            stderr=_truncate(stderr + f"\nTimed out after {timeout} seconds."),
+        )
+
+
+def delegate(request: dict[str, Any]) -> dict[str, Any]:
     workspace = Path(request["workspace"]).resolve()
     task = str(request["task"]).strip()
     allowed_paths = [str(item) for item in request.get("allowed_paths", [])]
     validations = [str(item) for item in request.get("validation", [])]
     validation_timeout = int(request.get("validation_timeout", 300))
+    agent_timeout = int(request.get("agent_timeout", DEFAULT_AGENT_TIMEOUT))
+    agent_name_raw = request.get("agent")
+    agent_name = str(agent_name_raw).strip() if agent_name_raw else None
 
     if not workspace.is_dir() or not (workspace / ".git").exists():
         raise ValueError(f"Not a Git worktree: {workspace}")
     if not task:
         raise ValueError("Task must not be empty")
-    if not os.environ.get("GEMINI_API_KEY"):
-        raise RuntimeError("GEMINI_API_KEY is not configured")
 
     dirty_before = _status_files(workspace)
     before_diff = _git(workspace, "diff", "--no-ext-diff")
@@ -162,19 +208,22 @@ async def delegate(request: dict[str, Any]) -> dict[str, Any]:
         "Discover the smallest relevant check, but report exactly what ran."
     )
 
-    instructions = f"""
+    prompt = f"""
 You are a delegated coding worker inside the Munin repository.
 
-Workspace: {workspace}
+Complete this task by modifying the current worktree:
 
-Rules:
-- Inspect repository instructions and relevant code before editing.
+{task}
+
+Operating rules:
+- Inspect AGENTS.md and relevant repository instructions before editing.
+- Inspect the affected implementation and tests before changing code.
 - Implement only the requested behavior and keep the patch minimal.
 - Preserve existing architecture and public behavior unless explicitly requested.
 - Add or update tests when behavior changes.
 - Never stage, commit, push, stash, reset, restore, checkout, clean, or alter Git history.
-- Never print or persist secrets.
-- Never modify files outside the workspace.
+- Never print, persist, or expose credentials or secrets.
+- Never modify files outside the current workspace.
 - Do not claim a command passed unless you observed its result.
 - Finish with a factual summary of files changed, checks run, and unresolved risks.
 
@@ -185,21 +234,7 @@ Requested validation:
 {requested_checks}
 """.strip()
 
-    previous_cwd = Path.cwd()
-    try:
-        os.chdir(workspace)
-        config = LocalAgentConfig(
-            system_instructions=instructions,
-            capabilities=CapabilitiesConfig(),
-        )
-        async with Agent(config) as agent:
-            response = await agent.chat(
-                "Complete this coding task by modifying the current worktree:\n\n"
-                + task
-            )
-            worker_report = await response.text()
-    finally:
-        os.chdir(previous_cwd)
+    worker = _run_antigravity(workspace, prompt, agent_timeout, agent_name)
 
     validation_results = [
         _run_validation(command, workspace, validation_timeout)
@@ -209,9 +244,16 @@ Requested validation:
     after_diff = _git(workspace, "diff", "--no-ext-diff")
 
     return {
-        "status": "changed" if before_diff != after_diff or dirty_before != dirty_after else "unchanged",
+        "status": "changed"
+        if before_diff != after_diff or dirty_before != dirty_after
+        else "unchanged",
+        "backend": "antigravity-cli",
+        "authentication": "Google Sign-In session managed by agy",
         "workspace": str(workspace),
-        "worker_report": _truncate(worker_report),
+        "agent": agent_name,
+        "worker_exit_code": worker.exit_code,
+        "worker_output": _parse_agy_output(worker.stdout),
+        "worker_stderr": worker.stderr,
         "dirty_before": dirty_before,
         "dirty_after": dirty_after,
         "changed_files": dirty_after,
@@ -228,13 +270,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def main() -> int:
+def main() -> int:
     args = parse_args()
     try:
-        result = await delegate(json.loads(args.request))
+        result = delegate(json.loads(args.request))
         print(json.dumps(result, ensure_ascii=False))
-        return 0
-    except Exception as exc:  # noqa: BLE001 - the wrapper must return structured errors
+        return 0 if result["worker_exit_code"] == 0 else 1
+    except Exception as exc:  # noqa: BLE001 - return structured tool errors
         print(
             json.dumps(
                 {
@@ -249,4 +291,4 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(main())
