@@ -28,7 +28,9 @@ jobs:
           git checkout -B "$HEAD_REF" FETCH_HEAD
 
       - name: Apply reviewed fixes
-        run: python scripts/_apply_pr13_review_fixes.py
+        run: |
+          python scripts/_apply_pr13_review_fixes.py
+          python scripts/_fix_pr13_review_test_harness.py
 
       - name: Validate Python syntax and focused backend tests
         run: |
