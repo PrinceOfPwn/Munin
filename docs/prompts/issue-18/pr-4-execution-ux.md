@@ -1,6 +1,6 @@
-# Prompt PR-4 — Execution UX: Tools, Terminal, Reasoning, Subagentes y HITL
+# Prompt PR-4 — Execution UX: Tool Cards, Reasoning, Subagentes, Terminal ANSI, HITL durable
 
-> Issue: #18 · Fase 4 · Ola 2 · **Requiere PR-1 en `main`**
+> Issue: #18 · Fase 2 · Ola 2 · **Requiere PR-1 mergeado en `main`**
 > Ejecutar en paralelo con `pr-3` y `pr-5`.
 > Contexto compartido obligatorio: `docs/prompts/issue-18/00-master.md` — léelo primero.
 
@@ -8,93 +8,213 @@
 
 ## 1. Instrucciones para la IA ejecutora
 
-Eres un desarrollador Frontend especializado en Interfaces de Herramientas de Seguridad y Consolas de Comando. Debes reconstruir los **bloques de ejecución del chat** para que las llamadas a herramientas, salidas de comandos (terminal), razonamiento de modelos, subagentes y aprobaciones HITL se consoliden por ID estable en tarjetas limpias y contenidas.
+Tu objetivo es construir los **renderers de ejecución**: cómo se visualiza tool-call lifecycle, razonamiento del modelo, subagentes, output de terminal con ANSI, e interrupciones Human-in-the-Loop.
+
+La regla de oro: **consolidación por ID estable**. Un tool call aparece en el backend como `tool_intent → tool_started → tool_heartbeat* → tool_output* → tool_result`. En la UI esto se reconstruye en **una sola tarjeta** que evoluciona, no en 5 cards duplicados.
+
+El contracto de eventos que recibes del backend está documentado en `app/src/lib/chat/translator.ts` (27 `BackendEnvelopeKind`). Léelo antes de empezar.
 
 ---
 
-## 2. Rutas que SOLO este PR modifica (Rutas Permitidas)
+## 2. Rutas Permitidas
 
-PUEDES crear o editar ÚNICAMENTE estas rutas:
-- `app/src/components/chat/ToolInvocationPart.tsx`
-- `app/src/components/chat/CommandOutputPart.tsx`
-- `app/src/components/chat/ReasoningPart.tsx`
-- `app/src/components/chat/HitlRequestPart.tsx`
-- `app/src/components/chat/SubagentPresencePart.tsx`
-- `app/src/components/chat/OperationalTracePart.tsx`
-- `app/src/components/chat/ToolHeartbeatPart.tsx`
-- `app/src/components/chat/GuidancePart.tsx`
-- `app/src/components/chat/NotePart.tsx`
-- `app/src/components/chat/HeartbeatPart.tsx`
-- `app/src/components/chat/ArtifactPart.tsx`
-- `app/src/components/ai-elements/tool.tsx` (NUEVO — Adaptado de AI Elements)
-- `app/src/components/ai-elements/terminal.tsx` (NUEVO — Adaptado de AI Elements)
-- `app/src/lib/format.ts` (Helpers de formato)
-- `docs/issue-18-execution-ux.md` (NUEVO)
+- `app/src/renderers/components/` (NUEVO — todos los renderers de ejecución):
+  - `ToolCard.tsx`, `ToolIntent.tsx`, `ToolResult.tsx`, `ToolOutput.tsx`
+  - `ReasoningBlock.tsx`
+  - `SubagentBadge.tsx`, `SubagentCard.tsx`
+  - `TerminalOutput.tsx`
+  - `HumanInterruptCard.tsx`
+  - `RunStatePill.tsx`
+- `app/src/renderers/index.ts` (NUEVO — registration de los renderers anteriores en el registry de PR-1)
+- `app/src/lib/chat/translator.ts` (EDITAR — solo añadir tipos Guidance/HumanInterrupt nuevos que PR-2 introduce)
+- `app/src/lib/chat/useExecutionStream.ts` (NUEVO — hook de reconciliación por tool_call_id)
+- `app/src/components/chat/` (EDITAR solo si la integración con FlightDeck lo exige; no refactor masivo)
 - `changes.md` (AÑADIR entrada)
 
 ### Rutas Prohibidas
-- `app/src/components/AppShell.tsx` (PR-3)
-- `app/src/components/workspace/**` (PR-5)
-- `munin/**` y `tests/**`
+- `munin/**`
+- `app/src/types/**`
+- `app/src/renderers/registry.ts` (PR-1 es dueño del core; PR-4 solo registra entries)
 
 ---
 
-## 3. Especificación detallada paso a paso
+## 3. Spec: ToolCard — Máquina de Estados de Consolidación
 
-### Paso 3.1: Consolidación de Herramientas por ID Estable
+### 3.1 Hook `useExecutionStream`
 
-El problema actual es que cada evento SSE (`tool_started`, `tool_heartbeat`, `tool_result`) crea una tarjeta pequeña en el timeline.
-Debes implementar la **consolidación por `tool_call_id`**:
+Lee el stream SSE del backend (vía `aiChat.ts`) y produce un `Map<tool_call_id, ToolAggregate>`:
 
-1. `ToolInvocationPart.tsx`:
-   - Agrupa todos los eventos del mismo `tool_call_id` en **una sola tarjeta**.
-   - Encabezado: Nombre de la tool + badge de estado (`running` con spinner / `success` verde / `error` rojo) + `elapsed_ms`.
-   - Contenido colapsable: Argumentos de entrada (JSON formateado) y Resultado de salida.
-   - Si se reciben eventos `tool_heartbeat`, actualiza el tiempo en vivo en la misma tarjeta sin duplicarla.
+```tsx
+interface ToolAggregate {
+  tool_call_id: string;
+  tool_name: string;
+  input?: unknown;
+  state: "intent" | "running" | "completed" | "failed";
+  output_chunks: string[];          // tool_output + tool_heartbeat se concatenan aquí
+  final_result?: string;
+  final_error?: string;
+  elapsed_ms?: number;
+  started_at_ms?: number;
+  completed_at_ms?: number;
+}
+```
 
-### Paso 3.2: Terminal Contenida para Salida de Comandos (`CommandOutputPart.tsx`)
+Lógica:
+- `tool_intent` → crea entrada con `state="intent"`.
+- `tool_started` → actualiza `state="running"`, `started_at_ms`.
+- `tool_output` → push a `output_chunks`.
+- `tool_heartbeat` → NO se muestra como output, solo actualiza un reloj visual `elapsed_ms`.
+- `tool_result` → `state="completed"`, `final_result`, `elapsed_ms`.
+- `tool_failed` → `state="failed"`, `final_error`.
 
-Las salidas de comandos de escaneo (nmap, nuclei, feroxbuster) suelen romper la maquetación.
-En `CommandOutputPart.tsx`:
+### 3.2 `ToolCard.tsx`
 
-1. Adapta `Terminal` de AI Elements en `app/src/components/ai-elements/terminal.tsx`.
-2. Requisitos de contención:
-   - `min-w-0 w-full max-w-full overflow-x-auto` en el contenedor.
-   - Botón de **Toggle Line Wrap** (alternar entre scroll horizontal y ajuste de línea).
-   - Botón **Copy Output** (copiar al portapapeles).
-   - Botón **Fullscreen Modal** (pantalla completa para inspección de logs largos).
-   - Botón **Download Transcript** (descargar archivo `.log`).
-   - Soporte para códigos de color ANSI mediante `ansi-to-react`.
+Estructura (estructura unificada AI Elements `Tool`): Header (state pill + tool_name con icono lucide apropiado) + Content colapsable (Input en `pre` monospace + Output terminal en uno de dos modos: stream scrollback si output_chunks.length > 0, render final si tool_result).
 
-### Paso 3.3: Razonamiento del Proveedor (`ReasoningPart.tsx`)
+Estados visuales:
+- `intent` → pill `text-muted` con dot animado
+- `running` → pill `info` (`#38bdf8`) con spinner
+- `completed` → pill `success` con check
+- `failed` → pill `danger` con icono `AlertTriangle`
 
-1. Muestra exclusivamente el `provider_reasoning` o `reasoning` que el modelo emite de forma transparente.
-2. Renderízalo en un bloque colapsable estilizado con `border-border` y texto en tono `text-muted`.
-3. NUNCA inventes cadenas de pensamiento ocultas.
+Selección de icono por `tool_name`:
+- `gen__*` → `Wand2` (accent)
+- `nmap_*` / `nuclei_*` / `ffuf_*` / `katana_*` / `feroxbuster_*` / `httpx_*` → `Radar` (rose)
+- `ldap_*` → `Users` (info)
+- `cve_*` / `exploit_*` / `tavily_*` / `hugin_*` → `BookOpen` (text-secondary)
+- `valravn_*` → `Feather`
+- `munin_*` → `Bird`
+- default → `Wrench`
 
-### Paso 3.4: Subagentes Resumidos (`SubagentPresencePart.tsx`)
-
-1. Muestra la actividad de subagentes en filas compactas tipo badge: `[Subagente: Recon] -> Running (12s)` o `[Subagente: LDAP] -> Completed (1.4s)`.
-2. Evita inundar el timeline principal con la conversación interna del subagente.
+**Stick-to-bottom en streaming de output**: cuando output_chunks crece, el content scrollea al fondo solo si `isStickToBottom === true` (hook de PR-3).
 
 ---
 
-## 4. Verificación Obligatoria
+## 4. `ReasoningBlock.tsx`
+
+Componente para partes `provider_reasoning`. Reusa `Reasoning.tsx` de PR-3 (`<details>` collapsible por defecto). Cuando `is_streaming=true` muestra dot animado en `accent`. Texto en `font-mono text-xs text-muted overflow-x-auto`.
+
+---
+
+## 5. `SubagentCard.tsx` y `SubagentBadge.tsx`
+
+Consulta Context7 de `langchain-ai/deepagents`. Los subagentes emiten:
+- `SubagentStartEvent` con `eval_id`, `subagent_type`, `label`, `description`
+- `SubagentCompleteEvent` con `eval_id`, `summary`, `duration_ms`
+
+Renderiza `SubagentBadge`: chip horizontal con icono `Bird` violeta hovering entre elementos: `<div className="inline-flex items-center gap-2 px-2 py-0.5 rounded-full bg-accent-soft text-accent text-xs border border-accent/30">`.
+
+`SubagentCard` expande al click: header con subagent_type + duration_ms en mono, body con `summary` en markdown, y mini-timeline de su lifecycle.
+
+---
+
+## 6. `TerminalOutput.tsx`
+
+Salida de `command_output` (tool calls `execute_command`, `web_evidence_screenshotter`, etc.).
+
+- Usar `ansi-to-react` (dep ya instalada en Munin) para renderizar escapes ANSI coloreados.
+- Contenedor: `bg-bg border border-border rounded font-mono text-xs p-2 max-h-72 overflow-y-auto overflow-x-auto` (cero scroll-horizontal de página garantizado).
+- Auto-stick-to-bottom usando el mismo hook de PR-3.
+- Árbol de salida finalizada: `border-l-2 border-success/60` a la izquierda del último chunk tras `is_final=true`.
+
+---
+
+## 7. `HumanInterruptCard.tsx`
+
+Renderiza partes `human_interrupt` (originadas por `__interrupt__` en el stream LangGraph).
+
+```tsx
+function HumanInterruptCard({ part }: RendererProps<HumanInterruptPart>) {
+  return (
+    <AlertDialog open={true}>
+      <AlertDialogContent className="bg-raised border border-accent/40">
+        <AlertDialogHeader>
+          <AlertDialogTitle className="text-body font-mono text-base">
+            <Shield className="inline mr-2 text-accent" /> HITL — Operator decision required
+          </AlertDialogTitle>
+          <AlertDialogDescription className="text-secondary text-sm whitespace-pre-wrap">
+            {part.prompt}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className="flex flex-col gap-2 mt-2">
+          {part.options.map(opt => (
+            <Button key={opt} variant="outline" onClick={() => respond(opt)}>
+              {opt}
+            </Button>
+          ))}
+          <Button variant="ghost" className="text-muted text-xs" onClick={() => respond("__reject__")}>
+            Reject (no resume)
+          </Button>
+        </div>
+        {part.expires_at_ms && (
+          <CountdownTimer expiresAt={part.expires_at_ms} />
+        )}
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+```
+
+`respond(decision)` hace POST a `/api/chat/{conv}/runs/{run}/respond` con `{nonce, decision}` — el backend responde con `Command(resume={decisions: [decision]})` para reanudar el graph.
+
+Usa `AlertDialog` de Radix (ya instalado).
+
+---
+
+## 8. `RunStatePill.tsx`
+
+Estado del run global para el header de la pane de conversación:
+- `queued` → `text-muted` con dot pulsante
+- `running` → `success` con spinner
+- `waiting_for_human` → `warning` con icono `Hand`
+- `cancelling` → `warning` con icono `X`
+- `cancelled` → `text-muted` con icono `X`
+- `completed` → `success` con check
+- `failed` → `danger` con `AlertTriangle`
+- `interrupted` → `text-muted` con `Zap`
+
+---
+
+## 9. Registro en `renderers/index.ts`
+
+```tsx
+import { registry } from "./registry";
+import { ToolCard } from "./components/ToolCard";
+// ...imports
+
+export function registerExecutionRenderers() {
+  // PR-1 solo creó el registry y los schemas. PR-4 pobla los renderers:
+  // NOTA: registry.register solo se usa cuando artifact.renderer_key coincide.
+  // Para los demás kinds, usar switch en Message.tsx según PR-1 doc
+  // o crear un RendererResolver central.
+}
+```
+
+Implementa un `RendererResolver` central en `app/src/renderers/index.ts` que decide, dado un `MuninPart`:
+- `assistant_text` → markdown renderer (PR-3 / existente)
+- `provider_reasoning` → `ReasoningBlock`
+- `tool_intent|tool_started|tool_heartbeat|tool_output` → `ToolCard` (via `useExecutionStream` aggregation)
+- `tool_result|tool_failed` → `ToolCard`
+- `command_output` → `TerminalOutput`
+- `subagent_lifecycle` → `SubagentCard`
+- `human_interrupt` → `HumanInterruptCard`
+- `run_state` → `RunStatePill`
+- `artifact` → registry lookup por `renderer_key`
+- `operator_guidance` → ver PR-2 lifecycle, mostrar como banner top con status badge
+
+---
+
+## 10. Verificación
 
 ```bash
 cd app
 npm run lint
 npm run typecheck
 npm run build
-npm test
 ```
 
-Prueba la tarjeta de terminal con una salida de comando de más de 500 líneas y verifica que no cause overflow horizontal de la página.
+## 11. Commit / PR
 
----
-
-## 5. Instrucciones de Commit y PR
-
-- Rama: `feat/issue-18-4-execution-ux`
-- Commit: `feat(issue-18-4): consolidate execution parts by stable ID and implement contained terminal`
-- Abre el PR contra `main`.
+- Branch: `feat/issue-18-4-execution-ux`
+- Commit: `feat(issue-18-4): tool cards, ANSI terminal, subagent & HITL renderers with ID-stable consolidation`
+- PR contra `main`. Cuerpo del PR debe referenciar que **requiere PR-1 merged**.

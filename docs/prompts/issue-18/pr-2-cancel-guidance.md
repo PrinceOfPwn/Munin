@@ -1,6 +1,6 @@
-# Prompt PR-2 — Defectos release-blocking: Cancelación durable y Guidance Lifecycle
+# Prompt PR-2 — Defectos Backend: Cancelación Durable + Guidance Lifecycle E2E
 
-> Issue: #18 · Fase 2 · Ola 1 · **Requiere solo `main`**
+> Issue: #18 · Fase 1 (parte backend) · Ola 1 · **Requiere solo `main`**
 > Ejecutar en paralelo con `pr-1` y `pr-6`.
 > Contexto compartido obligatorio: `docs/prompts/issue-18/00-master.md` — léelo primero.
 
@@ -8,149 +8,188 @@
 
 ## 1. Instrucciones para la IA ejecutora
 
-Eres un desarrollador Python/Next.js senior que debe corregir **dos fallos de corrección críticos (release-blocking)** en Munin:
-1. El botón "Stop" actual solo desconecta el SSE del navegador; el backend sigue corriendo de fondo. Debes exporner una **cancelación durable real** por HTTP y hacer que el executor Python se detenga verazmente.
-2. El envío de guidance del operador hoy sólo guarda una fila de audit y no garantiza que el modelo haya recibido el texto en su siguiente paso. Debes implementar un **lifecycle completo de 6 estados** y escribir un **test E2E real** que compruebe que `HumanMessage(name="operator")` ingresó al modelo.
+Debes cerrar dos brechas backend que el frontend de Munin necesita para ser una consola operacional creíble:
+
+1. **Cancelación de run durable**: exponer `store.request_run_cancellation` vía HTTP y conectarla al runtime LangGraph.
+2. **Lifecycle de operator guidance**: persistir transiciones de estado del guidance enviado por el operador para que el frontend pueda reconciliar `queued → delivered → applied → expired`.
+
+Sigue la especificación al pie de la letra. **No inventes** funciones: lee el código existente referenciado antes de editar.
 
 ---
 
-## 2. Rutas que SOLO este PR modifica (Rutas Permitidas)
+## 2. Rutas Permitidas
 
-PUEDES crear o editar ÚNICAMENTE estas rutas:
-- `munin/production/chat.py` (Exponer endpoint `/cancel`, interceptar en el loop de ejecucion)
-- `munin/production/store.py` (Métodos de soporte si hicieran falta; `request_run_cancellation` ya existe en `:1771`)
-- `munin/core/middleware/operator_guidance.py` (Tracking de los estados de guidance)
-- `munin/core/runtime_adapter.py` (Recepción de evento de cancelación y emisión de `run_state`)
-- `app/src/lib/production-api.ts` (Añadir `cancelRun(conversationId, runId)`)
-- `app/src/lib/aiChat.ts` (Añadir función `cancelActiveRun(conversationId, runId)`)
-- `app/src/components/chat/HitlRequestPart.tsx` y `GuidancePart.tsx` (Botón Cancelar + Badge de Estado de Guidance)
-- `tests/test_run_cancellation.py` (NUEVO)
-- `tests/test_guidance_lifecycle.py` (NUEVO)
+- `munin/production/chat.py` (EDITAR — añadir endpoint)
+- `munin/production/store.py` (EDITAR — añadir lifecycle guidance)
+- `munin/core/middleware/operator_guidance.py` (EDITAR — emitir eventos)
+- `munin/core/runtime_adapter.py` (EDITAR — respetar fencing en resume)
+- `tests/test_production_cancel.py` (NUEVO)
+- `tests/test_operator_guidance_lifecycle.py` (NUEVO)
 - `changes.md` (AÑADIR entrada)
 
 ### Rutas Prohibidas
-- `app/src/types/munin-ui.ts`
-- `app/src/renderers/**`
-- `app/src/fixtures/**`
-- `app/src/components/AppShell.tsx`
+- `app/**`
+- `munin/mcp/**`
+- `munin/valravn/**`
+- `soul/**`
 
 ---
 
-## 3. Especificación detallada paso a paso
+## 3. Spec: Cancelación Durable
 
-### Paso 3.1: Endpoint HTTP de Cancelación Durable
+### 3.1 Endpoint HTTP en `munin/production/chat.py`
 
-En `munin/production/chat.py`, añade la ruta HTTP:
-`POST /api/chat/{conversation_id}/runs/{run_id}/cancel`
+Añade el endpoint **exactamente** con esta firma (rerautea a la zona `# ===== Run management =====` o crea una nueva):
 
 ```python
-async def cancel_run_endpoint(request: Request) -> Response:
-    """Cancela duraderamente una ejecución en curso."""
-    conversation_id = request.path_params["conversation_id"]
+async def cancel_run_endpoint(request: Request) -> JSONResponse:
+    """
+    POST /api/chat/{conversation_id}/runs/{run_id}/cancel
+
+    Cancela un run durable. Establece state='cancelled' + borra lease.
+    El runtime_adapter consulta store.is_run_fenced(run_id) para abortar el stream.
+    """
+    conv_id = request.path_params["conversation_id"]
     run_id = request.path_params["run_id"]
-    actor = await require_authenticated_actor(request)
-    
-    # 1. Llamada idempotente a store
-    result = store.request_run_cancellation(actor_id=actor["id"], run_id=run_id)
-    
-    # 2. Retornar JSON con estado cancelado
-    return JSONResponse({
-        "status": "success",
-        "data": {
+
+    actor = await _require_auth(request)
+    if actor is None:
+        return _unauthorized()
+
+    # Authorization: solo operator del conversation_id o admin
+    if not await _can_modify_run(actor, conv_id):
+        return _forbidden()
+
+    fencing_token = await store.request_run_cancellation(
+        actor_id=actor.id,
+        run_id=run_id,
+        reason="operator_request",
+    )
+
+    if fencing_token is None:
+        # run ya terminal o no existe
+        return JSONResponse(
+            {"error": "run_not_cancellable", "run_id": run_id},
+            status_code=409,
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
             "run_id": run_id,
-            "state": result["state"],
-            "cancel_requested_at_ms": result.get("cancel_requested_at_ms")
-        }
-    })
+            "state": "cancelled",
+            "fencing_token": fencing_token,
+        },
+        status_code=202,
+    )
 ```
 
-Registra la ruta en `register_chat_routes` en `chat.py`.
+Registra la ruta en el router de la app (`routes.append(Route("/api/chat/{conversation_id}/runs/{run_id}/cancel", cancel_run_endpoint, methods=["POST"]))`).
 
-### Paso 3.2: Fencing e Interrupción en el Loop de Ejecución
+### 3.2 Fencing en `runtime_adapter.py`
 
-En `munin/production/chat.py` (en el loop de ejecución de runs `_run_executor_loop` / `_stream_run_events`):
+En el loop de `astream_events(version="v2")` (línea ~454), añade un **early exit** antes de producir cada chunk:
 
-1. En cada iteración del loop, comprueba si `store.is_run_cancelled(run_id)` o si `run["state"] == "cancelled"`.
-2. Si se solicitó cancelación:
-   - Emite el evento SSE `{"kind": "run_state", "run_id": run_id, "state": "cancelling"}`.
-   - Detén la tarea de LangGraph (`graph_task.cancel()`).
-   - Emite el evento SSE `{"kind": "run_state", "run_id": run_id, "state": "cancelled"}`.
-   - Libera los leases y cierra el generador.
-
-### Paso 3.3: Lifecycle de Operator Guidance (6 Estados)
-
-En `munin/core/middleware/operator_guidance.py` y `munin/production/store.py`:
-
-Los 6 estados obligatorios son:
-- `queued`: Guidance creado por el operador, esperando drena.
-- `delivered_to_runtime`: `OperatorGuidanceMiddleware` drena el mensaje antes del paso del LLM.
-- `applied_to_model_step`: El hook `wrap_model_call` confirma que `HumanMessage(name="operator")` está presente en la lista `messages` enviada al LLM.
-- `expired`: Pasó el TTL sin ejecutarse.
-- `superseded`: Un nuevo guidance reemplazó al anterior.
-- `run_finished_undelivered`: El run terminó (completed/failed/cancelled) sin haber aplicado el guidance.
-
-Actualiza `OperatorGuidanceMiddleware.wrap_model_call` para emitir el evento `applied_to_model_step` cuando verifique la presencia del mensaje.
-
-### Paso 3.4: Tests Unitarios y E2E Obligatorios
-
-Crea `tests/test_run_cancellation.py`:
-1. `test_cancel_running_run_is_idempotent`: Crear run -> llamar cancel -> verificar estado `cancelled` -> llamar cancel de nuevo -> verificar que responde 200 sin error.
-2. `test_cancelled_run_emits_events`: Verificar que los eventos SSE emiten `cancelling` y `cancelled`.
-3. `test_recovery_does_not_revive_cancelled_run`: Simular restart y verificar que el recovery worker omite los runs cancelados.
-
-Crea `tests/test_guidance_lifecycle.py`:
-1. `test_guidance_applied_to_model_step_e2e`:
-   - Crear run.
-   - Enviar guidance vía API.
-   - Ejecutar un paso con mock de LLM.
-   - Verificar que los mensajes recibidos por el mock contienen `HumanMessage(content=..., name="operator")`.
-   - Verificar que el evento de guidance cambió a `applied_to_model_step`.
-2. `test_guidance_undelivered_on_run_finish`:
-   - Enviar guidance.
-   - Cancelar o terminar el run sin llamar al modelo.
-   - Verificar que el estado cambia a `run_finished_undelivered`.
-
-### Paso 3.5: Cliente Frontend (`production-api.ts` y `aiChat.ts`)
-
-En `app/src/lib/production-api.ts`:
-```typescript
-export async function cancelRun(conversationId: string, runId: string): Promise<void> {
-  const token = currentCsrfToken();
-  const res = await fetch(`/api/chat/${encodeURIComponent(conversationId)}/runs/${encodeURIComponent(runId)}/cancel`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { "X-CSRF-Token": token } : {}),
-    },
-  });
-  if (!res.ok) throw new Error(`Cancel failed (${res.status})`);
-}
+```python
+async def astream(self, ...):
+    run_id = self.run_id
+    async for ev in self.graph.astream_events(...):
+        # === CHECK FENCING ===
+        if await self.store.is_run_fenced(run_id):
+            # emite un último chunk run_state=cancelled y break
+            yield self._build_state_event(run_id, "cancelled", reason="operator_cancel")
+            await self.store.mark_run_cancelled(run_id)
+            break
+        # ... resto del handler existente
 ```
 
-En `app/src/components/chat/HitlRequestPart.tsx`:
-Añade dos botones claramente diferenciados:
-- **"Stop Viewing (Detach)"**: Llama a `stop()` de AI SDK UI. Solo desengancha el stream local.
-- **"Cancel Run (Backend)"**: Llama a `cancelRun(...)`. Muestra spinner hasta que el evento SSE `run_state: cancelled` confirme la detención real.
+Añade en `store.py` (si no existen ya) los helpers:
+
+```python
+async def is_run_fenced(self, run_id: str) -> bool: ...
+async def mark_run_cancelled(self, run_id: str) -> None: ...
+```
+
+(`request_run_cancellation` ya existe en `store.py:1771`; verifica su comportamiento leyendo el código antes de tocar nada.)
 
 ---
 
-## 4. Verificación Obligatoria
+## 4. Spec: Guidance Lifecycle (6 estados)
+
+### 4.1 Tabla/estado en `store.py`
+
+El guidance se persiste hoy como `audit_events` con `kind="operator_guidance"` (`chat.py:1532`). En lugar de reutilizar `audit_events`, añade una tabla dedicada:
+
+```sql
+CREATE TABLE IF NOT EXISTS operator_guidance (
+    guidance_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    run_id TEXT,
+    target_agent_id TEXT,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',  -- queued|delivered_to_runtime|applied_to_model_step|expired|superseded|run_finished_undelivered
+    queued_at_ms INTEGER NOT NULL,
+    delivered_at_ms INTEGER,
+    applied_at_step INTEGER,
+    expired_at_ms INTEGER,
+    superseded_by TEXT,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_guidance_conv_status ON operator_guidance(conversation_id, status);
+```
+
+Añade métodos en `store.py`:
+
+```python
+async def enqueue_guidance(self, *, conversation_id, run_id, body, target_agent_id=None) -> str: ...
+async def mark_guidance_delivered(self, guidance_id: str) -> None: ...
+async def mark_guidance_applied(self, guidance_id: str, step: int) -> None: ...
+async def mark_guidance_expired(self, guidance_id: str) -> None: ...
+async def supersede_guidance(self, guidance_id: str, by_guidance_id: str) -> None: ...
+async def finalize_undelivered_guidance(self, run_id: str) -> None: ...  # run_finished_undelivered
+async def list_guidance(self, conversation_id: str, run_id: str | None = None) -> list[dict]: ...
+```
+
+### 4.2 `OperatorGuidanceMiddleware` emite eventos
+
+En `munin/core/middleware/operator_guidance.py`, dentro de `wrap_model_call` (que se ejecuta antes del LLM):
+1. Lee el guidance pendiente vía `store.list_guidance(conv_id, run_id)` con `status='queued'`.
+2. Si existe:
+   - Llama `store.mark_guidance_delivered(guidance_id)` ANTES de inyectar en el prompt.
+   - Emite un **evento SSE** `operator_guidance` con `status='delivered_to_runtime'` al canal de la conversación (usa el mismo emisor que ya usa el runtime_adapter para `run_state`).
+3. Tras el paso del modelo ejecutado con éxito: `store.mark_guidance_applied(guidance_id, step=N)` y emite evento SSE con `status='applied_to_model_step'`.
+4. Si el paso falla (excepción): deja el guidance en `delivered_to_runtime` (no `applied`).
+5. Si expira el lease del run (`get_run_state != 'running'` y estado previo era `running`): `store.finalize_undelivered_guidance(run_id)` emite `status='run_finished_undelivered'`.
+
+---
+
+## 5. Tests Requeridos
+
+### `tests/test_production_cancel.py`
+
+- `test_cancel_running_run_returns_202`: crea run, arranca, llama endpoint, asserts `state='cancelled'` y `fencing_token` no vacío.
+- `test_cancel_completed_run_returns_409`: run ya terminal → 409.
+- `test_cancel_unauthorized_returns_401`: sin bearer.
+- `test_cancel_forbidden_actor_returns_403`: actor sin permiso sobre `conversation_id`.
+
+### `tests/test_operator_guidance_lifecycle.py`
+
+- `test_guidance_lifecycle_happy_path`: `queued → delivered_to_runtime → applied_to_model_step`.
+- `test_guidance_expired_when_run_dies_undelivered`: run muere tras `queued`, llama `finalize_undelivered_guidance` → `run_finished_undelivered`.
+- `test_guidance_superseded`: segundo guidance con mismo target_supersedes al primero → `superseded`.
+- `test_guidance_list_filters_by_run`: dos guidances en runs distintos → `list_guidance(run_id=A)` solo devuelve A.
+
+---
+
+## 6. Verificación
 
 ```bash
-# 1. Tests Python del Backend
 python -m compileall -q munin tests scripts
-python -m pytest -q tests/test_run_cancellation.py tests/test_guidance_lifecycle.py
-
-# 2. Verificación Frontend (si aplicaste cambios en ts/tsx)
-cd app
-npm run lint
-npm run typecheck
+python -m pytest -q tests/test_production_cancel.py tests/test_operator_guidance_lifecycle.py
 ```
 
----
+## 7. Commit / PR
 
-## 5. Instrucciones de Commit y PR
-
-- Rama: `feat/issue-18-2-cancel-guidance`
-- Commit: `feat(issue-18-2): add durable run cancellation endpoint and guidance lifecycle tracking`
-- Abre el PR contra `main`.
+- Branch: `feat/issue-18-2-backend-defects`
+- Commit: `feat(issue-18-2): durable run cancellation + operator guidance lifecycle`
+- Abre PR contra `main`.
