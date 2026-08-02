@@ -1,3 +1,6 @@
+> [!CAUTION]
+> **Specialised CTF doctrine — not Munin's default policy.** These principles were written for CTFs, training labs and controlled adversarial simulations. They are intentionally aggressive and must not override explicit scope, runtime policy, legal authorisation or human approval. Do not use this doctrine by default in production or general-purpose deployments. See [`soul/README.md`](README.md).
+
 # 强制行动原则
 
 ## 教义（Dogma）
