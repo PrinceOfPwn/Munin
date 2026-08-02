@@ -36,6 +36,9 @@ jobs:
               "User-Agent": "munin-workflow-wiring",
           }
 
+          def expression(value):
+              return "$" + "{{ " + value + " }}"
+
           path = ".github/workflows/live-session.yml"
           encoded_path = urllib.parse.quote(path, safe="/")
           encoded_branch = urllib.parse.quote(branch, safe="")
@@ -48,7 +51,7 @@ jobs:
           text = base64.b64decode(source["content"]).decode("utf-8")
 
           summary = '''      - name: Show restored state summary
-                if: ${{ inputs.persist_state }}
+                if: __PERSIST__
                 run: |
                   if [ -f data/shared_state.sqlite ]; then
                       echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
@@ -56,18 +59,18 @@ jobs:
                   restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
                   echo "✓ Restored ${restored_sources} generated source file(s)"
 
-          '''
+          '''.replace("__PERSIST__", expression("inputs.persist_state"))
           if text.count(summary) != 1:
               raise SystemExit(f"expected one summary block, found {text.count(summary)}")
           text = text.replace(summary, "", 1)
 
           restore = '''      - name: Restore Munin durable files from last session
-                if: ${{ inputs.persist_state }}
+                if: __PERSIST__
                 id: state_restore
                 continue-on-error: true
                 env:
-                  GH_TOKEN: ${{ github.token }}
-                  MUNIN_RESTORE_ALLOWED_ACTORS: ${{ vars.MUNIN_RESTORE_ALLOWED_ACTORS || github.repository_owner }}
+                  GH_TOKEN: __TOKEN__
+                  MUNIN_RESTORE_ALLOWED_ACTORS: __ACTORS__
                 run: |
                   python3 scripts/restore_munin_artifact.py \\
                     --workflow live-session.yml \\
@@ -76,7 +79,14 @@ jobs:
                     --allowed-actor "$MUNIN_RESTORE_ALLOWED_ACTORS" \\
                     --destination "$GITHUB_WORKSPACE"
 
-          ''' + summary
+          '''
+          restore = restore.replace("__PERSIST__", expression("inputs.persist_state"))
+          restore = restore.replace("__TOKEN__", expression("github.token"))
+          restore = restore.replace(
+              "__ACTORS__",
+              expression("vars.MUNIN_RESTORE_ALLOWED_ACTORS || github.repository_owner"),
+          )
+          restore += summary
 
           marker = "          poetry --version\n\n      - name: Verify offensive toolchain is present\n"
           if text.count(marker) != 1:
@@ -90,6 +100,8 @@ jobs:
               raise SystemExit("dawidd6 reference remains")
           if text.count("scripts/restore_munin_artifact.py") != 1:
               raise SystemExit("first-party restore step was not inserted exactly once")
+          if token in text:
+              raise SystemExit("token material appeared in generated workflow")
 
           body = json.dumps({"content": text, "encoding": "utf-8"}).encode()
           request = urllib.request.Request(
