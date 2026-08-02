@@ -4,6 +4,22 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-02 — CI/CD cleanup + Turso reset covers all tables
+
+- Deleted temporary `prepare-*` workflows (one-off maintenance artifacts) from
+  their orphaned remote branches: `origin/maintenance/pr13-review-fixes-build`
+  and `origin/agent/live-command-output-stream`. Only the 4 real workflows
+  remain on `main`: `ci.yml`, `live-session.yml`, `reset-turso-state.yml`,
+  `valravn-smoke.yml`.
+- `scripts/reset_turso_state.py` now discovers every table in the configured
+  Turso database dynamically instead of a hard-coded list, so the reset also
+  wipes the newer operational tables (conversations, conversation_messages,
+  conversation_artifacts, provider_profiles, users, auth_sessions, messages,
+  agent_runs, run_events, goals, timers, audit_events, operation_snapshots,
+  run_guidance_queue, conversation_broadcasts, todo_events, workflow_registry,
+  agent_registry, _sync_*) while preserving `schema_migrations`. A manual
+  `reset-turso-state` run now leaves the remote clean for the next execution.
+
 ## 2026-08-02 — Beast doctrine: command is authorization, dogma "Пусть мир горит"
 
 Doctrinal shift from corporate scope-limitation language to APT operational

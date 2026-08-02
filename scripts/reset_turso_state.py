@@ -2,6 +2,12 @@
 
 Schema remains intact. The script refuses local SQLite and requires the exact
 confirmation phrase so it is safe to keep as a GitHub Actions maintenance job.
+
+Every table in the configured database is wiped (discovered dynamically, so
+new tables added by later features — conversations, production suite, autonomy
+registries, ... — are covered without maintaining a hard-coded list), except
+the ``schema_migrations`` bookkeeping table whose rows track applied
+migrations.
 """
 
 from __future__ import annotations
@@ -13,18 +19,14 @@ from munin.mcp.config import get_settings
 from munin.mcp.shared_state import SharedStateStore
 
 CONFIRMATION = "WIPE_MUNIN_TURSO"
-TABLES = (
-    "agent_messages",
-    "agent_presence",
-    "active_tasks",
-    "agent_wake_queue",
-    "shared_intel",
-    "episodic",
-    "semantic",
-    "procedural",
-    "generated_graphs",
-    "runtime_cache",
-)
+PRESERVED_TABLES = {"schema_migrations"}
+
+
+def _table_names(conn: Any) -> list[str]:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
 def _count(conn: Any, table: str) -> int:
@@ -40,7 +42,9 @@ def reset_remote_state() -> dict[str, int]:
     state = SharedStateStore(settings)
     removed: dict[str, int] = {}
     with state._connect(authoritative=True) as conn:  # remote autocommit connection by design
-        for table in TABLES:
+        for table in _table_names(conn):
+            if table in PRESERVED_TABLES:
+                continue
             removed[table] = _count(conn, table)
             conn.execute(f"DELETE FROM {table}")
     return removed
