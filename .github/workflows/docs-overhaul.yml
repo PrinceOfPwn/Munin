@@ -1,0 +1,920 @@
+name: Documentation overhaul
+
+on:
+  push:
+    branches: [agent/refresh-readme-branding]
+    paths: [.github/workflows/docs-overhaul.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  rewrite-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/refresh-readme-branding
+          fetch-depth: 0
+      - name: Rewrite and translate documentation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          files = {}
+
+          files['AGENTS.md'] = r'''# Working on Munin
+
+This file is for coding agents and contributors working on `PrinceOfPwn/Munin`.
+It describes the repository as it exists in v1.0.0; it is not an instruction to
+run the CTF-oriented prompts in `soul/` as a default personality.
+
+## Project contract
+
+Munin is a durable, operator-governed runtime for autonomous security
+operations. The server owns identity, policy, approvals, state and capability
+composition. The web GUI, MCP and Discord are control surfaces over the same
+runtime.
+
+The configuration tested for **v1.0.0** is:
+
+- Web GUI
+- GitHub Actions execution environment
+- MiMo V2.5
+
+Other combinations may work, but they are not part of the verified v1.0.0
+matrix unless documented.
+
+## Repository map
+
+```text
+app/                    Next.js 15 / React 18 / TypeScript web GUI
+munin/                  Python 3.11+ backend and runtime
+  core/                 prompting, model integration and autonomy contracts
+  production/           ASGI API, durable chat, runs, events and recovery
+  mcp/                  MCP transport and native capabilities
+  valravn/              external reconnaissance and CTI mesh
+soul/                   optional, human-governed persona packages
+scripts/                operational and maintenance scripts
+docs/                   canonical documentation and translations
+tests/                  backend and integration tests
+.github/workflows/       CI, verified runner path and operational workflows
+```
+
+## Rules for changes
+
+1. Read the live code before trusting a static capability list.
+2. Keep authority server-side. A UI, skill or prompt must never bypass policy.
+3. Preserve the separation between checkpoints, event history and artifacts.
+4. Treat `soul/` as optional characterization. The bundled Soul is specialized
+   for CTF/lab scenarios and is not the recommended production default.
+5. Do not claim a model or deployment is verified unless it is in the documented
+   compatibility matrix.
+6. Update documentation when behavior, interfaces, storage or workflows change.
+
+## Validation
+
+```bash
+poetry run pytest
+cd app && npm run build
+```
+
+CI is the authoritative integration environment. Local validation is useful,
+but the v1.0.0 verified path is the GUI on GitHub Actions with MiMo V2.5.
+
+## Documentation
+
+Start at [docs/README.md](docs/README.md). Architecture is defined in
+[ARCHITECTURE.md](ARCHITECTURE.md), and the current system inventory is in
+[MAP.md](MAP.md).
+'''
+
+          files['MAP.md'] = r'''# Munin system map
+
+This is the current v1.0.0 map. Runtime discovery remains authoritative for
+exact tools, schemas and enabled providers.
+
+```mermaid
+flowchart TB
+  subgraph Clients
+    GUI[Next.js 15 Web GUI]
+    MCPClient[MCP client]
+    Discord[Discord adapter]
+  end
+  subgraph Control[Munin control plane]
+    API[FastAPI /api]
+    MCP[MCP /mcp]
+    Auth[Identity and authentication]
+    Policy[Policy and approvals]
+    Chat[Durable chat supervisor]
+  end
+  subgraph Runtime
+    Graph[Deep Agents + LangGraph]
+    Registry[Live capability registry]
+    Specialists[Bounded specialists]
+    Generated[Generated gen__ capabilities]
+  end
+  subgraph Data
+    Hot[Hot SQLite store]
+    Checkpoints[LangGraph checkpoints]
+    Archive[Optional libSQL / Turso archive]
+    Artifacts[Reports and evidence]
+  end
+  subgraph Knowledge
+    Hugin[Hugin knowledge graph]
+    Valravn[Valravn reconnaissance mesh]
+  end
+
+  GUI --> API --> Auth --> Policy --> Chat --> Graph
+  MCPClient --> MCP --> Auth
+  Discord --> Chat
+  Graph <--> Registry
+  Registry --> Specialists
+  Registry --> Generated
+  Graph --> Hot
+  Graph --> Checkpoints
+  Hot --> Archive
+  Hot --> Artifacts
+  Hugin --> Graph
+  Valravn --> Registry
+```
+
+## Control surfaces
+
+| Surface | Role |
+| --- | --- |
+| Web GUI | Full operator timeline, conversations, approvals and artifacts |
+| `/api/*` | Authenticated programmatic API for the GUI and integrations |
+| `/mcp/` | Streamable MCP discovery and invocation under server policy |
+| Discord | Optional remote window into the same server-owned operation |
+
+## Runtime invariants
+
+- The server, not the client, owns policy and authority.
+- A disconnect does not erase or duplicate a server-side run.
+- Replay reads durable events; it does not regenerate history with the model.
+- Human approval is bound to one exact action and argument set.
+- Checkpoints preserve executable graph state; events preserve the audit story.
+- Skills and Hugin provide context, not permission or executable authority.
+- The CTF Soul is optional and not a default deployment profile.
+
+## Verified v1.0.0 path
+
+```mermaid
+flowchart LR
+  Operator --> GUI[Web GUI]
+  GUI --> Actions[GitHub Actions runner]
+  Actions --> Munin[Munin v1.0.0]
+  Munin --> MiMo[MiMo V2.5]
+```
+'''
+
+          files['ARCHITECTURE.md'] = r'''# Munin architecture
+
+Munin is a single governed runtime with multiple control surfaces. Identity,
+policy, approvals, durable state and capability composition remain server-side.
+
+## Layers
+
+| Layer | Responsibility |
+| --- | --- |
+| Interfaces | GUI, API, MCP and optional Discord presentation |
+| Control plane | Authentication, scope, policy, approvals and run ownership |
+| Agent runtime | Deep Agents/LangGraph execution, delegation and tool calling |
+| Capability plane | Native tools, Valravn, reviewed skills and `gen__*` tools |
+| State plane | Conversations, runs, events, checkpoints and artifacts |
+| Knowledge plane | Hugin and source-attributed external research |
+
+## Run lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running: lease claimed
+  running --> waiting_for_human: exact action interrupted
+  waiting_for_human --> running: approved
+  waiting_for_human --> cancelled: rejected or expired
+  running --> completed
+  running --> failed
+  running --> cancelled
+  failed --> queued: recoverable lease/checkpoint
+```
+
+Each conversation has a stable LangGraph thread. Renewable leases fence
+executors, durable events support replay, and checkpoints support executable
+recovery. A pending approval is never automatically executed by recovery.
+
+## State separation
+
+| Mechanism | Preserves |
+| --- | --- |
+| Hot store | Conversations, messages, runs, events, calls, approvals and artifacts |
+| Checkpoint store | Executable LangGraph state for the stable thread |
+| Archive | Optional long-lived mirrored records through libSQL/Turso |
+| Context compaction | Smaller model input, not the audit history |
+
+## Capability model
+
+The live registry is assembled at runtime. Native capabilities, generated
+`gen__*` tools and bounded specialists must pass the same policy boundary.
+A file on disk, a skill, a Hugin result or a Soul instruction does not grant
+authority.
+
+## Soul model
+
+The bundled `soul/*.md` files are a specific experimental characterization for
+CTFs and controlled labs. They are not the expected default for production,
+defensive or enterprise deployments. Soul changes are proposed through the
+human-governed Soul tools and reviewed before adoption.
+
+## Compatibility
+
+The tested v1.0.0 configuration is Web GUI + GitHub Actions + MiMo V2.5.
+Provider-compatible endpoints and other deployment targets may work but remain
+unverified until added to the compatibility documentation.
+'''
+
+          files['docs/README.md'] = r'''# Munin documentation
+
+Choose a language:
+
+- [English handbook](en/handbook.md)
+- [Manual en español](es/handbook.md)
+- [Manual em português do Brasil](pt-BR/handbook.md)
+- [简体中文手册](zh-CN/handbook.md)
+
+## Canonical technical references
+
+The following English documents are maintained close to the implementation:
+
+- [Runtime architecture](architecture.md)
+- [Persistence and recovery](architecture-persistence.md)
+- [System guide](munin-system-guide.md)
+- [Operator guide](operator-guide.md)
+- [Capabilities](tools_reference.md)
+- [Model providers](llm-providers.md)
+- [Security boundaries](security-notes.md)
+- [GitHub Actions](github-actions-tutorial.md)
+- [Valravn](VALRAVN.md)
+- [Soul profiles](SOUL.md)
+
+The four handbooks contain the complete user-facing documentation in each
+language. The technical references are the canonical low-level contract.
+'''
+
+          files['docs/architecture.md'] = r'''# Runtime architecture
+
+`munin serve` hosts the authenticated API, streamable MCP endpoint and optional
+Discord adapter. All surfaces share one policy, identity, persistence and
+capability boundary.
+
+## Execution path
+
+1. The server authenticates the actor and resolves the conversation.
+2. It creates or reuses an idempotent run and claims a renewable lease.
+3. The supervisor loads the stable LangGraph thread, evidence and live registry.
+4. Model, activity, tool, artifact and approval events are persisted and streamed.
+5. Completion, failure, cancellation or interruption updates durable run state.
+6. Reconnecting clients replay the event log without repeating model work.
+
+## Control surfaces
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/api/*` | GUI and authenticated application operations |
+| `/api/chat/{conversation_id}/stream` | Durable event replay and live follow |
+| `/api/human-requests/{id}/resolve` | Resolve one exact persisted request |
+| `/mcp/` | Discover and invoke the live MCP capability surface |
+
+## Operation modes
+
+Standard, YOLO, GOAL and BEAST change autonomy budgets and approval behavior.
+They do not remove the critical approval floor, audit, secret redaction or
+server-side policy.
+
+## Observability
+
+Munin stores final text, provider-emitted reasoning, operational activity, tool
+lifecycle, specialist activity, artifacts, approvals and terminal state as
+separate event families. It does not fabricate hidden chain of thought.
+'''
+
+          files['docs/architecture-persistence.md'] = r'''# Persistence and recovery
+
+Munin requires three forms of continuity:
+
+| Store | Purpose |
+| --- | --- |
+| Hot application store | Accounts, conversations, runs, events, calls and approvals |
+| LangGraph checkpoint store | Executable state for a stable conversation thread |
+| Optional durable archive | Long-lived mirrored records through libSQL/Turso |
+
+A reconnect reads events. A process recovery restores executable state from a
+checkpoint. These are different mechanisms and both must be persisted.
+
+## Recovery rules
+
+- Expired leases fence lost executors.
+- Recoverable runs reuse the same conversation thread.
+- Completed calls must not be duplicated.
+- `waiting_for_human` runs remain paused until an authenticated decision.
+- A missing store degrades the associated guarantee and must be reported.
+
+## Deployment
+
+Persist the hot database and checkpoint database on durable storage. Keep
+provider tokens in the platform secret manager. Do not assume an ephemeral
+GitHub Actions filesystem is durable without artifacts or remote storage.
+'''
+
+          files['docs/munin-system-guide.md'] = r'''# Munin system guide
+
+## Start an operation
+
+Provide an objective, explicit authorized scope, expected evidence and the
+autonomy mode. The server creates or resumes a stable conversation.
+
+## Follow progress
+
+Use the GUI timeline for the richest view. MCP and Discord access the same
+server-owned run. Activity, tools, artifacts and approvals are independent
+events rather than one reconstructed status message.
+
+## Human approval
+
+A sensitive call pauses with its exact capability and arguments. Approval
+resumes that action. Rejection or expiry closes it. Approval cannot be reused
+for another run or modified call.
+
+## Evidence
+
+High-confidence conclusions should reference tool output, provider attribution,
+retrieval time and artifacts. Hugin and Valravn observations remain external
+research until validated for the authorized target.
+
+## Soul
+
+The included Soul is CTF-oriented characterization. Use a neutral or
+organization-specific Soul for normal deployments, and change it through the
+reviewed Soul proposal workflow.
+'''
+
+          files['docs/operator-guide.md'] = r'''# Operator guide
+
+## Before starting
+
+- Confirm written authorization and target boundaries.
+- Verify `/health`, authentication and origin policy.
+- Test one structured tool-call round trip with the selected model.
+- Inspect the live registry rather than a copied capability list.
+- Confirm persistent hot and checkpoint storage.
+- Define who can approve, reject and cancel actions.
+
+## Verified v1.0.0 configuration
+
+Web GUI + GitHub Actions + MiMo V2.5 is the tested configuration. Treat other
+models and deployment targets as experimental until validated.
+
+## During an operation
+
+Watch the event timeline, evidence and pending approvals. Cancel the run if the
+scope changes, credentials are exposed, routing is unsafe or results contradict
+the expected environment.
+
+## Recovery
+
+After a process loss, verify lease expiry, checkpoint availability and replayed
+events before allowing additional execution. Pending approvals must remain
+paused.
+
+## Production notes
+
+Use durable storage, a protected reverse proxy, strict origins, strong tokens,
+secret management and retention policies. Do not deploy the bundled CTF Soul as
+a production default.
+'''
+
+          files['docs/tools_reference.md'] = r'''# Capability reference
+
+The live MCP catalogue is authoritative. Names and availability can vary by
+configuration.
+
+## Capability families
+
+| Family | Purpose |
+| --- | --- |
+| Conversation and production | Durable conversations, runs, events and artifacts |
+| Reconnaissance | Network, web and service observation under OPSEC controls |
+| Intelligence | CVE, package, source and campaign enrichment |
+| Valravn | IOC, organization, asset, historical-web and network investigation |
+| Hugin | Passive source-linked knowledge retrieval and planning context |
+| Memory and coordination | Semantic memory, shared intelligence, tasks and messages |
+| Autonomy kernel | Create, inspect and invoke tools, agents and workflows |
+| Generated capabilities | Reviewed `gen__*` tools and specialist graphs |
+| Soul | List, read and propose human-reviewed profile changes |
+| Diagnostics | Health, capability discovery and operational status |
+
+## Authority
+
+Discovery is not permission. Every invocation remains subject to actor identity,
+scope, policy, approval class and runtime state. Skills, Soul files and Hugin
+content do not automatically gain tool access.
+'''
+
+          files['docs/llm-providers.md'] = r'''# Model provider contract
+
+Munin expects an OpenAI-compatible chat endpoint with reliable structured tool
+calling and streaming behavior.
+
+## Required behavior
+
+- Stable authentication and HTTPS outside loopback.
+- Structured tool calls with valid names and JSON arguments.
+- Streaming that preserves final text and, when provided, explicit reasoning.
+- Predictable cancellation and timeout behavior.
+- Context capacity appropriate for the configured operation mode.
+
+## Compatibility status
+
+The verified v1.0.0 model path is **MiMo V2.5** through the Web GUI on GitHub
+Actions. Other OpenAI-compatible providers may work but are not verified merely
+because a basic completion succeeds.
+
+Validate a full loop: model response, tool call, tool result, follow-up response,
+stream replay and interruption handling.
+'''
+
+          files['docs/security-notes.md'] = r'''# Security boundaries
+
+Munin is for authorized security work. Technical access does not establish
+permission.
+
+## Trust boundaries
+
+- The server owns authentication, scope, policy and approvals.
+- Client state and static prompts are not authoritative.
+- External web pages, provider output, Hugin cards and threat reports are
+  untrusted data and may contain prompt injection.
+- Generated capabilities require contract validation, registration and policy.
+- Secrets must be redacted from events and stored outside the repository.
+
+## Human-in-the-loop
+
+Approval is bound to one actor, run, capability, argument set and expiry.
+Pending approvals are not resumed automatically after recovery.
+
+## Soul warning
+
+The bundled Soul uses aggressive campaign language for CTF/lab experiments.
+It is not a security boundary and is not the recommended default. Use the Soul
+proposal tools and human review for changes.
+
+## Licensing
+
+Munin is source-available under PolyForm Noncommercial 1.0.0. Commercial use
+requires a separate license.
+'''
+
+          files['docs/github-actions-tutorial.md'] = r'''# GitHub Actions deployment path
+
+GitHub Actions is the verified execution environment for Munin v1.0.0 when used
+with the Web GUI and MiMo V2.5.
+
+## What the runner provides
+
+- Reproducible dependency installation.
+- Unified `munin serve` runtime.
+- Web GUI build and temporary access path.
+- CI validation and optional artifact-based state transfer.
+
+## What it does not provide automatically
+
+- Permanent storage on the ephemeral filesystem.
+- Authorization for any target.
+- A production-grade public perimeter.
+- Verification of models other than the documented compatibility path.
+
+Use repository/environment secrets, persist hot and checkpoint databases via
+approved storage, restrict tunnel exposure and stop temporary sessions when the
+operation ends.
+'''
+
+          files['docs/VALRAVN.md'] = r'''# Valravn
+
+Valravn is Munin's external reconnaissance and threat-intelligence mesh. It
+normalizes provider-specific observations into source-attributed evidence.
+
+## Investigation families
+
+- IOC and malware enrichment.
+- Organization exposure and ransomware context.
+- Internet asset search.
+- CVE, KEV and EPSS investigation.
+- ASN, routing and RPKI context.
+- Historical web and URL investigation.
+- Dark-web index search.
+- Browser evidence capture and translation.
+
+## Evidence discipline
+
+Retain provider, retrieval time, original URL, first/last seen, confidence,
+contradictions and failures. Provider observations are not automatically Munin
+conclusions.
+
+## Authority
+
+Valravn availability never grants permission for active operations. Scope,
+policy and approvals remain controlled by Munin.
+'''
+
+          files['docs/SOUL.md'] = r'''# Soul profiles
+
+`soul/` contains human-editable characterization and operating preferences.
+It does not define server authority.
+
+## Bundled profile
+
+The current bundled prompts are a **specific experimental characterization for
+CTFs, labs and controlled simulations**. The war-raven language, campaign
+metaphors and Chinese internal coordination style are not expected to be used by
+default in general, defensive, enterprise or production deployments.
+
+## Governance
+
+Use `soul_list` and `soul_read` to inspect the profile. Use
+`soul_propose_edit` to create a reviewable proposal. A human must review and
+version the change before it becomes an accepted profile.
+
+A Soul instruction cannot expand authorization, bypass policy, grant tools or
+replace evidence.
+'''
+
+          handbooks = {
+          'en': r'''# Munin complete handbook
+
+[Español](../es/handbook.md) · [Português BR](../pt-BR/handbook.md) · [简体中文](../zh-CN/handbook.md)
+
+## Overview
+
+Munin is a durable, operator-governed runtime for autonomous security
+operations. It combines a Web GUI, authenticated API, MCP, optional Discord,
+LangGraph execution, durable events, checkpoints, human approvals, live
+capability composition, Hugin knowledge and Valravn reconnaissance.
+
+The verified v1.0.0 configuration is **Web GUI + GitHub Actions + MiMo V2.5**.
+Other models and deployments may work but are experimental until documented.
+
+## Core model
+
+Munin separates knowledge, authority, execution and evidence. Knowledge can
+suggest a path; only server policy and operator scope authorize execution.
+Tools execute work; events and artifacts preserve what happened.
+
+```mermaid
+flowchart LR
+  Scope[Operator scope] --> Munin
+  Hugin[Hugin knowledge] --> Munin
+  Valravn[Valravn observations] --> Munin
+  Munin --> Runtime[LangGraph runtime]
+  Runtime --> Evidence[Events and artifacts]
+  Runtime --> Approval[Human approval]
+  Approval --> Runtime
+```
+
+## Interfaces
+
+The Web GUI is the primary v1.0.0 interface. `/api/*` serves authenticated
+application operations. `/mcp/` exposes live capabilities. Discord is an
+optional view into the same server-owned run. None is a separate authority.
+
+## Runs and recovery
+
+A conversation owns a stable thread. A run holds a renewable lease. Events are
+append-oriented and replayable. Checkpoints preserve executable graph state.
+After process loss, a safe recovery can resume the exact thread without asking
+the model to recreate history. Pending human requests stay paused.
+
+## Modes
+
+- **Standard:** per-action approvals.
+- **YOLO:** fewer routine approvals inside trusted scope; critical controls stay.
+- **GOAL:** durable objective and TODO state.
+- **BEAST:** deeper planning and delegation with larger guarded budgets.
+
+Modes do not remove audit, critical approval, secret redaction or server policy.
+
+## Capabilities
+
+The live registry can include native tools, Valravn, reviewed skills, bounded
+specialists, autonomy-kernel tools and generated `gen__*` capabilities. Runtime
+discovery is authoritative. A skill or file does not become executable simply
+because it exists.
+
+## Hugin and Valravn
+
+Hugin provides passive, source-linked security knowledge. Valravn collects
+external IOC, CVE, asset, historical-web, routing, dark-web and browser evidence.
+Both are untrusted research inputs until validated for the authorized target.
+
+## Soul
+
+The bundled Soul is a specialized CTF/lab characterization. It is not the
+recommended default. Production and defensive users should adopt a neutral or
+organization-specific profile through the human-reviewed Soul proposal flow.
+Soul never grants authorization.
+
+## Operating checklist
+
+1. Confirm written authorization and scope.
+2. Validate health, authentication and allowed origins.
+3. Test a complete structured tool-call loop.
+4. Inspect the live capability registry.
+5. Persist hot and checkpoint storage.
+6. Define approvers and cancellation authority.
+7. Review evidence and exact tool arguments throughout the run.
+
+## Deployment
+
+For v1.0.0, the tested path is the Web GUI on GitHub Actions with MiMo V2.5.
+Ephemeral runners require explicit persistence through artifacts or remote
+storage. Production deployments need durable volumes, protected ingress,
+strong secrets, strict origins and retention controls.
+
+## Licensing
+
+Munin uses PolyForm Noncommercial 1.0.0. Noncommercial research and study are
+permitted under the license. Commercial products, services, consulting and
+internal commercial applications require a separate license.
+
+**Знание переживает битву.** — Knowledge outlives the battle.
+''',
+          'es': r'''# Manual completo de Munin
+
+[English](../en/handbook.md) · [Português BR](../pt-BR/handbook.md) · [简体中文](../zh-CN/handbook.md)
+
+## Descripción general
+
+Munin es un runtime durable y gobernado por operadores para operaciones
+autónomas de seguridad. Integra GUI web, API autenticada, MCP, Discord opcional,
+ejecución LangGraph, eventos persistentes, checkpoints, aprobaciones humanas,
+composición viva de capacidades, conocimiento Hugin y reconocimiento Valravn.
+
+La configuración verificada de v1.0.0 es **GUI web + GitHub Actions + MiMo V2.5**.
+Otras combinaciones pueden funcionar, pero son experimentales hasta documentarse.
+
+## Modelo central
+
+Munin separa conocimiento, autoridad, ejecución y evidencia. El conocimiento
+puede sugerir una ruta; solo la política del servidor y el alcance del operador
+autorizan la ejecución. Las tools actúan; los eventos y artefactos preservan lo
+ocurrido.
+
+## Interfaces
+
+La GUI web es la interfaz principal de v1.0.0. `/api/*` expone operaciones
+autenticadas, `/mcp/` publica capacidades vivas y Discord es una ventana opcional
+a la misma operación. Ninguna interfaz crea autoridad propia.
+
+## Runs y recuperación
+
+Cada conversación mantiene un thread estable. Los runs usan leases renovables.
+Los eventos son reproducibles y los checkpoints conservan el estado ejecutable.
+Tras una caída, la recuperación segura retoma el mismo thread sin regenerar la
+historia. Las aprobaciones pendientes permanecen pausadas.
+
+## Modos
+
+- **Standard:** aprobación por acción.
+- **YOLO:** menos aprobaciones rutinarias dentro de alcance confiable.
+- **GOAL:** objetivo y TODO durables.
+- **BEAST:** planificación profunda y delegación con presupuestos controlados.
+
+Los modos no eliminan auditoría, aprobación crítica, redacción de secretos ni
+política del servidor.
+
+## Capacidades
+
+El registro vivo puede incluir tools nativas, Valravn, skills revisadas,
+especialistas acotados, herramientas del autonomy kernel y capacidades `gen__*`.
+El descubrimiento en runtime es autoritativo. Un archivo o skill no se vuelve
+ejecutable por existir.
+
+## Hugin y Valravn
+
+Hugin aporta conocimiento pasivo con fuentes. Valravn recolecta evidencia IOC,
+CVE, activos, web histórica, routing, dark web y navegador. Ambos son inputs
+externos no confiables hasta validarse contra el objetivo autorizado.
+
+## Soul
+
+La Soul incluida es una caracterización específica para CTF y laboratorios. No
+es el default recomendado. Producción y defensa deberían usar un perfil neutral
+o propio mediante el flujo `soul_propose_edit` con revisión humana. Soul nunca
+concede autorización.
+
+## Checklist operativo
+
+1. Confirmar autorización escrita y alcance.
+2. Validar salud, autenticación y orígenes.
+3. Probar un ciclo completo de tool calling.
+4. Inspeccionar el registro vivo.
+5. Persistir la base activa y checkpoints.
+6. Definir aprobadores y autoridad de cancelación.
+7. Revisar evidencia, tool y argumentos durante toda la operación.
+
+## Despliegue
+
+El camino verificado es GUI web en GitHub Actions con MiMo V2.5. Los runners
+efímeros requieren persistencia explícita. Producción necesita volúmenes
+durables, ingreso protegido, secretos fuertes y políticas de retención.
+
+## Licencia
+
+Munin usa PolyForm Noncommercial 1.0.0. Investigación y estudio no comercial
+están permitidos; productos, servicios, consultoría y aplicaciones comerciales
+internas requieren una licencia separada.
+
+**Знание переживает битву.** — El conocimiento sobrevive a la batalla.
+''',
+          'pt-BR': r'''# Manual completo do Munin
+
+[English](../en/handbook.md) · [Español](../es/handbook.md) · [简体中文](../zh-CN/handbook.md)
+
+## Visão geral
+
+Munin é um runtime durável e governado por operadores para operações autônomas
+de segurança. Ele reúne GUI web, API autenticada, MCP, Discord opcional,
+LangGraph, eventos persistentes, checkpoints, aprovações humanas, composição de
+capacidades, conhecimento Hugin e reconhecimento Valravn.
+
+A configuração verificada da v1.0.0 é **GUI web + GitHub Actions + MiMo V2.5**.
+Outras combinações podem funcionar, mas são experimentais até serem documentadas.
+
+## Modelo central
+
+Munin separa conhecimento, autoridade, execução e evidência. Conhecimento pode
+sugerir um caminho; somente a política do servidor e o escopo do operador
+autorizam execução. Tools executam; eventos e artefatos preservam o ocorrido.
+
+## Interfaces
+
+A GUI web é a interface principal da v1.0.0. `/api/*` oferece operações
+autenticadas, `/mcp/` expõe capacidades vivas e Discord é uma janela opcional
+para a mesma operação. Nenhuma interface possui autoridade independente.
+
+## Runs e recuperação
+
+Cada conversa mantém uma thread estável. Runs usam leases renováveis. Eventos
+são reproduzíveis e checkpoints preservam estado executável. Após uma falha, a
+recuperação segura retoma a mesma thread sem regenerar o histórico. Aprovações
+pendentes continuam pausadas.
+
+## Modos
+
+- **Standard:** aprovação por ação.
+- **YOLO:** menos aprovações rotineiras em escopo confiável.
+- **GOAL:** objetivo e TODO duráveis.
+- **BEAST:** planejamento profundo e delegação com orçamento controlado.
+
+Os modos não removem auditoria, aprovação crítica, redação de segredos ou
+política do servidor.
+
+## Capacidades
+
+O registro vivo pode conter tools nativas, Valravn, skills revisadas,
+especialistas limitados, autonomy kernel e capacidades `gen__*`. A descoberta
+em runtime é a fonte autoritativa. Um arquivo ou skill não se torna executável
+simplesmente por existir.
+
+## Hugin e Valravn
+
+Hugin fornece conhecimento passivo com fontes. Valravn coleta evidências de IOC,
+CVE, ativos, web histórica, roteamento, dark web e navegador. Ambos são dados
+externos não confiáveis até validação no alvo autorizado.
+
+## Soul
+
+A Soul incluída é uma caracterização específica para CTFs e laboratórios. Não é
+o padrão recomendado. Produção e defesa devem usar perfil neutro ou próprio por
+meio de `soul_propose_edit` e revisão humana. Soul nunca concede autorização.
+
+## Checklist operacional
+
+1. Confirmar autorização escrita e escopo.
+2. Validar saúde, autenticação e origens.
+3. Testar um ciclo completo de tool calling.
+4. Inspecionar o registro vivo.
+5. Persistir banco ativo e checkpoints.
+6. Definir aprovadores e autoridade de cancelamento.
+7. Revisar evidências, tools e argumentos durante a operação.
+
+## Implantação
+
+O caminho verificado é GUI web no GitHub Actions com MiMo V2.5. Runners efêmeros
+exigem persistência explícita. Produção precisa de volumes duráveis, ingresso
+protegido, segredos fortes e políticas de retenção.
+
+## Licença
+
+Munin usa PolyForm Noncommercial 1.0.0. Pesquisa e estudo não comerciais são
+permitidos; produtos, serviços, consultoria e aplicações comerciais internas
+exigem licença separada.
+
+**Знание переживает битву.** — O conhecimento sobrevive à batalha.
+''',
+          'zh-CN': r'''# Munin 完整手册
+
+[English](../en/handbook.md) · [Español](../es/handbook.md) · [Português BR](../pt-BR/handbook.md)
+
+## 概览
+
+Munin 是一个由操作员治理、面向自主安全行动的持久化运行时。它整合 Web GUI、认证 API、
+MCP、可选 Discord、LangGraph 执行、持久化事件、checkpoint、人工审批、实时能力组合、
+Hugin 知识和 Valravn 侦察。
+
+v1.0.0 的已验证配置是 **Web GUI + GitHub Actions + MiMo V2.5**。其他组合可能可用，
+但在明确记录之前均视为实验性配置。
+
+## 核心模型
+
+Munin 将知识、权限、执行和证据分离。知识可以建议路线；只有服务器策略和操作员范围能够
+授权执行。工具负责行动，事件和工件负责保存发生过的事实。
+
+## 接口
+
+Web GUI 是 v1.0.0 的主要界面。`/api/*` 提供认证操作，`/mcp/` 暴露实时能力，Discord
+是同一服务器运行的可选窗口。任何客户端都不拥有独立权限。
+
+## 运行与恢复
+
+每个会话拥有稳定 thread。运行使用可续租 lease。事件可重放，checkpoint 保存可执行状态。
+进程故障后，安全恢复会继续同一 thread，而不是让模型重建历史。待审批操作保持暂停。
+
+## 模式
+
+- **Standard：** 每个操作单独审批。
+- **YOLO：** 在可信范围内减少常规审批。
+- **GOAL：** 持久化目标与 TODO。
+- **BEAST：** 更深规划与受控预算的专家委派。
+
+所有模式都保留审计、关键审批、秘密脱敏和服务器策略。
+
+## 能力
+
+实时注册表可以包含原生工具、Valravn、已审核 skill、受限专家、autonomy kernel 和
+`gen__*` 能力。运行时发现是权威来源。文件或 skill 不会因为存在而自动获得执行权限。
+
+## Hugin 与 Valravn
+
+Hugin 提供带来源的被动知识。Valravn 收集 IOC、CVE、资产、历史 Web、路由、暗网和浏览器
+证据。两者在针对已授权目标完成验证前都属于不可信外部输入。
+
+## Soul
+
+仓库内 Soul 是针对 CTF 和实验室的特定角色化配置，不是推荐默认值。生产和防御环境应通过
+`soul_propose_edit` 与人工审核采用中性或组织专属配置。Soul 永远不能授予权限。
+
+## 操作检查表
+
+1. 确认书面授权与范围。
+2. 验证健康状态、认证和允许的来源。
+3. 测试完整的结构化工具调用闭环。
+4. 检查实时能力注册表。
+5. 持久化热数据库与 checkpoint。
+6. 定义审批者与取消权限。
+7. 在整个行动中审查证据、工具和参数。
+
+## 部署
+
+已验证路径是 GitHub Actions 上的 Web GUI 与 MiMo V2.5。临时 runner 需要显式持久化。
+生产环境需要持久卷、受保护入口、强秘密和保留策略。
+
+## 许可证
+
+Munin 使用 PolyForm Noncommercial 1.0.0。许可范围内的非商业研究和学习可以进行；
+商业产品、服务、咨询和内部商业应用需要单独许可证。
+
+**Знание переживает битву.** — 知识超越战场，历久弥存。
+'''
+          }
+
+          for lang, text in handbooks.items():
+              files[f'docs/{lang}/handbook.md'] = text
+
+          for path, content in files.items():
+              p = Path(path)
+              p.parent.mkdir(parents=True, exist_ok=True)
+              p.write_text(content.strip() + '\n', encoding='utf-8')
+
+          workflow = Path('.github/workflows/docs-overhaul.yml')
+          if workflow.exists():
+              workflow.unlink()
+          PY
+      - name: Commit documentation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: align and translate complete project documentation"
+          git push origin HEAD:agent/refresh-readme-branding
