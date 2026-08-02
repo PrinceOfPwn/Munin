@@ -6,6 +6,24 @@ documented in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md) and
 
 ## Current release
 
+### Operation modes and doctrine (2026-08-02)
+
+- Four autonomy contracts over the same supervised loop: **Standard**
+  (per-action approvals), **YOLO** (no approvals except admin/critical),
+  **GOAL** (persistent durable objective + TODO plan), **BEAST** (deep
+  planning + delegation with explicit scope and raised budgets).
+- Operational doctrine "the order is the authorization" (命令即授权): giving
+  Munin an objective makes it the campaign scope; success criteria are
+  self-appointed and the campaign presses until met or proven unreachable.
+  Internal reasoning runs in Chinese; all code and technical artifacts are
+  written in idiomatic English.
+- Valravn external reconnaissance mesh (`valravn_*` tools): IOC/CVE
+  enrichment, asset search, historical-web pivots, routing/RPKI, dark-web
+  search and browser evidence capture.
+- Turso reset (`reset-turso-state.yml`) wipes all operational tables
+  dynamically — including Production Suite and autonomy registries — while
+  preserving the schema.
+
 ### Durable agent runtime
 
 - Deep Agents and LangGraph provide a stable conversation thread, checkpointed
