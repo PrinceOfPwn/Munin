@@ -11,7 +11,7 @@ Valravn is Munin's default external reconnaissance and threat-intelligence mesh.
 - Use `valravn_investigate_cve` for KEV, EPSS, affected-product, exploit-reference, and exposed-asset context. Never execute a public exploit merely because Valravn found it.
 - Use `valravn_investigate_network` for ASN, prefix, BGP, RPKI, outage, or route-anomaly questions.
 - Use `valravn_search_historical_web` to recover archived URLs, JavaScript, endpoints, and removed references.
-- Use `valravn_investigate_url` before directly opening a suspicious URL. Submit new scans only when the operator has enabled submissions and the URL is safe to disclose to that provider.
+- Use `valravn_investigate_url` before directly opening a suspicious URL; it is strictly passive. Use the active `valravn_submit_url` only when the operator has enabled submissions and approved the disclosure of that URL to the provider.
 - Use `valravn_validate_asset` only when a critical conclusion needs additional corroboration; it may consume scarce provider credits.
 - Use `valravn_search_darkweb` for indexed onion references. Treat `*.onion.pet` as a third-party read-only gateway, not anonymous Tor.
 - Use `valravn_capture_web_evidence` for passive screenshots and bounded extraction. Never enter credentials, upload files, accept downloads, or authenticate through a Tor2Web gateway.

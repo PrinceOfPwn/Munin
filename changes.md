@@ -4,6 +4,32 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-02 ART — Valravn reconnaissance mesh
+
+Adds Valravn (`munin/valravn/`), a native reconnaissance and external
+threat-intelligence capability mesh exposed as twelve `valravn_*` tools on the
+existing FastMCP singleton:
+
+- IOC, malware, ransomware, CVE/KEV/EPSS and exploit-reference enrichment;
+  Shodan/Censys/ZoomEye/Netlas/LeakIX asset search; RIPEstat routing and RPKI;
+  Wayback/Common Crawl/urlscan historical-web pivots; Cloudflare Radar outage
+  context; optional Safe Browsing (non-commercial), FullHunt (scarce), Ahmia
+  dark-web search through a read-only Tor2Web gateway, CloakBrowser evidence
+  capture and Google Cloud Translation.
+- Economic budgets per provider tier (`no_key`/`free_key`/`scarce`) with
+  quick/deep depth, TTL caching, SSRF guards (including RFC 6598 CGNAT space),
+  artifact confinement under the workspace, and partial-failure preservation
+  in every evidence envelope.
+- `valravn_investigate_url` is strictly passive; URL submissions moved to the
+  new active `valravn_submit_url` tool so external writes require approval.
+  Audit records now populate `target` for `indicator`/`organization`/`query`/
+  `resource`/`domain`/`cve_or_product` arguments.
+- Browser captures write unique per-capture artifact stems and translation
+  failures degrade to `translation_error` instead of discarding evidence.
+- Docs: `docs/VALRAVN.md`, `docs/valravn.env.example`,
+  `docs/VALRAVN_THIRD_PARTY_NOTICES.md`; doctrine in `soul/valravn.md`;
+  offline + opt-in live smoke in `.github/workflows/valravn-smoke.yml`.
+
 ## 2026-07-31 18:26 ART — CI gates, canonical MCP endpoints, and provider reasoning replay
 
 This follow-up closes the remaining CI failures without adding a second

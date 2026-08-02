@@ -5,11 +5,27 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from ..main import MCP, audited_tool  # noqa: TID252
 from ...valravn import ValravnGateway  # noqa: TID252
+from ..main import MCP, audited_tool  # noqa: TID252
 
 _GATEWAY: ValravnGateway | None = None
 _GATEWAY_LOCK = threading.Lock()
+
+VALRAVN_TOOLS = frozenset({
+    "valravn_status",
+    "valravn_investigate_ioc",
+    "valravn_investigate_organization",
+    "valravn_search_assets",
+    "valravn_investigate_cve",
+    "valravn_investigate_network",
+    "valravn_search_historical_web",
+    "valravn_investigate_url",
+    "valravn_submit_url",
+    "valravn_validate_asset",
+    "valravn_search_darkweb",
+    "valravn_capture_web_evidence",
+    "valravn_translate",
+})
 
 
 def _gateway() -> ValravnGateway:
@@ -163,18 +179,33 @@ def valravn_search_historical_web(
 @audited_tool("valravn_investigate_url", "passive", lambda *a, **k: "sync")
 def valravn_investigate_url(
     url: str,
-    submit: bool = False,
-    visibility: str = "unlisted",
     depth: str = "quick",
     run_id: str = "",
 ) -> dict[str, Any]:
-    """Check URL reputation and history; optionally submit to configured isolated scanners."""
+    """Check URL reputation and history against passive sources without submitting the URL anywhere."""
     try:
-        data = _gateway().investigate_url(url, submit=submit, visibility=visibility, depth=depth)
+        data = _gateway().investigate_url(url, depth=depth)
         summary = data.get("summary", {})
         return _ok("valravn_investigate_url", f"Gathered {summary.get('successful_sources', 0)} URL sources", data)
     except Exception as exc:
         return _error("valravn_investigate_url", exc)
+
+
+@MCP.tool()
+@audited_tool("valravn_submit_url", "active", lambda *a, **k: "sync")
+def valravn_submit_url(
+    url: str,
+    visibility: str = "unlisted",
+    depth: str = "quick",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Submit a URL to configured isolated scanners (urlscan/Cloudflare). Active: requires approval."""
+    try:
+        data = _gateway().submit_url(url, visibility=visibility, depth=depth)
+        summary = data.get("summary", {})
+        return _ok("valravn_submit_url", f"Completed {summary.get('successful_sources', 0)} submission sources", data)
+    except Exception as exc:
+        return _error("valravn_submit_url", exc)
 
 
 @MCP.tool()

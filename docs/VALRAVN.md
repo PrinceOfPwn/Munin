@@ -29,6 +29,7 @@ The Deep Agents Tool Gateway reads FastMCP's live registry, so every `valravn_*`
 - `valravn_investigate_network`
 - `valravn_search_historical_web`
 - `valravn_investigate_url`
+- `valravn_submit_url`
 - `valravn_validate_asset`
 - `valravn_search_darkweb`
 - `valravn_capture_web_evidence`
@@ -80,7 +81,7 @@ Wayback CDX and Common Crawl run concurrently. urlscan history joins in deep mod
 
 ### URL investigation
 
-ThreatFox, URLhaus, OTX and urlscan history are queried before direct navigation. New urlscan or Cloudflare URL Scanner submissions are opt-in because submitting a URL discloses it to a third party.
+ThreatFox, URLhaus, OTX and urlscan history are queried before direct navigation. New urlscan or Cloudflare URL Scanner submissions are handled by the separate active `valravn_submit_url` tool (opt-in because submitting a URL discloses it to a third party); `valravn_investigate_url` stays strictly passive.
 
 ## Browser evidence
 

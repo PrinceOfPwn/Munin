@@ -88,6 +88,14 @@ def test_private_and_metadata_urls_are_blocked():
         "http://10.0.0.1/",
         "http://169.254.169.254/latest/meta-data/",
         "http://localhost/",
+        "http://[::1]/",
+        "http://[fd00::1]/",
+        "http://[::ffff:169.254.169.254]/",
+        "http://2130706433/",
+        "http://0177.0.0.1/",
+        "file:///etc/passwd",
+        "gopher://127.0.0.1/",
+        "http://100.64.0.1/",
     ):
         with pytest.raises(UnsafeTarget):
             validate_public_url(value, resolve_host=False)

@@ -26,6 +26,14 @@ def _int(name: str, default: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
 
 
+def _float(name: str, default: float, lower: float, upper: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(lower, min(value, upper))
+
+
 @dataclass(frozen=True)
 class ProviderPolicy:
     """Limits fan-out by economic tier instead of exposing every provider."""
@@ -63,8 +71,17 @@ class ValravnSettings:
     fullhunt_enabled: bool = False
     safe_browsing_enabled: bool = False
 
+    @staticmethod
+    def _validated_gateway_domain(raw: str) -> str:
+        import re as _re
+
+        domain = (raw or "").strip().lower().lstrip(".")
+        if not _re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*", domain):
+            return "onion.pet"
+        return domain
+
     @classmethod
-    def from_env(cls) -> "ValravnSettings":
+    def from_env(cls) -> ValravnSettings:
         workspace = Path(
             os.environ.get("MUNIN_WORKSPACE")
             or os.environ.get("GITHUB_WORKSPACE")
@@ -78,8 +95,8 @@ class ValravnSettings:
             max_workers=_int("VALRAVN_MAX_WORKERS", 8, 1, 16),
             max_output_chars=_int("VALRAVN_MAX_OUTPUT_CHARS", 180_000, 10_000, 2_000_000),
             resolve_public_hosts=_bool("VALRAVN_RESOLVE_PUBLIC_HOSTS", True),
-            http_connect_timeout=float(os.environ.get("VALRAVN_HTTP_CONNECT_TIMEOUT", "5")),
-            http_read_timeout=float(os.environ.get("VALRAVN_HTTP_READ_TIMEOUT", "30")),
+            http_connect_timeout=_float("VALRAVN_HTTP_CONNECT_TIMEOUT", 5.0, 1.0, 60.0),
+            http_read_timeout=_float("VALRAVN_HTTP_READ_TIMEOUT", 30.0, 1.0, 300.0),
             usage_mode=usage,  # type: ignore[arg-type]
             policy=ProviderPolicy(
                 no_key_quick=_int("VALRAVN_NO_KEY_QUICK_BUDGET", 3, 0, 20),
@@ -92,7 +109,9 @@ class ValravnSettings:
             browser_enabled=_bool("VALRAVN_BROWSER_ENABLED", False),
             browser_headless=_bool("VALRAVN_BROWSER_HEADLESS", True),
             browser_proxy=os.environ.get("VALRAVN_BROWSER_PROXY", "").strip(),
-            onion_gateway_domain=os.environ.get("VALRAVN_ONION_GATEWAY_DOMAIN", "onion.pet").strip().lower(),
+            onion_gateway_domain=cls._validated_gateway_domain(
+                os.environ.get("VALRAVN_ONION_GATEWAY_DOMAIN", "onion.pet")
+            ),
             darkweb_search_enabled=_bool("VALRAVN_DARKWEB_SEARCH_ENABLED", True),
             urlscan_submit_enabled=_bool("VALRAVN_URLSCAN_SUBMIT_ENABLED", False),
             cloudflare_url_scan_enabled=_bool("VALRAVN_CLOUDFLARE_URL_SCAN_ENABLED", False),
@@ -102,7 +121,8 @@ class ValravnSettings:
 
     def configured_sources(self) -> dict[str, bool]:
         """Return capability state without exposing credential values."""
-        key = lambda name: bool(os.environ.get(name, "").strip())
+        def key(name: str) -> bool:
+            return bool(os.environ.get(name, "").strip())
         return {
             "ripestat": True,
             "wayback": True,

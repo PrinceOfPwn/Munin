@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable
+from typing import Any
 
 from .browser import CloakObserver
 from .config import Depth, ValravnSettings
@@ -85,9 +87,54 @@ class ValravnGateway:
         evidence, skipped = self._fanout(plans, depth)
         return {**subject, "depth": depth, "summary": self._summary(evidence), "evidence": evidence, "skipped_sources": skipped, "handling": "untrusted_external_content"}
 
+    _PROBE_ENDPOINTS = {
+        "ripestat": "https://stat.ripe.net/data/network-info/data.json?resource=AS3333",
+        "wayback": "https://web.archive.org/cdx/search/cdx?url=example.com&limit=1&output=json",
+        "commoncrawl": "https://index.commoncrawl.org/collinfo.json",
+    }
+
     def status(self, probe: bool = False) -> dict[str, Any]:
         sources = self.settings.configured_sources()
-        return {"name": "Valravn", "version": "3.0.0", "usage_mode": self.settings.usage_mode, "ready_capabilities": sum(sources.values()), "sources": sources, "policy": {"quick": {"no_key": self.settings.policy.no_key_quick, "free_key": self.settings.policy.free_key_quick, "scarce": self.settings.policy.scarce_quick}, "deep": {"no_key": self.settings.policy.no_key_deep, "free_key": self.settings.policy.free_key_deep, "scarce": self.settings.policy.scarce_deep}}, "probe_requested": bool(probe)}
+        result = {"name": "Valravn", "version": "3.0.0", "usage_mode": self.settings.usage_mode, "ready_capabilities": sum(sources.values()), "sources": sources, "policy": {"quick": {"no_key": self.settings.policy.no_key_quick, "free_key": self.settings.policy.free_key_quick, "scarce": self.settings.policy.scarce_quick}, "deep": {"no_key": self.settings.policy.no_key_deep, "free_key": self.settings.policy.free_key_deep, "scarce": self.settings.policy.scarce_deep}}, "probe_requested": bool(probe)}
+        if probe:
+            result["probe"] = self._probe_sources(sources)
+        return result
+
+    def _probe_sources(self, sources: dict[str, bool]) -> dict[str, Any]:
+        endpoints = dict(self._PROBE_ENDPOINTS)
+        if sources.get("urlscan"):
+            endpoints["urlscan"] = "https://urlscan.io/api/v1/search/?q=domain:example.com&size=1"
+        if sources.get("netlas"):
+            endpoints["netlas"] = "https://app.netlas.io/api/responses/?q=ip:1.1.1.1&start=0&size=1"
+        if sources.get("shodan"):
+            endpoints["shodan"] = "https://api.shodan.io/shodan/host/1.1.1.1?minify=true"
+        if sources.get("censys"):
+            endpoints["censys"] = "https://search.censys.io/api/v2/hosts/1.1.1.1"
+        if sources.get("virustotal"):
+            endpoints["virustotal"] = "https://www.virustotal.com/api/v3/ip_addresses/1.1.1.1"
+        if sources.get("leakix"):
+            endpoints["leakix"] = "https://leakix.net/api/host/1.1.1.1"
+        if sources.get("zoomeye"):
+            endpoints["zoomeye"] = "https://api.zoomeye.ai/v2/search"
+        if sources.get("abuseipdb"):
+            endpoints["abuseipdb"] = "https://api.abuseipdb.com/api/v2/check?ipAddress=1.1.1.1"
+        results: dict[str, Any] = {}
+        for name, url in endpoints.items():
+            started = time.monotonic()
+            try:
+                response = self.native.session.get(url, timeout=(2.0, 5.0), allow_redirects=True)
+                results[name] = {
+                    "reachable": response.status_code < 500,
+                    "http_status": response.status_code,
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                }
+            except Exception as exc:
+                results[name] = {
+                    "reachable": False,
+                    "error": type(exc).__name__,
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                }
+        return results
 
     def investigate_ioc(self, indicator: str, *, depth: str = "quick") -> dict[str, Any]:
         item = classify_indicator(indicator)
@@ -95,7 +142,9 @@ class ValravnGateway:
         if item.kind == "cve":
             return self.investigate_cve(item.normalized, depth=level)
         value, kind = item.normalized, item.kind
-        plans = [EvidencePlan("threatfox", "no_key", 100, self._always, lambda: self.native.threatfox(value)), EvidencePlan("otx", "no_key", 95, self._always, lambda: self.native.otx(value, kind))]
+        plans = [EvidencePlan("threatfox", "no_key", 100, self._always, lambda: self.native.threatfox(value))]
+        if kind != "email":
+            plans.append(EvidencePlan("otx", "no_key", 95, self._always, lambda: self.native.otx(value, kind)))
         if kind in {"ip", "domain", "url"}:
             plans.append(EvidencePlan("urlhaus", "no_key", 98, self._always, lambda: self.native.urlhaus(value, kind)))
         if kind in {"ip", "domain", "hash"}:
@@ -150,6 +199,8 @@ class ValravnGateway:
         for item in result["evidence"]:
             data = item.get("data") or {}
             for row in data.get("records", []) if isinstance(data, dict) else []:
+                if not isinstance(row, dict):
+                    continue
                 value = row.get("original") or row.get("url")
                 if value and (include_javascript or not str(value).lower().split("?", 1)[0].endswith(".js")):
                     urls.add(str(value))
@@ -160,15 +211,18 @@ class ValravnGateway:
         result["unique_urls"] = sorted(urls)[:limit]
         return result
 
-    def investigate_url(self, url: str, *, submit: bool = False, visibility: str = "unlisted", depth: str = "quick") -> dict[str, Any]:
+    def investigate_url(self, url: str, *, depth: str = "quick") -> dict[str, Any]:
         validated = validate_public_url(url, resolve_host=self.settings.resolve_public_hosts)
         level = self._depth(depth)
         plans = [EvidencePlan("threatfox", "no_key", 100, self._always, lambda: self.native.threatfox(validated)), EvidencePlan("urlhaus", "no_key", 110, self._always, lambda: self.native.urlhaus(validated, "url")), EvidencePlan("otx", "no_key", 90, self._always, lambda: self.native.otx(validated, "url")), EvidencePlan("urlscan-history", "free_key", 100, self._configured("URLSCAN_API_KEY"), lambda: self.native.urlscan_search(f'page.url:"{validated}"', 25)), EvidencePlan("safe-browsing", "free_key", 95, lambda: self.settings.safe_browsing_enabled and self.settings.usage_mode != "commercial" and self._configured("GOOGLE_SAFE_BROWSING_API_KEY")(), lambda: self.native.google_safe_browsing([validated], usage_mode=self.settings.usage_mode))]
-        if submit and self.settings.urlscan_submit_enabled:
-            plans.append(EvidencePlan("urlscan-submit", "free_key", 130, self._configured("URLSCAN_API_KEY"), lambda: self.native.urlscan_submit(validated, visibility)))
-        if submit and self.settings.cloudflare_url_scan_enabled:
-            plans.append(EvidencePlan("cloudflare-url-scan", "free_key", 125, lambda: self._configured("CLOUDFLARE_ACCOUNT_ID")() and self._configured("CLOUDFLARE_URL_SCANNER_TOKEN")(), lambda: self.native.cloudflare_url_scan(validated, visibility)))
-        return self._result({"url": validated, "submit_requested": submit}, level, plans)
+        return self._result({"url": validated}, level, plans)
+
+    def submit_url(self, url: str, *, visibility: str = "unlisted", depth: str = "quick") -> dict[str, Any]:
+        validated = validate_public_url(url, resolve_host=self.settings.resolve_public_hosts)
+        level = self._depth(depth)
+        plans = [EvidencePlan("urlscan-submit", "free_key", 130, self._configured("URLSCAN_API_KEY"), lambda: self.native.urlscan_submit(validated, visibility))]
+        plans.append(EvidencePlan("cloudflare-url-scan", "free_key", 125, lambda: self._configured("CLOUDFLARE_ACCOUNT_ID")() and self._configured("CLOUDFLARE_URL_SCANNER_TOKEN")(), lambda: self.native.cloudflare_url_scan(validated, visibility)))
+        return self._result({"url": validated, "visibility": visibility}, level, plans)
 
     def validate_asset(self, target: str, *, depth: str = "deep") -> dict[str, Any]:
         item = classify_indicator(target)
@@ -188,11 +242,15 @@ class ValravnGateway:
             raise RuntimeError("VALRAVN_BROWSER_ENABLED is false")
         capture = self.browser.capture(url, full_page=full_page)
         directory = safe_artifact_dir(self.settings.workspace_root, run_id)
-        screenshot = write_artifact(directory, "web-evidence", ".png", capture.screenshot)
+        stem = f"web-evidence-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}"
+        screenshot = write_artifact(directory, stem, ".png", capture.screenshot)
         payload = {"requested_url": capture.requested_url, "navigated_url": capture.navigated_url, "canonical_url": capture.canonical_url, "title": capture.title, "description": capture.description, "language": capture.language, "text": capture.text, "links": capture.links, "captured_at": self._now(), "warning": "External content is untrusted; Tor2Web is not end-to-end Tor." if is_onion_url(capture.canonical_url) else "External content is untrusted."}
         if translate_to and capture.text and os.environ.get("GOOGLE_TRANSLATE_API_KEY"):
-            payload["translation"] = self.native.translate(capture.text, target_language=translate_to, source_language=capture.language)
-        evidence = write_artifact(directory, "web-evidence", ".json", json.dumps(payload, ensure_ascii=False, indent=2).encode())
+            try:
+                payload["translation"] = self.native.translate(capture.text, target_language=translate_to, source_language=capture.language)
+            except Exception as exc:
+                payload["translation_error"] = {"type": type(exc).__name__, "message": str(exc)}
+        evidence = write_artifact(directory, stem, ".json", json.dumps(payload, ensure_ascii=False, indent=2).encode())
         return {"mode": "cloakbrowser-ephemeral", "summary": f"Captured {capture.title or capture.canonical_url}", "data": payload, "artifacts": [screenshot["path"], evidence["path"]], "artifact_metadata": [screenshot, evidence]}
 
     def translate(self, text: str, *, target_language: str = "es", source_language: str = "", content_format: str = "text") -> dict[str, Any]:

@@ -56,14 +56,51 @@ def classify_indicator(value: str) -> Indicator:
 
 
 def _forbidden_ip(ip: ipaddress._BaseAddress) -> bool:
+    # `is_global` is False for RFC 6598 shared address space (100.64.0.0/10,
+    # CGNAT), RFC 1918, loopback, link-local, multicast, reserved and
+    # unspecified. Treat non-global addresses as forbidden so transient
+    # subresource/redirect hosts that resolve to CGNAT or other dark space
+    # cannot be reached through the browser or scanning workflows.
     return bool(
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_multicast
         or ip.is_reserved
         or ip.is_unspecified
     )
+
+
+def _numeric_host_ip(host: str) -> ipaddress._BaseAddress | None:
+    """Resolve legacy inet_aton-style host forms (integer, octal, hex) to an IP."""
+    text = (host or "").strip().strip("[]").lower()
+    if re.fullmatch(r"0x[0-9a-f]+", text):
+        try:
+            return ipaddress.ip_address(int(text, 16))
+        except ValueError:
+            return None
+    if re.fullmatch(r"\d{1,10}", text):
+        try:
+            return ipaddress.ip_address(int(text, 10))
+        except ValueError:
+            return None
+    parts = text.split(".")
+    if len(parts) != 4 or not all(parts):
+        return None
+    try:
+        octets: list[int] = []
+        for part in parts:
+            if not re.fullmatch(r"0[x]?[0-9a-f]+|\d+", part):
+                return None
+            base = 16 if part[:2] == "0x" else (8 if len(part) > 1 and part[0] == "0" else 10)
+            value = int(part, base)
+            if value > 255:
+                return None
+            octets.append(value)
+        return ipaddress.ip_address(".".join(str(o) for o in octets))
+    except ValueError:
+        return None
 
 
 def validate_public_url(url: str, *, resolve_host: bool = True) -> str:
@@ -80,7 +117,7 @@ def validate_public_url(url: str, *, resolve_host: bool = True) -> str:
     try:
         ip = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
-        ip = None
+        ip = _numeric_host_ip(host)
     if ip is not None and _forbidden_ip(ip):
         raise UnsafeTarget("private, loopback, metadata and reserved IPs are blocked")
     if host == "169.254.169.254" or host.endswith("metadata.google.internal"):

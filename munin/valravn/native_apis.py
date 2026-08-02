@@ -9,11 +9,11 @@ import os
 import re
 import threading
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import requests
 
-from .cache import TTLCache
+from .cache import _MISS, TTLCache
 
 
 class NativeAPIError(RuntimeError):
@@ -51,7 +51,8 @@ class NativeIntelClient:
         if response.status_code in {401, 403}:
             raise NativeAPIError("upstream rejected credentials or permissions")
         if not response.ok:
-            raise NativeAPIError(f"upstream HTTP {response.status_code}: {response.text[:300]}")
+            host = urlsplit(url).hostname or ""
+            raise NativeAPIError(f"upstream HTTP {response.status_code} from {host}")
         return response
 
     def _json(self, method: str, url: str, **kwargs: Any) -> Any:
@@ -59,11 +60,12 @@ class NativeIntelClient:
         try:
             return response.json()
         except ValueError as exc:
-            raise NativeAPIError(f"invalid JSON from {url}: {response.text[:200]}") from exc
+            host = urlsplit(url).hostname or ""
+            raise NativeAPIError(f"invalid JSON from {host}") from exc
 
     def _cached(self, key: str, ttl: int, method: str, url: str, **kwargs: Any) -> Any:
-        value = self.cache.get(key)
-        if value is None:
+        value = self.cache.get(key, _MISS)
+        if value is _MISS:
             value = self._json(method, url, **kwargs)
             self.cache.set(key, value, ttl)
         return value
@@ -75,8 +77,12 @@ class NativeIntelClient:
         return {"cve": cve.upper(), "found": bool(rows), "record": rows[0] if rows else None}
 
     def kev(self, cve: str) -> dict[str, Any]:
-        with self._lock:
-            data = self._cached("cisa-kev", 3600, "GET", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json")
+        data = self.cache.get("cisa-kev", _MISS)
+        if data is _MISS:
+            with self._lock:
+                data = self.cache.get("cisa-kev", _MISS)
+                if data is _MISS:
+                    data = self._cached("cisa-kev", 3600, "GET", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json")
         match = next((row for row in data.get("vulnerabilities", []) if str(row.get("cveID", "")).upper() == cve.upper()), None)
         return {"cve": cve.upper(), "known_exploited": bool(match), "record": match}
 
@@ -153,7 +159,7 @@ class NativeIntelClient:
         return {"ip": ip, "record": self._json("GET", f"https://search.censys.io/api/v2/hosts/{quote(ip, safe='')}", auth=(self._key("CENSYS_API_ID"), self._key("CENSYS_API_SECRET")))}
 
     def censys_search(self, query: str, limit: int = 25) -> dict[str, Any]:
-        data = self._json("POST", "https://search.censys.io/api/v2/hosts/search", json={"q": query, "per_page": min(max(limit, 1), 100)}, auth=(self._key("CENSYS_API_ID"), self._key("CENSYS_API_SECRET")))
+        data = self._json("GET", "https://search.censys.io/api/v2/hosts/search", params={"q": query, "per_page": min(max(limit, 1), 100)}, auth=(self._key("CENSYS_API_ID"), self._key("CENSYS_API_SECRET")))
         return {"query": query, "result": data.get("result", data)}
 
     def zoomeye_search(self, query: str, limit: int = 25) -> dict[str, Any]:
@@ -165,8 +171,12 @@ class NativeIntelClient:
         return {"target": target, "record": self._json("GET", f"https://leakix.net/api/{endpoint}/{quote(target, safe='')}", headers={"api-key": self._key("LEAKIX_API_KEY")})}
 
     def leakix_search(self, query: str, limit: int = 25) -> dict[str, Any]:
-        data = self._json("GET", "https://leakix.net/api/subdomains", params={"q": query, "page": 0, "scope": "leak"}, headers={"api-key": self._key("LEAKIX_API_KEY")})
-        return {"query": query, "record": data, "limit": limit}
+        capped = max(1, min(int(limit), 100))
+        data = self._json("GET", "https://leakix.net/api/subdomains", params={"q": query, "page": 0, "scope": "leak", "count": capped}, headers={"api-key": self._key("LEAKIX_API_KEY")})
+        records = data.get("records", data) if isinstance(data, dict) else data
+        if isinstance(records, list):
+            records = records[:capped]
+        return {"query": query, "record": records, "limit": capped}
 
     def netlas_host(self, host: str) -> dict[str, Any]:
         return {"host": host, "record": self._json("GET", f"https://app.netlas.io/api/host/{quote(host, safe='')}/", params={"public_indices_only": "true"}, headers={"Authorization": f"Bearer {self._key('NETLAS_API_KEY')}"})}
@@ -195,7 +205,7 @@ class NativeIntelClient:
             result["rpki_validation"] = self._json(
                 "GET",
                 f"{base}/rpki-validation/data.json",
-                params={"resource": resource.removeprefix("AS"), "prefix": prefix},
+                params={"resource": re.sub(r"(?i)^AS", "", resource), "prefix": prefix},
             )
         return {"resource": resource, "result": result}
 

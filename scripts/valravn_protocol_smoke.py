@@ -9,20 +9,7 @@ import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-EXPECTED = {
-    "valravn_status",
-    "valravn_investigate_ioc",
-    "valravn_investigate_organization",
-    "valravn_search_assets",
-    "valravn_investigate_cve",
-    "valravn_investigate_network",
-    "valravn_search_historical_web",
-    "valravn_investigate_url",
-    "valravn_validate_asset",
-    "valravn_search_darkweb",
-    "valravn_capture_web_evidence",
-    "valravn_translate",
-}
+from munin.mcp.tools.valravn_tool import VALRAVN_TOOLS
 
 
 async def _run() -> None:
@@ -38,14 +25,14 @@ async def _run() -> None:
             await session.initialize()
             tools = await session.list_tools()
             names = {tool.name for tool in tools.tools}
-            missing = EXPECTED - names
+            missing = VALRAVN_TOOLS - names
             assert not missing, f"missing Valravn tools: {sorted(missing)}"
             result = await session.call_tool("valravn_status", {"probe": False})
             assert not result.isError
 
 
 def main() -> int:
-    asyncio.run(_run())
+    asyncio.run(asyncio.wait_for(_run(), timeout=120))
     print("Valravn MCP protocol smoke passed")
     return 0
 

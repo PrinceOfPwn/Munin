@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from .config import ValravnSettings
@@ -54,11 +55,10 @@ class CloakObserver:
             kwargs["license_key"] = key
         return launcher(**kwargs)
 
-    @staticmethod
-    def _block_unsafe_route(route: Any) -> None:
+    def _block_unsafe_route(self, route: Any) -> None:
         try:
             url = route.request.url
-            validate_public_url(url, resolve_host=False)
+            validate_public_url(url, resolve_host=self.settings.resolve_public_hosts)
         except Exception:
             route.abort()
         else:
@@ -104,7 +104,7 @@ class CloakObserver:
                 })"""
             ) or {}
             final_url = str(data.get("url") or navigated)
-            validate_public_url(final_url, resolve_host=False)
+            validate_public_url(final_url, resolve_host=self.settings.resolve_public_hosts)
             screenshot = page.screenshot(full_page=bool(full_page), type="png")
             if isinstance(screenshot, str):
                 screenshot = base64.b64decode(screenshot)
@@ -128,7 +128,7 @@ class CloakObserver:
                 try:
                     if obj is not None and hasattr(obj, "close"):
                         obj.close()
-                except Exception:
+                except Exception:  # noqa: S110 - best-effort teardown
                     pass
 
     def search_darkweb(self, query: str, limit: int = 20) -> dict[str, Any]:
