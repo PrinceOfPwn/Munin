@@ -116,14 +116,15 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
   // Operator-facing diagnostics: keep the browser console useful without
   // dumping prompt/tool payloads (which may contain credentials or evidence).
   useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
     console.debug("[Munin stream]", {
       conversationId,
       status: chat.status,
       messageCount: chat.messages.length,
-      partTypes: chat.messages.flatMap((message) => message.parts.map((part) => part.type)),
+      partCount: chat.messages.reduce((total, message) => total + message.parts.length, 0),
       error: chat.error?.message ?? null,
     });
-  }, [chat.error, chat.messages, chat.status, conversationId]);
+  }, [chat.error, chat.messages.length, chat.status, conversationId]);
 
   // `resumeStream()` replays assistant/run events, but UIMessage streams do
   // not recreate prior user messages. Hydrate the timeline from the local

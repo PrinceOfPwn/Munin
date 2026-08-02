@@ -25,12 +25,13 @@ export function ToolHeartbeatPart({
     <div
       className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning"
       role="status"
-      aria-live="polite"
+      aria-live="off"
+      aria-label={`${toolName} ${text}`}
     >
       <LoaderCircle className={cn("h-3.5 w-3.5 animate-spin", "motion-reduce:animate-none")} aria-hidden />
       <span className="font-mono uppercase tracking-wide">{toolName}</span>
       <span className="text-warning/80">{text}</span>
-      <span className="ml-auto font-mono text-[0.65rem] text-warning/70">
+      <span aria-hidden className="ml-auto font-mono text-[0.65rem] text-warning/70">
         {seconds(elapsedMs)} · quiet {seconds(lastOutputMs)}
       </span>
     </div>

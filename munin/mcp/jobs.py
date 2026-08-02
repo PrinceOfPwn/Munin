@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import logging
+import os
+
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import Lock
+from threading import Condition, Lock
 from typing import Any
 from uuid import uuid4
 
 from .utils import stderr_tail, truncate_text, utc_now_iso
 
 LOCK_TIMEOUT = 2.0
+MAX_PENDING_PROGRESS_EVENTS = max(
+    128, int(os.environ.get("MUNIN_MAX_PENDING_PROGRESS_EVENTS", "1024"))
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,6 +50,7 @@ class JobManager:
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="offx-mcp")
         self.records: dict[str, JobRecord] = {}
         self.lock = Lock()
+        self.progress_changed = Condition(self.lock)
         self.is_shutdown = False
 
     def shutdown(self) -> None:
@@ -53,10 +61,11 @@ class JobManager:
         avoids retaining queued work when a server process exits; the durable
         run dispatcher safely recovers the corresponding Turso lease.
         """
-        with self.lock:
+        with self.progress_changed:
             if self.is_shutdown:
                 return
             self.is_shutdown = True
+            self.progress_changed.notify_all()
         self.executor.shutdown(wait=False, cancel_futures=True)
 
     def _acquire_lock(self, timeout: float = LOCK_TIMEOUT) -> bool:
@@ -109,26 +118,42 @@ class JobManager:
         This intentionally records observable lifecycle events (LLM request,
         tool start/result), not private chain-of-thought text.
         """
-        with self.lock:
+        with self.progress_changed:
             job = self.records.get(job_id)
             if not job:
                 return
             if job.progress is None:
                 job.progress = []
+            # A run-scoped consumer acknowledges events in progress_for_run.
+            # Backpressure here preserves every unread output chunk instead of
+            # silently truncating the first burst beyond an arbitrary 100 rows.
+            while (
+                job.run_id
+                and len(job.progress) >= MAX_PENDING_PROGRESS_EVENTS
+                and not self.is_shutdown
+            ):
+                self.progress_changed.wait(timeout=0.25)
+            if self.is_shutdown:
+                return
             job.progress_sequence += 1
+            payload = dict(event)
+            if "sequence" in payload:
+                payload.setdefault("source_sequence", payload["sequence"])
             job.progress.append(
                 {
                     "at": utc_now_iso(),
+                    **payload,
+                    # Manager-owned identity and ordering; never caller supplied.
                     "sequence": job.progress_sequence,
                     "run_id": job.run_id,
                     "job_id": job.job_id,
                     "tool_name": job.tool,
                     "tool_call_id": job.tool_call_id,
-                    **event,
                 }
             )
-            # Keep polling payloads bounded even for a pathological ReAct loop.
-            if len(job.progress) > 100:
+            # Direct MCP jobs have no run stream to acknowledge progress. Keep
+            # their polling payload compact without affecting run-scoped data.
+            if not job.run_id and len(job.progress) > 100:
                 del job.progress[:-100]
 
     def progress_for_run(
@@ -149,6 +174,7 @@ class JobManager:
             return []
         try:
             events: list[dict[str, Any]] = []
+            consumed_any = False
             for job in self.records.values():
                 if job.run_id != run_id:
                     continue
@@ -157,11 +183,20 @@ class JobManager:
                     sequence = int(event.get("sequence") or 0)
                     if sequence <= after:
                         continue
-                    if event.get("kind") not in {"tool_output", "tool_heartbeat"}:
-                        cursors[job.job_id] = max(cursors.get(job.job_id, 0), sequence)
-                        continue
-                    events.append(dict(event))
+                    if event.get("kind") in {"tool_output", "tool_heartbeat"}:
+                        events.append(dict(event))
                     cursors[job.job_id] = max(cursors.get(job.job_id, 0), sequence)
+                acknowledged = int(cursors.get(job.job_id, 0))
+                if acknowledged and job.progress:
+                    before = len(job.progress)
+                    job.progress[:] = [
+                        event
+                        for event in job.progress
+                        if int(event.get("sequence") or 0) > acknowledged
+                    ]
+                    consumed_any = consumed_any or len(job.progress) != before
+            if consumed_any:
+                self.progress_changed.notify_all()
             events.sort(key=lambda item: (str(item.get("at") or ""), int(item.get("sequence") or 0)))
             return events
         finally:
@@ -175,8 +210,12 @@ class JobManager:
         runtime uses this small read-only signal to keep the UI stream open
         until those already-authorized output chunks have been delivered.
         """
-        if not run_id or not self._acquire_lock():
+        if not run_id:
             return False
+        if not self._acquire_lock():
+            # Contention is not proof of completion. Keep the stream open and
+            # retry on the next poll rather than truncating final output.
+            return True
         try:
             return any(
                 job.run_id == run_id and job.status in {"queued", "running"}

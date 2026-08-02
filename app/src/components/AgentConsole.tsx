@@ -593,19 +593,28 @@ function ConsoleHeader({
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
+  const savingTitle = useRef(false);
 
   useEffect(() => {
     if (!editingTitle) setDraftTitle(title);
   }, [editingTitle, title]);
 
   async function saveTitle() {
+    if (savingTitle.current) return;
     const nextTitle = draftTitle.trim();
     if (!nextTitle || nextTitle === title) {
       setEditingTitle(false);
       return;
     }
-    await onRename(nextTitle);
-    setEditingTitle(false);
+    savingTitle.current = true;
+    try {
+      await onRename(nextTitle);
+    } catch {
+      // The parent already reports the API failure to the operator.
+    } finally {
+      savingTitle.current = false;
+      setEditingTitle(false);
+    }
   }
 
   return (
@@ -899,8 +908,10 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       const anchor = document.createElement("a");
       anchor.href = href;
       anchor.download = `${conversationTitle.replace(/[^a-z0-9._-]+/gi, "-") || "munin-conversation"}.json`;
+      document.body.appendChild(anchor);
       anchor.click();
-      URL.revokeObjectURL(href);
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 0);
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Could not export conversation");
     }

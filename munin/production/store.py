@@ -41,6 +41,12 @@ ROLES = {"admin", "operator", "viewer"}
 _FENCED_ARTIFACT = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)[ \t]*\n(?P<content>[\s\S]*?)```")
 
 _SESSION_TOUCH_INTERVAL_MS: int = int(os.environ.get("MUNIN_SESSION_TOUCH_INTERVAL_SECONDS", "120")) * 1000
+_MAX_DURABLE_TOOL_OUTPUT_EVENTS = max(
+    16, int(os.environ.get("MUNIN_MAX_DURABLE_TOOL_OUTPUT_EVENTS", "256"))
+)
+_MAX_DURABLE_TOOL_OUTPUT_BYTES = max(
+    65_536, int(os.environ.get("MUNIN_MAX_DURABLE_TOOL_OUTPUT_BYTES", str(512 * 1024)))
+)
 
 
 def _now_ms() -> int:
@@ -1473,7 +1479,34 @@ class ProductionStore:
         with self._transaction() as conn:
             if not conn.execute("SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone():
                 raise KeyError(run_id)
-            return self._append_event(conn, run_id=run_id, kind="tool.output", payload=payload)
+            event = self._append_event(conn, run_id=run_id, kind="tool.output", payload=payload)
+            # Keep only the newest bounded tail across all command-output
+            # events in this run. Sequence gaps are valid: replay uses a
+            # monotonic `sequence > cursor` query and does not require density.
+            rows = conn.execute(
+                "SELECT id,payload_json FROM run_events "
+                "WHERE run_id=? AND kind='tool.output' ORDER BY sequence DESC",
+                (run_id,),
+            ).fetchall()
+            retained_events = 0
+            retained_bytes = 0
+            stale_ids: list[str] = []
+            for row in rows:
+                payload_size = len(str(row["payload_json"]).encode("utf-8"))
+                if (
+                    retained_events < _MAX_DURABLE_TOOL_OUTPUT_EVENTS
+                    and retained_bytes + payload_size <= _MAX_DURABLE_TOOL_OUTPUT_BYTES
+                ):
+                    retained_events += 1
+                    retained_bytes += payload_size
+                else:
+                    stale_ids.append(str(row["id"]))
+            if stale_ids:
+                conn.executemany(
+                    "DELETE FROM run_events WHERE id=?",
+                    [(event_id,) for event_id in stale_ids],
+                )
+            return event
 
     def create_subagent_run(self, *, parent_run_id: str, profile_id: str, objective: str) -> dict[str, Any]:
         if not objective.strip():

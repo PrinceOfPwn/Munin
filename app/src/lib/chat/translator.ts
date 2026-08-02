@@ -147,7 +147,9 @@ export function createTranslator(runId: string): {
       // Provider adapters can return a final message that omits earlier
       // tool-planning prose.  Avoid duplicating the longest overlap while
       // still preserving a genuinely missing tail.
-      const max = Math.min(emitted.length, content.length);
+      // Bound the duplicate-tail search so a long final answer cannot
+      // turn this request-path reconciliation into quadratic work.
+      const max = Math.min(emitted.length, content.length, 4096);
       for (let size = max; size > 0; size -= 1) {
         if (emitted.endsWith(content.slice(0, size))) return content.slice(size);
       }
@@ -231,7 +233,6 @@ export function createTranslator(runId: string): {
             lastOutputMs: envelope.last_output_ms ?? 0,
             text: envelope.text ?? "command still running",
           },
-          transient: true,
         }];
 
       case "subagent_started":

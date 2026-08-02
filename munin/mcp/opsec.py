@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .audit import redact_secrets
 from .config import Settings
 from .utils import ensure_parent, stderr_tail, truncate_text
 
@@ -39,7 +41,8 @@ _REQUIRED_NFT_TABLES: list[str] = [
 ]
 
 _PROCESS_HEARTBEAT_SECONDS = float(os.environ.get("MUNIN_PROCESS_HEARTBEAT_SECONDS", "5"))
-_PROCESS_OUTPUT_CHUNK_CHARS = int(os.environ.get("MUNIN_PROCESS_OUTPUT_CHUNK_CHARS", "4096"))
+_PROCESS_OUTPUT_CHUNK_CHARS = max(256, int(os.environ.get("MUNIN_PROCESS_OUTPUT_CHUNK_CHARS", "4096")))
+_PROCESS_OUTPUT_QUEUE_SIZE = max(8, int(os.environ.get("MUNIN_PROCESS_OUTPUT_QUEUE_SIZE", "256")))
 
 
 # Install hints for offensive binaries commonly missing on generic runners / dev boxes.
@@ -250,16 +253,32 @@ class ExecutionEngine:
         deadline = time.monotonic() + timeout
         cancelled = False
         timed_out = False
-        output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        # Bound the producer/consumer gap. A verbose scanner now applies
+        # backpressure to its pipe reader instead of allocating an unbounded
+        # number of Python strings and downstream events.
+        output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue(
+            maxsize=_PROCESS_OUTPUT_QUEUE_SIZE
+        )
         output_buffers: dict[str, list[str]] = {"stdout": [], "stderr": []}
         output_sizes = {"stdout": 0, "stderr": 0}
         reader_threads: list[threading.Thread] = []
 
         def read_stream(stream_name: str, pipe: Any) -> None:
+            """Read available bytes in bounded chunks without waiting for newlines."""
+            encoding = getattr(pipe, "encoding", None) or "utf-8"
+            errors = getattr(pipe, "errors", None) or "replace"
+            decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
             try:
-                for line in iter(pipe.readline, ""):
-                    if line:
-                        output_queue.put((stream_name, line))
+                while True:
+                    raw = os.read(pipe.fileno(), _PROCESS_OUTPUT_CHUNK_CHARS)
+                    if not raw:
+                        break
+                    text = decoder.decode(raw)
+                    if text:
+                        output_queue.put((stream_name, text))
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    output_queue.put((stream_name, tail))
             finally:
                 output_queue.put((stream_name, None))
 
@@ -329,26 +348,39 @@ class ExecutionEngine:
                 continue
             if text:
                 last_activity = now
-                output_sequence += 1
-                text = text[:_PROCESS_OUTPUT_CHUNK_CHARS]
-                output_buffers[stream_name].append(text)
-                output_sizes[stream_name] += len(text)
-                # Retain a bounded tail for the final result while streaming
-                # every bounded chunk to the operator-facing event log.
+                safe_text = str(redact_secrets(text))
                 max_chars = max(1, int(self.settings.max_output_chars))
-                while output_sizes[stream_name] > max_chars and output_buffers[stream_name]:
-                    removed = output_buffers[stream_name].pop(0)
-                    output_sizes[stream_name] -= len(removed)
-                emit_process_event(
-                    {
-                        "kind": "tool_output",
-                        "stream": stream_name,
-                        "text": text,
-                        "sequence": output_sequence,
-                        "elapsed_ms": int((now - started_at) * 1000),
-                        "final": False,
-                    }
-                )
+                # os.read already coalesces newline-heavy output. Chunk again
+                # defensively because decoded text length is not a byte count.
+                for start in range(0, len(safe_text), _PROCESS_OUTPUT_CHUNK_CHARS):
+                    chunk = safe_text[start : start + _PROCESS_OUTPUT_CHUNK_CHARS]
+                    if not chunk:
+                        continue
+                    output_sequence += 1
+                    output_buffers[stream_name].append(chunk)
+                    output_sizes[stream_name] += len(chunk)
+                    # Keep an exact bounded tail for the final tool result.
+                    excess = output_sizes[stream_name] - max_chars
+                    while excess > 0 and output_buffers[stream_name]:
+                        first = output_buffers[stream_name][0]
+                        if len(first) <= excess:
+                            output_buffers[stream_name].pop(0)
+                            output_sizes[stream_name] -= len(first)
+                            excess -= len(first)
+                        else:
+                            output_buffers[stream_name][0] = first[excess:]
+                            output_sizes[stream_name] -= excess
+                            excess = 0
+                    emit_process_event(
+                        {
+                            "kind": "tool_output",
+                            "stream": stream_name,
+                            "text": chunk,
+                            "sequence": output_sequence,
+                            "elapsed_ms": int((now - started_at) * 1000),
+                            "final": False,
+                        }
+                    )
 
             now = time.monotonic()
             if now - last_heartbeat >= max(1.0, _PROCESS_HEARTBEAT_SECONDS) and process.poll() is None:

@@ -110,3 +110,22 @@ def test_supervisor_uses_the_native_skills_arguments(monkeypatch):
     assert captured["skills"] == ["/"]
     assert captured["backend"].cwd.name == "agent_skills"
     assert captured["permissions"][0].mode == "deny"
+
+def test_skill_frontmatter_requires_top_level_name_and_closing_delimiter(tmp_path):
+    from munin.core.autonomy.skill_library import BundledSkillLibrary
+
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "SKILL.md").write_text("---\n  name: nested\n---\n", encoding="utf-8")
+    incomplete = tmp_path / "incomplete"
+    incomplete.mkdir()
+    (incomplete / "SKILL.md").write_text("---\nname: incomplete\n", encoding="utf-8")
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    (valid / "SKILL.md").write_text("---\nname: valid\n---\n", encoding="utf-8")
+
+    library = BundledSkillLibrary(tmp_path)
+    assert library.available() == ("valid",)
+    errors = library.validation_errors()
+    assert any(error.startswith("nested:") for error in errors)
+    assert any(error.startswith("incomplete:") for error in errors)
