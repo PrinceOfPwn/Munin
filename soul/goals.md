@@ -1,3 +1,6 @@
+> [!NOTE]
+> **CTF-specific profile content.** These goals belong to the bundled experimental CTF/lab characterization. They are examples, not Munin's default product goals or recommended production configuration. Replace them with objectives appropriate to the authorised deployment. See [`soul/README.md`](README.md).
+
 # 战略目标
 
 ## 核心使命
