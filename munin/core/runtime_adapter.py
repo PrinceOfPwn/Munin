@@ -15,6 +15,8 @@ UI-message-stream adapter.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from typing import Any, AsyncIterator, Callable, Iterable
 
@@ -39,6 +41,8 @@ def _recursion_limit_from_environment() -> int:
 
 
 DEFAULT_RECURSION_LIMIT = _recursion_limit_from_environment()
+
+logger = logging.getLogger(__name__)
 
 _ROOT_GRAPH_NAMES = frozenset({"LangGraph", "munin", "munin_supervisor", "__end__"})
 
@@ -343,16 +347,31 @@ async def supervisor_runner(
     from .middleware.progress_emit import ACTIVE_RUN_ID as _PE_RUN_ID
     from .supervisor import build_munin_supervisor  # noqa: PLC0415
 
-    middleware_events: list[dict] = []
     thinking_state: dict[str, Any] = {}
+    event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=2048)
+    loop = asyncio.get_running_loop()
 
     def wrapped_progress_sink(envelope: dict) -> None:
-        middleware_events.append(envelope)
         if progress_sink is not None:
             try:
                 progress_sink(envelope)
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            def enqueue() -> None:
+                try:
+                    event_queue.put_nowait(("envelope", dict(envelope)))
+                except asyncio.QueueFull:  # pragma: no cover - backpressure guard
+                    logger.warning(
+                        "dropping progress envelope because the run queue is full "
+                        "(run_id=%s kind=%s)",
+                        run_id,
+                        envelope.get("kind"),
+                    )
+
+            loop.call_soon_threadsafe(enqueue)
+        except RuntimeError:  # pragma: no cover - shutdown guard
+            pass
 
     supervisor = build_munin_supervisor(
         state=store,
@@ -391,34 +410,86 @@ async def supervisor_runner(
             messages.append(HumanMessage(content=prompt))
             input_value = {"messages": messages}
 
-        async for event in supervisor.astream_events(input_value, config=config, version="v2"):
-            while middleware_events:
-                yield middleware_events.pop(0)
+        graph_finished = asyncio.Event()
 
-            for envelope in translate_events(event, run_id=run_id, thinking_state=thinking_state):
-                if envelope.get("kind") == "human_interrupt":
-                    try:
-                        envelope = _persist_human_interrupt(
-                            store=human_request_store or store,
-                            run_id=run_id,
-                            actions=list(envelope.get("actions") or []),
-                        )
-                    except Exception as exc:  # noqa: BLE001 - fail closed on a missing approval record
-                        envelope = {
-                            "kind": "run_state",
-                            "run_id": run_id,
-                            "state": "failed",
-                            "error": f"could not persist human approval request: {exc}",
-                        }
-                if progress_sink is not None:
-                    try:
-                        progress_sink(envelope)
-                    except Exception:  # noqa: BLE001 - observability must not sink a run
-                        pass
-                yield envelope
+        async def consume_graph() -> None:
+            try:
+                async for event in supervisor.astream_events(input_value, config=config, version="v2"):
+                    await event_queue.put(("graph", event))
+            except BaseException as exc:  # noqa: BLE001 - surface through the generator task
+                await event_queue.put(("error", exc))
+            finally:
+                # Do not enqueue a terminal sentinel here.  Async command
+                # tools can still be flushing stdout/stderr after the graph
+                # emits its final chain event; the progress pump owns the
+                # close barrier once those chunks are drained.
+                graph_finished.set()
 
-        while middleware_events:
-            yield middleware_events.pop(0)
+        async def pump_job_progress() -> None:
+            try:
+                # JOBS is created alongside the live FastMCP catalog in
+                # ``mcp.main``. Importing it from ``mcp.jobs`` raises and,
+                # if swallowed, would leave the graph consumer waiting for a
+                # terminal progress sentinel forever.
+                from ..mcp.main import JOBS  # noqa: PLC0415
+            except Exception:  # pragma: no cover - lightweight/runtime tests
+                # Some isolated adapter tests intentionally do not bootstrap
+                # FastMCP. They still need a deterministic close barrier.
+                await graph_finished.wait()
+                await event_queue.put(("progress_done", None))
+                return
+            cursors: dict[str, int] = {}
+            while True:
+                for event in JOBS.progress_for_run(run_id, cursors):
+                    await event_queue.put(("envelope", event))
+                if graph_finished.is_set() and not JOBS.has_active_run(run_id):
+                    # A job can append its last chunks and become inactive
+                    # between the drain above and this check. Read once more
+                    # before inserting the terminal sentinel.
+                    for event in JOBS.progress_for_run(run_id, cursors):
+                        await event_queue.put(("envelope", event))
+                    await event_queue.put(("progress_done", None))
+                    return
+                await asyncio.sleep(0.2)
+
+        graph_task = asyncio.create_task(consume_graph(), name=f"munin-graph-{run_id}")
+        progress_task = asyncio.create_task(pump_job_progress(), name=f"munin-job-progress-{run_id}")
+        try:
+            while True:
+                source, payload = await event_queue.get()
+                if source == "progress_done":
+                    break
+                if source == "error":
+                    raise payload
+                if source == "envelope":
+                    yield payload
+                    continue
+
+                for envelope in translate_events(payload, run_id=run_id, thinking_state=thinking_state):
+                    if envelope.get("kind") == "human_interrupt":
+                        try:
+                            envelope = _persist_human_interrupt(
+                                store=human_request_store or store,
+                                run_id=run_id,
+                                actions=list(envelope.get("actions") or []),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - fail closed on a missing approval record
+                            envelope = {
+                                "kind": "run_state",
+                                "run_id": run_id,
+                                "state": "failed",
+                                "error": f"could not persist human approval request: {exc}",
+                            }
+                    if progress_sink is not None:
+                        try:
+                            progress_sink(envelope)
+                        except Exception:  # noqa: BLE001 - observability must not sink a run
+                            pass
+                    yield envelope
+        finally:
+            progress_task.cancel()
+            graph_task.cancel()
+            await asyncio.gather(progress_task, graph_task, return_exceptions=True)
     finally:
         # Starlette can close a streamed async generator from its disconnect
         # finalizer task rather than the task that created it. ContextVar

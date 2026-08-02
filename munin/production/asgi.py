@@ -314,12 +314,42 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         except KeyError:
             return _error(404, "not_found", "provider profile not found")
 
+    inline_artifact_media_types = {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "text/plain",
+        "text/csv",
+        "text/markdown",
+        "application/json",
+    }
+
     async def artifact(request: Request) -> Response:
         try:
             current = await actor(request)
             result = store.get_artifact(actor_id=current["id"], artifact_id=request.path_params["artifact_id"])
-            if request.query_params.get("download") == "true":
-                return Response(result["content"], media_type=result["media_type"], headers={"Content-Disposition": f"attachment; filename={result['filename']}"})
+            download_requested = request.query_params.get("download") == "true"
+            inline_requested = request.query_params.get("inline") == "true"
+            if download_requested or inline_requested:
+                media_type = str(result["media_type"] or "application/octet-stream")
+                base_media_type = media_type.split(";", 1)[0].strip().lower()
+                disposition = (
+                    "inline"
+                    if inline_requested
+                    and not download_requested
+                    and base_media_type in inline_artifact_media_types
+                    else "attachment"
+                )
+                filename = str(result["filename"]).replace('"', "")
+                return Response(
+                    result["content"],
+                    media_type=media_type,
+                    headers={
+                        "Content-Disposition": f'{disposition}; filename="{filename}"',
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
             return JSONResponse({"ok": True, "data": result})
         except PermissionError as exc:
             return _error(403, "forbidden", str(exc))

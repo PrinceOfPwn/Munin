@@ -41,6 +41,12 @@ ROLES = {"admin", "operator", "viewer"}
 _FENCED_ARTIFACT = re.compile(r"```(?P<language>[A-Za-z0-9_+.-]*)[ \t]*\n(?P<content>[\s\S]*?)```")
 
 _SESSION_TOUCH_INTERVAL_MS: int = int(os.environ.get("MUNIN_SESSION_TOUCH_INTERVAL_SECONDS", "120")) * 1000
+_MAX_DURABLE_TOOL_OUTPUT_EVENTS = max(
+    16, int(os.environ.get("MUNIN_MAX_DURABLE_TOOL_OUTPUT_EVENTS", "256"))
+)
+_MAX_DURABLE_TOOL_OUTPUT_BYTES = max(
+    65_536, int(os.environ.get("MUNIN_MAX_DURABLE_TOOL_OUTPUT_BYTES", str(512 * 1024)))
+)
 
 
 def _now_ms() -> int:
@@ -1439,6 +1445,69 @@ class ProductionStore:
                 )
             return {"id": identifier, "event_id": event["id"], "state": state, "tool_name": tool_name, "arguments": safe_args, "result": safe_result}
 
+    def append_tool_output_event(
+        self,
+        *,
+        run_id: str,
+        tool_name: str,
+        tool_call_id: str = "",
+        job_id: str = "",
+        stream: str,
+        text: str,
+        sequence: int = 0,
+        elapsed_ms: int = 0,
+        final: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one bounded command-output chunk in the run event log.
+
+        Output is an operational data part, not reasoning and not a growing
+        tool result.  Keeping each chunk in ``run_events`` gives replay/resume
+        the same cursor semantics as the rest of the UIMessage stream.
+        """
+        if stream not in {"stdout", "stderr", "meta"}:
+            raise ValueError("unknown tool output stream")
+        payload = {
+            "tool_name": str(tool_name or "unknown")[:160],
+            "tool_call_id": str(tool_call_id or "")[:160],
+            "job_id": str(job_id or "")[:160],
+            "stream": stream,
+            "text": redact_text(str(text or ""))[:8_192],
+            "sequence": max(0, int(sequence)),
+            "elapsed_ms": max(0, int(elapsed_ms)),
+            "final": bool(final),
+        }
+        with self._transaction() as conn:
+            if not conn.execute("SELECT 1 FROM agent_runs WHERE id=?", (run_id,)).fetchone():
+                raise KeyError(run_id)
+            event = self._append_event(conn, run_id=run_id, kind="tool.output", payload=payload)
+            # Keep only the newest bounded tail across all command-output
+            # events in this run. Sequence gaps are valid: replay uses a
+            # monotonic `sequence > cursor` query and does not require density.
+            rows = conn.execute(
+                "SELECT id,payload_json FROM run_events "
+                "WHERE run_id=? AND kind='tool.output' ORDER BY sequence DESC",
+                (run_id,),
+            ).fetchall()
+            retained_events = 0
+            retained_bytes = 0
+            stale_ids: list[str] = []
+            for row in rows:
+                payload_size = len(str(row["payload_json"]).encode("utf-8"))
+                if (
+                    retained_events < _MAX_DURABLE_TOOL_OUTPUT_EVENTS
+                    and retained_bytes + payload_size <= _MAX_DURABLE_TOOL_OUTPUT_BYTES
+                ):
+                    retained_events += 1
+                    retained_bytes += payload_size
+                else:
+                    stale_ids.append(str(row["id"]))
+            if stale_ids:
+                conn.executemany(
+                    "DELETE FROM run_events WHERE id=?",
+                    [(event_id,) for event_id in stale_ids],
+                )
+            return event
+
     def create_subagent_run(self, *, parent_run_id: str, profile_id: str, objective: str) -> dict[str, Any]:
         if not objective.strip():
             raise ValueError("subagent objective is required")
@@ -2666,6 +2735,9 @@ class MuninStore:
 
     def append_tool_call(self, **kwargs: Any) -> dict[str, Any]:
         return self._hot.append_tool_call(**kwargs)
+
+    def append_tool_output_event(self, **kwargs: Any) -> dict[str, Any]:
+        return self._hot.append_tool_output_event(**kwargs)
 
     # Provider profiles are durable operator-owned credentials.  The hot
     # execution store never receives the plaintext key; it is decrypted only
