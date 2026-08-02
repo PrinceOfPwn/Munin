@@ -144,3 +144,13 @@ def test_root_chain_end_translates_to_run_state_with_content():
 
 def test_unknown_events_ignored():
     assert translate_event({"event": "on_something_unknown", "name": "X", "data": {}}, run_id="r") is None
+
+def test_render_tool_result_redacts_tool_message_content_after_extraction():
+    from types import SimpleNamespace
+
+    from munin.core.middleware.progress_emit import _render_tool_result
+
+    secret = "sk-" + "z" * 40
+    rendered = _render_tool_result(SimpleNamespace(content=f"api_key={secret}", artifact=None))
+    assert secret not in rendered
+    assert "REDACTED" in rendered

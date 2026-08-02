@@ -61,9 +61,10 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
 
   const normalized: BackendEnvelope = { kind: resolvedKind };
 
-  const topLevelFields = ["run_id", "sequence", "text", "stage", "tool_name", "tool_call_id", "input",
+  const topLevelFields = ["run_id", "sequence", "text", "content", "stage", "tool_name", "tool_call_id", "input",
     "output", "error", "subagent_id", "name", "state", "request_id", "args", "resolution",
-    "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds", "provider", "step"];
+    "nonce", "choices", "artifact_id", "mime_type", "uri", "ts", "elapsed_seconds", "provider", "step",
+    "job_id", "stream", "elapsed_ms", "final", "last_output_ms", "transient"];
 
   // Cast via `unknown` because BackendEnvelope is a typed interface without an
   // index signature; assigning dynamic string-keyed fields onto it requires an
@@ -150,34 +151,43 @@ async function pumpChatStream(
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const consumeFrame = (frame: string): boolean => {
+    if (frame.includes("event: close")) return true;
+    const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+    if (!dataLine) return false;
+    const raw = dataLine.slice("data:".length).trim();
+    if (!raw || raw === "[DONE]") return false;
+    let envelope: BackendEnvelope | null;
+    try {
+      envelope = normalizeRunEvent(JSON.parse(raw));
+    } catch {
+      return false;
+    }
+    if (!envelope) return false;
+    for (const chunk of translator.translate(envelope)) {
+      writer.write(chunk);
+    }
+    return translator.state.finished;
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
 
       // Starlette normally emits LF, but proxies are allowed to normalize
-      // SSE framing to CRLF. Accept both without inventing a second stream
-      // parser or losing the final durable replay frame.
+      // SSE framing to CRLF. On EOF there may be no trailing blank line; the
+      // final flush below deliberately processes that frame too.
       const frames = buffer.split(/\r?\n\r?\n/);
       buffer = frames.pop() ?? "";
       for (const frame of frames) {
-        if (frame.includes("event: close")) return;
-        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
-        if (!dataLine) continue;
-        const raw = dataLine.slice("data:".length).trim();
-        if (!raw || raw === "[DONE]") continue;
-        let envelope: BackendEnvelope | null;
-        try {
-          envelope = normalizeRunEvent(JSON.parse(raw));
-        } catch {
-          continue;
-        }
-        if (!envelope) continue;
-        for (const chunk of translator.translate(envelope)) {
-          writer.write(chunk);
-        }
-        if (translator.state.finished) return;
+        if (consumeFrame(frame)) return;
+      }
+      if (done) {
+        // A standards-compliant SSE server normally terminates frames with a
+        // blank line, but a proxy or tunnel can close immediately after the
+        // final data line. Do not lose the last assistant delta in that case.
+        if (buffer && consumeFrame(buffer)) return;
+        break;
       }
     }
   } finally {
@@ -274,6 +284,31 @@ async function forwardOperatorGuidance(
  * live server-side until Fase 2.
  */
 export async function POST(request: NextRequest) {
+  const pathname = new URL(request.url).pathname;
+  const guidanceMatch = pathname.match(/\/api\/chat\/([^/]+)\/guidance$/);
+  if (guidanceMatch) {
+    let guidanceBody: { body?: unknown; guidance?: unknown; target_agent_id?: unknown };
+    try {
+      guidanceBody = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    const bodyText = String(guidanceBody.body ?? guidanceBody.guidance ?? "").trim();
+    if (!bodyText) {
+      return NextResponse.json({ error: "body is required" }, { status: 400 });
+    }
+    const result = await forwardOperatorGuidance(
+      decodeURIComponent(guidanceMatch[1]),
+      bodyText,
+      guidanceBody.target_agent_id ? String(guidanceBody.target_agent_id) : undefined,
+      forwardAuthHeaders(request),
+    );
+    if (!result.ok) {
+      return NextResponse.json({ error: result.message ?? "guidance failed" }, { status: result.status });
+    }
+    return NextResponse.json({ ok: true }, { status: 202 });
+  }
+
   let body: {
     id?: string;
     conversation_id?: string;
@@ -349,11 +384,48 @@ export async function POST(request: NextRequest) {
 
   if (!upstream.ok) {
     let message = `chat failed (${upstream.status})`;
+    let parsed: Record<string, unknown> | null = null;
     try {
-      const parsed = await upstream.json();
-      message = parsed?.error?.message || parsed?.error || message;
+      parsed = await upstream.json();
+      const error = parsed?.error;
+      message = (typeof error === "object" && error && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : String(error ?? "")) || message;
     } catch {}
-    return NextResponse.json({ error: message }, { status: upstream.status });
+
+    // A detached browser can submit a fresh turn after pressing Stop while
+    // the durable executor is still running. Treat that message as guidance,
+    // then attach the same AI SDK stream instead of surfacing a permanent 409.
+    const activeRunId = typeof parsed?.active_run_id === "string" ? parsed.active_run_id : "";
+    if (upstream.status === 409 && activeRunId) {
+      const guidance = await forwardOperatorGuidance(
+        activeRunId,
+        content,
+        undefined,
+        forwardHeaders,
+      );
+      if (!guidance.ok) {
+        return NextResponse.json({ error: guidance.message ?? message }, { status: guidance.status });
+      }
+      try {
+        upstream = await fetch(`${BACKEND}/api/chat/${encodeURIComponent(conversationId)}/stream`, {
+          method: "GET",
+          headers: {
+            Accept: "text/event-stream",
+            ...Object.fromEntries(forwardHeaders),
+          },
+          cache: "no-store",
+        });
+      } catch (err) {
+        return NextResponse.json({ error: `backend unreachable: ${String(err)}` }, { status: 502 });
+      }
+      if (!upstream.ok) {
+        const replayError = await upstream.text().catch(() => "chat resume failed");
+        return NextResponse.json({ error: replayError || "chat resume failed" }, { status: upstream.status });
+      }
+    } else {
+      return NextResponse.json({ error: message }, { status: upstream.status });
+    }
   }
 
   const contentType = upstream.headers.get("content-type") || "";

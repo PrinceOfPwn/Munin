@@ -89,6 +89,26 @@ describe("createTranslator - text part lifecycle", () => {
     translate(makeEnvelope({ kind: "run_state", state: "completed" }));
     expect(translate(makeEnvelope({ kind: "run_state", state: "completed" }))).toEqual([]);
   });
+
+  it("flushes terminal content that arrived after the last streamed delta", () => {
+    const { translate } = createTranslator("run-x");
+    translate(makeEnvelope({ kind: "assistant_text", text: "before" }));
+    translate(makeEnvelope({
+      kind: "tool_intent",
+      tool_name: "execute_command",
+      tool_call_id: "tc-tail",
+      input: {},
+    }));
+    translate(makeEnvelope({ kind: "tool_result", tool_call_id: "tc-tail", output: "ok" }));
+    const chunks = translate(makeEnvelope({
+      kind: "run_state",
+      state: "completed",
+      content: "beforeafter",
+    }));
+    expect(chunks).toContainEqual({ type: "text-start", id: "text-run-x-1" });
+    expect(chunks).toContainEqual({ type: "text-delta", id: "text-run-x-1", delta: "after" });
+    expect(chunks).toContainEqual({ type: "text-end", id: "text-run-x-1" });
+  });
 });
 
 describe("createTranslator - tool parts", () => {
@@ -155,6 +175,67 @@ describe("createTranslator - tool parts", () => {
         toolCallId: "tc-3",
         errorText: "timeout",
         dynamic: true,
+      },
+    ]);
+  });
+
+  it("streams command output as a typed UI data part", () => {
+    const { translate } = createTranslator("run-x");
+    expect(
+      translate(
+        makeEnvelope({
+          kind: "tool_output",
+          tool_name: "execute_command",
+          tool_call_id: "tc-4",
+          job_id: "job-4",
+          stream: "stdout",
+          text: "scanning 10.0.0.1",
+          sequence: 7,
+          elapsed_ms: 2300,
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "data-command-output",
+        id: "command-output-job-4-7",
+        data: {
+          jobId: "job-4",
+          toolCallId: "tc-4",
+          toolName: "execute_command",
+          stream: "stdout",
+          text: "scanning 10.0.0.1",
+          sequence: 7,
+          elapsedMs: 2300,
+          final: false,
+        },
+      },
+    ]);
+  });
+
+  it("keeps quiet-command heartbeats visible in message parts", () => {
+    const { translate } = createTranslator("run-x");
+    expect(
+      translate(
+        makeEnvelope({
+          kind: "tool_heartbeat",
+          tool_name: "nmap_scan",
+          job_id: "job-5",
+          elapsed_ms: 12_000,
+          last_output_ms: 4_000,
+        }),
+      ),
+    ).toEqual([
+      {
+        type: "data-tool-heartbeat",
+        id: "tool-heartbeat-job-5",
+        data: {
+          jobId: "job-5",
+          toolCallId: "",
+          toolName: "nmap_scan",
+          elapsedMs: 12_000,
+          lastOutputMs: 4_000,
+          text: "command still running",
+        },
       },
     ]);
   });

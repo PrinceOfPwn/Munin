@@ -22,6 +22,7 @@ Envelope contract (mirrors the pre-migration wire format so
    "input": {...}}`` — before ``wrap_tool_call``
 * ``{"kind": "tool_result", "tool_call_id": ..., "output": ...}`` — success
 * ``{"kind": "tool_failed", "tool_call_id": ..., "error": ...}`` — exception
+* ``{"kind": "tool_output", "tool_call_id": ..., "stream": ..., "text": ...}`` — live command output
 
 Envelopes are emitted by ``ProgressEmitMiddleware`` (tool lifecycle) and
 ``runtime_adapter.translate_events`` (provider reasoning + run_state), so this handler
@@ -318,6 +319,26 @@ def _persist_envelope(
                 tool_call_id=envelope.get("tool_call_id") or None,
             )
             return
+        if kind == "tool_output":
+            append_output = getattr(store, "append_tool_output_event", None)
+            if append_output is not None and str(envelope.get("text") or ""):
+                append_output(
+                    run_id=run_id,
+                    tool_name=str(envelope.get("tool_name") or "unknown"),
+                    tool_call_id=str(envelope.get("tool_call_id") or ""),
+                    job_id=str(envelope.get("job_id") or ""),
+                    stream=str(envelope.get("stream") or "stdout"),
+                    text=str(envelope.get("text") or ""),
+                    sequence=int(envelope.get("sequence") or 0),
+                    elapsed_ms=int(envelope.get("elapsed_ms") or 0),
+                    final=bool(envelope.get("final")),
+                )
+            return
+        if kind == "tool_heartbeat":
+            # Heartbeats are transient transport signals. The output chunks
+            # and terminal tool lifecycle are durable, so replay never needs
+            # to reproduce every pulse.
+            return
     except Exception:  # noqa: BLE001 - persistence best-effort
         log.debug("chat: envelope persistence failed (kind=%s)", kind, exc_info=True)
 
@@ -422,6 +443,7 @@ def _envelope_from_event(
     *,
     run_id: str,
     tools_by_eid: dict[str, dict[str, Any]],
+    tools_by_call_id: dict[str, dict[str, Any]] | None = None,
     reasoning_by_eid: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Translate one ``run_events`` row into a Munin envelope.
@@ -452,8 +474,28 @@ def _envelope_from_event(
 
     if kind.startswith("tool."):
         state = kind.split(".", 1)[1]
-        detail = tools_by_eid.get(eid) or {}
+        if state == "output":
+            if not isinstance(payload, dict):
+                return None
+            return {
+                "kind": "tool_output",
+                "run_id": run_id,
+                "tool_call_id": payload.get("tool_call_id") or "",
+                "tool_name": payload.get("tool_name") or "unknown",
+                "job_id": payload.get("job_id") or "",
+                "stream": payload.get("stream") or "stdout",
+                "text": payload.get("text") or "",
+                "sequence": int(payload.get("sequence") or 0),
+                "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+                "final": bool(payload.get("final")),
+            }
         tool_call_id = payload.get("tool_call_id") if isinstance(payload, dict) else None
+        detail = tools_by_eid.get(eid) or {}
+        if not detail and tools_by_call_id and tool_call_id:
+            # A tool lifecycle appends one run-event per state, while the
+            # read-model row keeps the original running-event id.  Completed
+            # and failed replay events therefore need the stable call id.
+            detail = tools_by_call_id.get(str(tool_call_id)) or {}
         tool_call_id = tool_call_id or detail.get("id")
         tool_name = payload.get("tool") if isinstance(payload, dict) else None
         tool_name = tool_name or detail.get("tool_name") or "unknown"
@@ -681,6 +723,9 @@ async def _stream_idempotent_replay(
             tools_by_eid = {
                 str(row.get("event_id")): row for row in (detail.get("tools") or [])
             }
+            tools_by_call_id = {
+                str(row.get("id")): row for row in (detail.get("tools") or []) if row.get("id")
+            }
             reasoning_by_eid = {
                 str(row.get("event_id")): row for row in (detail.get("reasoning") or [])
             }
@@ -690,6 +735,7 @@ async def _stream_idempotent_replay(
                     event,
                     run_id=run_id,
                     tools_by_eid=tools_by_eid,
+                    tools_by_call_id=tools_by_call_id,
                     reasoning_by_eid=reasoning_by_eid,
                 )
                 if envelope is None:
@@ -1321,10 +1367,17 @@ def register_chat_routes(
             )
             for run in aggregate.get("runs", []):
                 if run.get("state") in NON_TERMINAL_RUN_STATES:
-                    return error_response(
-                        409,
-                        "run_in_progress",
-                        "a run is still active in this conversation — send guidance instead of a new turn",
+                    active_run_id = str(run.get("id") or run.get("run_id") or "")
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "run_in_progress",
+                                "message": "a run is still active in this conversation — send guidance instead of a new turn",
+                            },
+                            **({"active_run_id": active_run_id} if active_run_id else {}),
+                        },
+                        status_code=409,
                     )
         except (PermissionError, KeyError):
             # Fall through — create_turn will fail with the same auth check.

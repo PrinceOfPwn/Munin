@@ -15,6 +15,7 @@ import logging
 from typing import Any, Callable
 
 from ...mcp.audit import redact_secrets  # noqa: TID252
+from ..execution_progress import tool_call_scope, tool_progress_scope
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,29 @@ def _deep_redact(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_deep_redact(item) for item in value]
     return redact_secrets(value)
+
+
+def _render_tool_result(result: Any) -> str:
+    """Extract the human-visible payload from LangChain tool responses.
+
+    ``StructuredTool`` normally returns a ``ToolMessage`` whose useful value
+    lives in ``content`` (and, for ``content_and_artifact`` tools, in
+    ``artifact``).  Falling back to ``repr(ToolMessage)`` can render an empty
+    content field even when the structured result is available elsewhere.
+    """
+    content = getattr(result, "content", None)
+    if content not in (None, "", []):
+        value = content
+    else:
+        artifact = getattr(result, "artifact", None)
+        value = artifact if artifact not in (None, "", []) else result
+    value = _deep_redact(value)
+    if isinstance(value, str):
+        return value[:8_000]
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)[:8_000]
+    except (TypeError, ValueError):
+        return repr(value)[:8_000]
 
 
 class ProgressEmitMiddleware(AgentMiddleware):
@@ -112,7 +136,7 @@ class ProgressEmitMiddleware(AgentMiddleware):
             )
             return
         redacted_result = _deep_redact(result)
-        output = redacted_result if isinstance(redacted_result, str) else repr(redacted_result)[:4000]
+        output = _render_tool_result(redacted_result)
         self._emit(
             {
                 "kind": "tool_result",
@@ -128,7 +152,17 @@ class ProgressEmitMiddleware(AgentMiddleware):
     def wrap_tool_call(self, request: Any, handler: Callable) -> Any:
         name, call_id = self._before(request)
         try:
-            result = handler(request)
+            with tool_call_scope(name, call_id), tool_progress_scope(
+                lambda event: self._emit(
+                    {
+                        **event,
+                        "tool_name": event.get("tool_name") or name,
+                        "tool_call_id": event.get("tool_call_id") or call_id,
+                        "run_id": event.get("run_id") or self._resolve_run_id(),
+                    }
+                )
+            ):
+                result = handler(request)
         except Exception as exc:  # noqa: BLE001
             self._after(call_id, name, None, error=exc)
             raise
@@ -138,7 +172,17 @@ class ProgressEmitMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request: Any, handler: Callable) -> Any:
         name, call_id = self._before(request)
         try:
-            result = await handler(request)
+            with tool_call_scope(name, call_id), tool_progress_scope(
+                lambda event: self._emit(
+                    {
+                        **event,
+                        "tool_name": event.get("tool_name") or name,
+                        "tool_call_id": event.get("tool_call_id") or call_id,
+                        "run_id": event.get("run_id") or self._resolve_run_id(),
+                    }
+                )
+            ):
+                result = await handler(request)
         except Exception as exc:  # noqa: BLE001
             self._after(call_id, name, None, error=exc)
             raise

@@ -17,14 +17,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from .skill_library import BundledSkillLibrary, bundled_skill_library
 from .spec import SubagentSpec
 
 
 class SubagentFactory:
-    def __init__(self, tools: list[Any], model: Any = None, registry: Any | None = None):
+    def __init__(
+        self,
+        tools: list[Any],
+        model: Any = None,
+        registry: Any | None = None,
+        skill_library: BundledSkillLibrary | None = None,
+    ):
         self._tools = tools
         self._model = model
         self._registry = registry
+        self._skill_library = skill_library or bundled_skill_library()
 
     # ------------------------------------------------------------------
 
@@ -89,19 +97,34 @@ class SubagentFactory:
 
     def _make_persisted_subagent_dict(self, spec: SubagentSpec) -> dict:
         """Deep Agents native SubAgent declaration shape."""
-        return {
+        agent = {
             "name": spec.name,
             "description": spec.purpose,
             "system_prompt": spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
             "tools": self._filter_tools(spec.tools, may_create_child=spec.may_create_child),
             "model": self._resolve_model(spec),
         }
+        binding = self._skill_library.bind(spec.skills)
+        if binding is not None:
+            # Custom Deep Agents subagents explicitly receive their own skill
+            # sources; they do not inherit the parent skill list implicitly.
+            agent["skills"] = binding.sources
+        return agent
 
     def _make_deep_agent(self, spec: SubagentSpec) -> Any:
         from deepagents import create_deep_agent  # noqa: PLC0415
+
         from ..tool_gateway import approval_policy_for_tools  # noqa: PLC0415
 
         tools = self._filter_tools(spec.tools, may_create_child=spec.may_create_child)
+        binding = self._skill_library.bind(spec.skills)
+        kwargs: dict[str, Any] = {}
+        if binding is not None:
+            kwargs.update(
+                skills=binding.sources,
+                backend=binding.backend,
+                permissions=binding.permissions,
+            )
 
         return create_deep_agent(
             name=spec.name,
@@ -109,6 +132,7 @@ class SubagentFactory:
             tools=tools,
             system_prompt=spec.system_prompt or f"You are {spec.name}: {spec.purpose}",
             interrupt_on=approval_policy_for_tools(tools),
+            **kwargs,
         )
 
     def _make_compiled_langgraph(self, spec: SubagentSpec) -> Any:
