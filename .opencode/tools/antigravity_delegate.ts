@@ -5,10 +5,11 @@ const MAX_TOOL_OUTPUT = 120_000
 
 export default tool({
   description:
-    "Delegate a precise coding task to the Google Antigravity SDK. " +
-    "The worker modifies the current Git worktree; this tool then returns the real " +
-    "Git diff, changed files, worker report, and independently captured validation " +
-    "exit codes. Always inspect the diff before accepting the patch.",
+    "Delegate a precise coding task to Antigravity CLI (`agy`) using the user's " +
+    "Google Sign-In session and Antigravity subscription quota. The worker modifies " +
+    "the current Git worktree; this tool then returns the real Git diff, changed " +
+    "files, structured CLI output, and independently captured validation exit codes. " +
+    "Always inspect the diff before accepting the patch.",
 
   args: {
     task: tool.schema
@@ -24,7 +25,7 @@ export default tool({
     validation: tool.schema
       .array(tool.schema.string())
       .default([])
-      .describe("Commands the wrapper must run after the worker finishes"),
+      .describe("Commands the wrapper must run after Antigravity finishes"),
     validation_timeout: tool.schema
       .number()
       .int()
@@ -32,6 +33,17 @@ export default tool({
       .max(1800)
       .default(300)
       .describe("Timeout in seconds for each validation command"),
+    agent_timeout: tool.schema
+      .number()
+      .int()
+      .min(30)
+      .max(3600)
+      .default(1200)
+      .describe("Maximum runtime in seconds for the agy headless invocation"),
+    agent: tool.schema
+      .string()
+      .optional()
+      .describe("Optional Antigravity custom agent name passed through --agent"),
   },
 
   async execute(args, context) {
@@ -49,6 +61,8 @@ export default tool({
       allowed_paths: args.allowed_paths,
       validation: args.validation,
       validation_timeout: args.validation_timeout,
+      agent_timeout: args.agent_timeout,
+      agent: args.agent,
     })
 
     const process = Bun.spawn(["python3", script, "--request", request], {
@@ -61,7 +75,10 @@ export default tool({
       stderr: "pipe",
     })
 
-    const timer = setTimeout(() => process.kill(), 20 * 60 * 1000)
+    const timer = setTimeout(
+      () => process.kill(),
+      (args.agent_timeout + args.validation_timeout * Math.max(args.validation.length, 1) + 60) * 1000,
+    )
 
     try {
       const [stdout, stderr, exitCode] = await Promise.all([
@@ -70,33 +87,21 @@ export default tool({
         process.exited,
       ])
 
-      if (exitCode !== 0) {
-        return JSON.stringify(
-          {
-            status: "error",
-            exit_code: exitCode,
-            stdout: stdout.slice(-20_000),
-            stderr: stderr.slice(-20_000),
-          },
-          null,
-          2,
-        )
-      }
-
       let result: Record<string, unknown>
       try {
         result = JSON.parse(stdout) as Record<string, unknown>
       } catch {
-        return JSON.stringify(
-          {
-            status: "error",
-            message: "Antigravity wrapper returned invalid JSON",
-            stdout: stdout.slice(-20_000),
-            stderr: stderr.slice(-20_000),
-          },
-          null,
-          2,
-        )
+        result = {
+          status: "error",
+          message: "Antigravity wrapper returned invalid JSON",
+          stdout: stdout.slice(-20_000),
+          stderr: stderr.slice(-20_000),
+        }
+      }
+
+      if (exitCode !== 0) {
+        result.process_exit_code = exitCode
+        result.process_stderr = stderr.slice(-20_000)
       }
 
       const serialized = JSON.stringify(result, null, 2)
