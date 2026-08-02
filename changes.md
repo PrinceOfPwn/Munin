@@ -4,6 +4,77 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-02 — Soul rebuild (identity, doctrine, capabilities, idiomatic delegation)
+
+Rebuild of all five `soul/*.md` files on top of the latest `main` (which carried
+the autonomous-modes refactor). The previous soul leaned hard on AD/LDAP-specific
+detail (Kerberoast/AS-REP-as-triggers, `ldap_agent` as a hardcoded default
+subagent), over-fixed several rules (forge loop on goals AND principles, scope
+doctrine on four files) and cited infrastructure as if the agent had to operate
+it (Turso online, GitHub Actions, GUI proxy, pytest tests/, `munin reset`).
+
+- `soul/identity.md` — doctrine moved to the first line. The "applies to
+  GLM/MiMo/Qwen/DeepSeek/Kimi/Yi" model-family list was deleted (the model does
+  not need to enumerate its siblings). Hugin's role is narrowed to its actual
+  specialty: malware analysis, Rust / low-level implementation, evasion and
+  persistence techniques, long-dwell TTPs, APT group TTP distillation. A new
+  section names the two operator-chosen surfaces the runtime already provides
+  (operation modes STANDARD/YOLO/GOAL/BEAST and the durable TODO plan +
+  hypothesis tracking under GOAL/BEAST); the soul refers to the runtime as the
+  authority, it does not re-paste mode rules.
+- `soul/principles.md` — Scope Doctrine now lives once, marked as the sole
+  authority, and is referenced by the other files instead of being re-stated.
+  §3 restates Hugin's specialty boundary. §6 is a condensed reference to the
+  four modes (the runtime contract in `autonomy/modes.py` stays authoritative).
+  **§7 (delegation) is rewritten around two surfaces**: §7.1 documents the
+  idiomatic in-process path via the Autonomy Kernel's 12 meta-tools as
+  registered in `kernel.py` (`create_tool`, `invoke_registered_tool`,
+  `list_registered_tools`, `inspect_registered_tool`, `create_subagent`,
+  `invoke_registered_agent`, `list_registered_agents`, `inspect_registered_agent`,
+  `create_workflow`, `invoke_registered_workflow`, `list_registered_workflows`,
+  `schedule_workers`), and the three `SubagentSpec.runtime_type` choices
+  (`deep_agent` / `compiled_langgraph` / `persisted_subagent_dict`) as the
+  agent's decision; §7.2 documents the cross-process persistent path via MCP
+  wake (`munin_wake`, `munin_wake_claim`, `munin_wake_list`,
+  `read_wake_artifact`, `subagent_trace`, `graph_forge`). §8 expands the
+  "shared intel vs memory" rule from a closed AD-specific list (Kerberoast /
+  AS-REP / Domain Admins) to an open pivot-based criterion: any validated pivot
+  that changes the next decision goes to `publish_shared_intel`.
+- `soul/skills.md` — regrouped by operational function, not by source file.
+  Added the previously missing operator-facing tools that were already in the
+  runtime: `munin_chat` (the conversational portal that runs the internal ReAct
+  loop), `conversation_list` / `conversation_get` / `conversation_create` (the
+  GUI-backed durable conversation bridge), `read_wake_artifact` (the runner
+  payload reader), the Autonomy Kernel section with all 12 meta-tools, the
+  durable-plan section with `todo_update` ops and `hypothesis`, and the admin /
+  diagnostics block (`health_check`, `vpn_status`, `job_status`, `job_cancel`,
+  `wiki_git_syncer`, `munin_capabilities`, `munin_diagnostics`,
+  `munin_self_diagnose`, `munin_read_source`). The hardcoded `ldap_agent`
+  entry in "native agents" was deleted (it was incorrect: `_NATIVE_SUBAGENTS`
+  is empty in `subagents/base.py` and the agent should `create_subagent` /
+  `graph_forge` specialists on demand).
+- `soul/goals.md` — rewritten as a standard of operational excellence, not a
+  product roadmap. Removed maintainer-facing items ("make Turso the long-term
+  campaign memory", "GitHub Actions / LDAP lab / GUI proxy reproducible",
+  "`pytest tests/` passes", "`munin reset` reproducible"). The agent's success
+  criterion is campaign speed and depth with low noise, dense evidence and
+  capability reuse, not a build status.
+- `soul/valravn.md` — operational doctrine only. Removed the §"运营守卫" block
+  about Google Safe Browsing business mode suppression, FullHunt opt-in and
+  provider quotas — those concerns are for the operator / maintainer, not the
+  agent. Kept the operational contract: status probe, IOC / org / asset / CVE /
+  network / historical-web / URL / darkweb / capture / translate flows, the
+  `depth="quick"` vs `depth="deep"` rule, the evidence-discipline requirement
+  to retain provider attribution + retrieval time + source URL + first/last
+  seen + contradictions. Added an explicit bridge to the campaign loop
+  (`principles.md §2`) and how Hugin (knowledge) and Valravn (observation) are
+  complementary, both external evidence to verify.
+
+No runtime code changed. `munin/core/prompting.py`, `autonomy/modes.py` and
+the subagent native files (`munin/subagents/ldap_agent.py`) are unchanged; the
+soul stops duplicating the runtime contracts those files already enforce and
+stops imposing a nonexistent default subagent.
+
 ## 2026-08-02 — CI/CD cleanup + Turso reset covers all tables
 
 - Deleted temporary `prepare-*` workflows (one-off maintenance artifacts) from
