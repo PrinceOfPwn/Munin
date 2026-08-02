@@ -26,11 +26,19 @@ jobs:
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
       MUNIN_MASTER_KEY: ${{ secrets.MUNIN_MASTER_KEY }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
+      - name: Checkout repository
+        working-directory: ${{ github.workspace }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout --detach FETCH_HEAD
+      - name: Select hosted Python 3.11
+        working-directory: ${{ github.workspace }}
+        run: |
+          PYTHON_BIN="$(find /opt/hostedtoolcache/Python -type d -path '*/3.11.*/x64/bin' 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$PYTHON_BIN" ]; then echo "$PYTHON_BIN" >> "$GITHUB_PATH"; fi
+          "${PYTHON_BIN:+$PYTHON_BIN/}python" --version
       - name: Install backend
         run: |
           python -m pip install --upgrade pip poetry==2.3.2
@@ -67,12 +75,20 @@ jobs:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+      - name: Checkout repository
+        working-directory: ${{ github.workspace }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout --detach FETCH_HEAD
+      - name: Select hosted Node 22
+        working-directory: ${{ github.workspace }}
+        run: |
+          NODE_BIN="$(find /opt/hostedtoolcache/node -type d -path '*/22.*/x64/bin' 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$NODE_BIN" ]; then echo "$NODE_BIN" >> "$GITHUB_PATH"; fi
+          "${NODE_BIN:+$NODE_BIN/}node" --version
+          "${NODE_BIN:+$NODE_BIN/}npm" --version
       - run: npm ci --no-audit
       - run: npm run typecheck
       - run: npm test
@@ -118,19 +134,29 @@ jobs:
       MUNIN_SMOKE_LDAP_TARGET: 127.0.0.1
       MUNIN_SMOKE_APACHE_TARGET: 127.0.0.1
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+      - name: Checkout repository
+        working-directory: ${{ github.workspace }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout --detach FETCH_HEAD
+      - name: Select hosted Python 3.11
+        working-directory: ${{ github.workspace }}
+        run: |
+          PYTHON_BIN="$(find /opt/hostedtoolcache/Python -type d -path '*/3.11.*/x64/bin' 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$PYTHON_BIN" ]; then echo "$PYTHON_BIN" >> "$GITHUB_PATH"; fi
+          "${PYTHON_BIN:+$PYTHON_BIN/}python" --version
+      - name: Verify hosted Go
+        working-directory: ${{ github.workspace }}
+        run: go version
+      - name: Select hosted Node 22
+        working-directory: ${{ github.workspace }}
+        run: |
+          NODE_BIN="$(find /opt/hostedtoolcache/node -type d -path '*/22.*/x64/bin' 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$NODE_BIN" ]; then echo "$NODE_BIN" >> "$GITHUB_PATH"; fi
+          "${NODE_BIN:+$NODE_BIN/}node" --version
+          "${NODE_BIN:+$NODE_BIN/}npm" --version
       - name: Install Munin and lab probes
         run: |
           python -m pip install --upgrade pip poetry==2.3.2
@@ -210,16 +236,11 @@ jobs:
           if [ -n "$MUNIN_DB_URL" ] && [ -n "$MUNIN_MASTER_KEY" ]; then
             poetry run python scripts/production_fixture_janitor.py --test-run-id "$MUNIN_E2E_TEST_RUN_ID"
           fi
-      - name: Upload E2E logs
+      - name: Print E2E logs
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: actions-e2e-lab-${{ github.run_id }}
-          path: |
-            /tmp/munin-e2e.log
-            /tmp/munin-gui-e2e.log
-          retention-days: 7
-
+        run: |
+          tail -200 /tmp/munin-e2e.log 2>/dev/null || true
+          tail -200 /tmp/munin-gui-e2e.log 2>/dev/null || true
   live-llm-smoke:
     name: Post-merge live LLM ReAct canary (1 real turn)
     # Same fork-safety gate as e2e_lab: never expose LLM_* secrets to PRs from forks.
@@ -263,14 +284,22 @@ jobs:
       MUNIN_SMOKE_LDAP_TARGET: 127.0.0.1
       MUNIN_SMOKE_APACHE_TARGET: 127.0.0.1
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
+      - name: Checkout repository
+        working-directory: ${{ github.workspace }}
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_REF}"
+          git checkout --detach FETCH_HEAD
+      - name: Select hosted Python 3.11
+        working-directory: ${{ github.workspace }}
+        run: |
+          PYTHON_BIN="$(find /opt/hostedtoolcache/Python -type d -path '*/3.11.*/x64/bin' 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$PYTHON_BIN" ]; then echo "$PYTHON_BIN" >> "$GITHUB_PATH"; fi
+          "${PYTHON_BIN:+$PYTHON_BIN/}python" --version
+      - name: Verify hosted Go
+        working-directory: ${{ github.workspace }}
+        run: go version
       - name: Install Munin and lab probes
         run: |
           python -m pip install --upgrade pip poetry==2.3.2
@@ -356,11 +385,6 @@ jobs:
           if [ -n "$MUNIN_DB_URL" ] && [ -n "$MUNIN_MASTER_KEY" ]; then
             poetry run python scripts/production_fixture_janitor.py --test-run-id "$MUNIN_E2E_TEST_RUN_ID" --fixture-user "$MUNIN_LIVE_SMOKE_ADMIN"
           fi
-      - name: Upload live-LLM logs
+      - name: Print live-LLM logs
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: live-llm-smoke-${{ github.run_id }}
-          path: |
-            /tmp/munin-e2e.log
-          retention-days: 7
+        run: tail -200 /tmp/munin-e2e.log 2>/dev/null || true

@@ -38,11 +38,6 @@ on:
         required: false
         default: ""
         type: string
-      persist_state:
-        description: "Roundtrip shared_state.sqlite via artifact (soul + memory + forge state)"
-        required: true
-        default: true
-        type: boolean
       open_public_tunnel:
         description: "Expose the authenticated MCP through a temporary public tunnel"
         required: true
@@ -67,7 +62,6 @@ on:
 
 # Required so Munin can commit forged tools + open soul-proposal PRs.
 permissions:
-  actions: read
   contents: write
   pull-requests: write
 
@@ -78,7 +72,7 @@ jobs:
     # v3: bumped to 4h so an operator can drive a long-running investigation.
     # The runner still self-caps below to duration_minutes; this is only the
     # outer safety ceiling.  Free-tier runners are hard-capped at 6h anyway,
-    # so 240min leaves head-room for teardown/artifact upload.
+    # so 240min leaves head-room for teardown.
     timeout-minutes: 240
 
     # We run as root inside the container (Kali's default) so installed
@@ -140,9 +134,8 @@ jobs:
       MUNIN_INSTANCE_ID:  "github-run-${{ github.run_id }}-${{ github.run_attempt }}"
       GH_TOKEN:           ${{ github.token }}
       # Storage backend. Leave MUNIN_DB_URL empty to use local SQLite (default,
-      # ephemeral across sessions unless persist_state=true rounds it via
-      # artifact). Set it as a repo secret if you want to point at a Turso /
-      # libsql cloud database for true persistent multi-session state.
+      # ephemeral across sessions. This workflow requires Turso / libsql
+      # below for durable multi-session state.
       MUNIN_DB_URL:       ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
       # Isolated test key when no deployment KEK is configured. It encrypts
@@ -167,34 +160,17 @@ jobs:
       # push new commits (soul PRs, forged tool commits). token defaults to
       # the auto GITHUB_TOKEN with the permissions declared at the workflow
       # level above (contents: write, pull-requests: write).
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # Turso persists registry rows, but generated Python/JSON sources still
-      # need to cross ephemeral runner boundaries. Restore the full durable
-      # file set in both SQLite and Turso modes.
-      - name: Restore Munin durable files from last session
-        if: ${{ inputs.persist_state }}
-        id: state_restore
-        continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: live-session.yml
-          workflow_conclusion: ""      # accept success or failure — we want the freshest state
-          name: munin-state
-          path: .
-          if_no_artifact_found: warn
-
-      - name: Show restored state summary
-        if: ${{ inputs.persist_state }}
+      - name: Checkout repository
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -f data/shared_state.sqlite ]; then
-              echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
-          fi
-          restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
-          echo "✓ Restored ${restored_sources} generated source file(s)"
-
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ca-certificates git
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags origin "+refs/heads/*:refs/remotes/origin/*"
+          git checkout --detach "${GITHUB_SHA}"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
       - name: Install Munin runtime + offensive toolchain
         run: |
           apt-get update -qq
@@ -617,7 +593,7 @@ jobs:
           curl -fsS http://127.0.0.1:8787/health 2>&1 || echo "(production API unreachable)"
 
       # Runners are detached process-group leaders. Stop and await them before
-      # MCP flushes git/Turso and before SQLite artifacts are snapshotted.
+      # MCP flushes git/Turso before the runner exits.
       - name: Stop detached subagents
         if: always()
         run: poetry run python -m munin.subagents.process_control --timeout 15
@@ -659,39 +635,3 @@ jobs:
           git checkout -B "${MUNIN_GIT_BRANCH}" 2>/dev/null || true
           git push -u origin "${MUNIN_GIT_BRANCH}" || echo "final push failed (non-fatal)"
 
-      # Turso stores rows; this artifact stores the generated Python/JSON
-      # sources those rows reference. In SQLite mode it also carries the DB.
-      - name: Upload Munin durable state and generated sources
-        if: always() && inputs.persist_state
-        # Turso is now authoritative for graphs, memory, and generated Python.
-        # Artifact quota exhaustion must not turn an otherwise-valid session red.
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: munin-state
-          path: |
-            data/shared_state.sqlite
-            data/shared_state.sqlite-wal
-            data/shared_state.sqlite-shm
-            data/soul_pending/
-            data/wake_artifacts/
-            munin/generated/
-          retention-days: 90
-          if-no-files-found: warn
-
-      - name: Upload full logs as artifact
-        # A Turso-only live session must leave no conversation or tool output in
-        # an Actions artifact. GitHub's own job log remains available for the
-        # operator while the run is retained.
-        if: always() && inputs.persist_state
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: munin-session-${{ github.run_id }}
-          path: |
-            /tmp/munin.log
-            /tmp/munin-gui.log
-            /tmp/mcp-tunnel.log
-            /tmp/gui-tunnel.log
-            data/events.jsonl
-          retention-days: 7
