@@ -852,6 +852,8 @@ async def _stream_chat(
     lease_token: str,
     resume_decisions: list[dict[str, Any]] | None = None,
     resume_from_checkpoint: bool = False,
+    mode: Any = None,
+    goal: dict[str, Any] | None = None,
 ) -> AsyncIterator[bytes]:
     from ..core.llm_client import LLMClient
     from ..core.runtime_adapter import supervisor_runner
@@ -977,6 +979,8 @@ async def _stream_chat(
         human_request_store=store,
         resume_decisions=resume_decisions,
         resume_from_checkpoint=resume_from_checkpoint,
+        mode=mode,
+        goal=goal,
     )
     try:
         async for envelope in runner_stream:
@@ -1170,6 +1174,19 @@ async def recover_persisted_chat_runs(*, store: Any, shared_state: Any) -> list[
             log.exception("chat: unable to claim recovery candidate run_id=%s", run_id)
             continue
 
+        # Fase 3: resume with the same operation contract and persistent goal
+        # the original turn was created with (persisted on the agent_runs row).
+        recovery_goal: dict[str, Any] | None = None
+        try:
+            recovery_goal = store.get_goal_for_conversation(
+                conversation_id=str(candidate["conversation_id"])
+            )
+        except Exception:  # noqa: BLE001 - goal hydration must not block recovery
+            recovery_goal = None
+        goal_id = execution.get("goal_id")
+        if recovery_goal and goal_id and str(recovery_goal.get("id")) != str(goal_id):
+            recovery_goal = None
+
         _launch_chat_run(
             store=store,
             shared_state=shared_state,
@@ -1182,6 +1199,8 @@ async def recover_persisted_chat_runs(*, store: Any, shared_state: Any) -> list[
             lease_token=lease_token,
             resume_decisions=resume_decisions,
             resume_from_checkpoint=resume_from_checkpoint,
+            mode=execution.get("mode") or "standard",
+            goal=recovery_goal,
         )
         launched.append(run_id)
     return launched
@@ -1244,6 +1263,65 @@ def register_chat_routes(
             return error_response(400, "invalid_body", "conversation_id is required")
         if not content:
             return error_response(400, "invalid_body", "content is required")
+
+        # Fase 3 (autonomous modes): resolve the operation mode + persistent
+        # goal from the payload, applying the mode gates (GOAL requires a
+        # goal; BEAST requires an explicit scope) before the turn is created.
+        from ..core.autonomy.modes import OperationMode, parse_mode_policy  # noqa: PLC0415
+
+        mode_value = data.get("mode")
+        if mode_value is not None and mode_value != "":
+            try:
+                operation_mode = OperationMode(str(mode_value).lower())
+            except ValueError:
+                return error_response(400, "invalid_body", f"unknown mode {mode_value!r}")
+        else:
+            operation_mode = OperationMode.STANDARD
+        mode_policy = parse_mode_policy(operation_mode)
+
+        goal: dict[str, Any] | None = None
+        goal_payload = data.get("goal") if isinstance(data.get("goal"), dict) else None
+        if goal_payload:
+            goal_id = str(goal_payload.get("id") or "").strip()
+            if goal_id:
+                existing = None
+                try:
+                    existing = store.get_goal_for_conversation(conversation_id=conversation_id)
+                except Exception:  # noqa: BLE001
+                    existing = None
+                if not existing or str(existing.get("id")) != goal_id:
+                    return error_response(404, "not_found", "goal does not exist in this conversation")
+                goal = existing
+            else:
+                try:
+                    goal = store.create_goal(
+                        actor_id=current["id"],
+                        conversation_id=conversation_id,
+                        objective=str(goal_payload.get("objective") or ""),
+                        success_criteria=list(goal_payload.get("success_criteria") or []),
+                        scope=goal_payload.get("scope") or {},
+                        budget=goal_payload.get("budget") or {},
+                        deadline_ms=int(goal_payload["deadline_ms"]) if goal_payload.get("deadline_ms") else None,
+                        mode=operation_mode.value,
+                    )
+                except ValueError as exc:
+                    return error_response(400, "invalid_body", str(exc))
+        elif mode_policy.requires_goal:
+            try:
+                goal = store.get_goal_for_conversation(conversation_id=conversation_id)
+            except Exception:  # noqa: BLE001
+                goal = None
+            if not goal:
+                return error_response(
+                    400, "invalid_body", "goal mode requires a persistent goal (payload.goal)"
+                )
+
+        if mode_policy.requires_scope:
+            scope = (goal or {}).get("scope") or (data.get("scope") if isinstance(data.get("scope"), dict) else None)
+            if not scope:
+                return error_response(
+                    400, "invalid_body", "beast mode requires an explicit scope (payload.scope or goal.scope)"
+                )
 
         idempotency_key = (
             request.headers.get("idempotency-key")
@@ -1311,6 +1389,8 @@ def register_chat_routes(
                 conversation_id=conversation_id,
                 content=content,
                 idempotency_key=idempotency_key,
+                mode=operation_mode.value,
+                goal_id=str((goal or {}).get("id") or "") or None,
             )
         except PermissionError as exc:
             return error_response(403, "forbidden", str(exc))
@@ -1374,6 +1454,8 @@ def register_chat_routes(
             conversation_history=conversation_history,
             assistant_message_id=assistant_message_id,
             lease_token=lease_token,
+            mode=operation_mode,
+            goal=goal,
         )
 
         # The request is now a subscriber, not the execution owner. Browser
@@ -1569,12 +1651,166 @@ def register_chat_routes(
             },
         )
 
+    async def conversation_plan(request: Request) -> Response:
+        """Hydrate the Goal + durable plan + timers for one conversation.
+
+        The plan panel reads this on connect and polls it while the goal is
+        active; the SSE stream carries live ``plan``/``todo``/``hypothesis``/
+        ``replan``/``goal`` envelopes for in-run deltas.
+        """
+        try:
+            current = await actor_dependency(request, csrf=False)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        conversation_id = str(request.path_params["conversation_id"])
+        try:
+            store.get_conversation(
+                actor_id=current["id"], conversation_id=conversation_id
+            )
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        except KeyError:
+            return error_response(404, "not_found", "conversation not found")
+        try:
+            plan = store.plan_snapshot(conversation_id=conversation_id)
+            timers = store.list_timers(conversation_id=conversation_id)
+        except Exception:  # noqa: BLE001 - degraded reads must not 500
+            log.debug("chat: plan hydration failed", exc_info=True)
+            plan = {"goal": None, "items": [], "updated_at_ms": 0}
+            timers = []
+        return JSONResponse(
+            {
+                "ok": True,
+                "data": {
+                    "conversation_id": conversation_id,
+                    "goal": plan.get("goal"),
+                    "items": plan.get("items") or [],
+                    "updated_at_ms": plan.get("updated_at_ms") or 0,
+                    "timers": timers,
+                },
+            }
+        )
+
+    async def create_timer_endpoint(request: Request) -> Response:
+        """Create a durable server-side timer for a conversation."""
+        try:
+            current = await actor_dependency(request, csrf=True)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        try:
+            data = await payload_reader(request)
+        except ValueError as exc:
+            return error_response(400, "invalid_body", str(exc))
+        conversation_id = str(request.path_params["conversation_id"])
+        try:
+            store.get_conversation(
+                actor_id=current["id"], conversation_id=conversation_id
+            )
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        except KeyError:
+            return error_response(404, "not_found", "conversation not found")
+
+        kind = str(data.get("kind") or data.get("timer_kind") or "goal_eval").strip()
+        cadence_seconds = int(data.get("cadence_seconds") or 0)
+        if cadence_seconds < 5:
+            return error_response(400, "invalid_timer", "cadence_seconds must be >= 5")
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        try:
+            timer = store.create_timer(
+                conversation_id=conversation_id,
+                actor_id=current["id"],
+                kind=kind,
+                due_at_ms=0,
+                cadence_ms=cadence_seconds * 1000,
+                payload=payload,
+                goal_id=str(data.get("goal_id") or "") or None,
+            )
+        except ValueError as exc:
+            return error_response(400, "invalid_timer", str(exc))
+        return JSONResponse({"ok": True, "data": timer}, status_code=201)
+
+    async def pause_timer_endpoint(request: Request) -> Response:
+        try:
+            current = await actor_dependency(request, csrf=True)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        timer_id = str(request.path_params["timer_id"])
+        try:
+            timer = store.pause_timer(actor_id=current["id"], timer_id=timer_id)
+        except KeyError:
+            return error_response(404, "not_found", "timer not found")
+        return JSONResponse({"ok": True, "data": timer})
+
+    async def cancel_timer_endpoint(request: Request) -> Response:
+        try:
+            current = await actor_dependency(request, csrf=True)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        timer_id = str(request.path_params["timer_id"])
+        try:
+            timer = store.cancel_timer(actor_id=current["id"], timer_id=timer_id)
+        except KeyError:
+            return error_response(404, "not_found", "timer not found")
+        return JSONResponse({"ok": True, "data": timer})
+
+    async def update_goal_endpoint(request: Request) -> Response:
+        """Operator-owned goal mutations (state, criteria, scope, budget)."""
+        try:
+            current = await actor_dependency(request, csrf=True)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        try:
+            data = await payload_reader(request)
+        except ValueError as exc:
+            return error_response(400, "invalid_body", str(exc))
+        goal_id = str(request.path_params["goal_id"])
+        fields: dict[str, Any] = {}
+        for key in ("state", "objective", "deadline_ms", "last_tick_ms"):
+            if key in data:
+                fields[key] = data[key]
+        for key in ("success_criteria", "scope", "budget"):
+            if key in data and isinstance(data[key], (list, dict)):
+                fields[key] = data[key]
+        if "state" in fields and str(fields["state"]) not in {"pending", "active", "completed", "failed", "paused"}:
+            return error_response(400, "invalid_goal", f"invalid goal state {fields['state']!r}")
+        try:
+            goal = store.update_goal(actor_id=current["id"], goal_id=goal_id, **fields)
+        except KeyError:
+            return error_response(404, "not_found", "goal not found")
+        except ValueError as exc:
+            return error_response(400, "invalid_goal", str(exc))
+        return JSONResponse({"ok": True, "data": goal})
+
     routes.append(Route("/api/chat", chat, methods=["POST"]))
     routes.append(
         Route("/api/chat/{conversation_id}/stream", chat_resume, methods=["GET"])
     )
     routes.append(
         Route("/api/chat/{run_id}/guidance", chat_guidance, methods=["POST"])
+    )
+    routes.append(
+        Route("/api/chat/{conversation_id}/plan", conversation_plan, methods=["GET"])
+    )
+    routes.append(
+        Route("/api/chat/{conversation_id}/timers", create_timer_endpoint, methods=["POST"])
+    )
+    routes.append(
+        Route(
+            "/api/chat/{conversation_id}/timers/{timer_id}/pause",
+            pause_timer_endpoint,
+            methods=["POST"],
+        )
+    )
+    routes.append(
+        Route(
+            "/api/chat/{conversation_id}/timers/{timer_id}/cancel",
+            cancel_timer_endpoint,
+            methods=["POST"],
+        )
+    )
+    routes.append(
+        Route("/api/goals/{goal_id}", update_goal_endpoint, methods=["PATCH"])
     )
     routes.append(
         Route(

@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Callable, Iterable
 from functools import wraps
-from typing import Any, Callable, Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -195,19 +196,31 @@ def lookup_catalog_handler(state: Any, name: str) -> Callable[..., Any] | None:
         return None
 
 
-def approval_policy_for_tools(tools: Iterable[Any]) -> dict[str, dict[str, Any]]:
+def approval_policy_for_tools(
+    tools: Iterable[Any],
+    mode: Any = None,
+) -> dict[str, dict[str, Any]]:
     """Derive Deep Agents' HITL rules from audited live tool metadata.
 
     Active/admin operations and generated code require an approve-or-reject
-    interrupt. Passive/state-bound tools stay unblocked. The policy has no
+    interrupt.  Passive/state-bound tools stay unblocked.  The policy has no
     provider reasoning or model-generated explanation.
+
+    ``mode`` (``OperationMode``/str/None) selects the *product* guardrail:
+    which additional audit levels pause for approval on top of the immutable
+    ``critical`` floor (which ALWAYS interrupts, in every mode — see
+    ``munin.core.autonomy.modes``).  Standard mode keeps today's behavior
+    exactly (active + admin + critical).
     """
+    from .autonomy.modes import parse_mode_policy  # noqa: TID252, PLC0415
+
+    policy_mode = parse_mode_policy(mode)
     policy: dict[str, dict[str, Any]] = {}
     for tool in tools:
         name = str(getattr(tool, "name", "") or "")
         handler = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
         level = str(getattr(handler, "__munin_audit_level__", "") or "").lower()
-        needs_review = level in {"active", "admin", "critical"} or name.startswith("gen__")
+        needs_review = policy_mode.approval_required_for(level) or name.startswith("gen__")
         # A PR is a privileged external write. This narrow fallback protects
         # registrations created before audit metadata was attached.
         needs_review = needs_review or name == "extension_open_pr"
