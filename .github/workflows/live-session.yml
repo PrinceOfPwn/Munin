@@ -202,19 +202,19 @@ jobs:
           poetry --version
 
       - name: Restore Munin durable files from last session
-      if: ${{ inputs.persist_state }}
-      id: state_restore
-      continue-on-error: true
-      env:
-        GH_TOKEN: ${{ github.token }}
-        MUNIN_RESTORE_ALLOWED_ACTORS: ${{ vars.MUNIN_RESTORE_ALLOWED_ACTORS || github.repository_owner }}
-      run: |
-        python3 scripts/restore_munin_artifact.py \
-          --workflow live-session.yml \
-          --artifact munin-state \
-          --branch "$GITHUB_REF_NAME" \
-          --allowed-actor "$MUNIN_RESTORE_ALLOWED_ACTORS" \
-          --destination "$GITHUB_WORKSPACE"
+        if: ${{ inputs.persist_state }}
+        id: state_restore
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MUNIN_RESTORE_ALLOWED_ACTORS: ${{ vars.MUNIN_RESTORE_ALLOWED_ACTORS || github.repository_owner }}
+        run: |
+          python3 scripts/restore_munin_artifact.py \
+            --workflow live-session.yml \
+            --artifact munin-state \
+            --branch "$GITHUB_REF_NAME" \
+            --allowed-actor "$MUNIN_RESTORE_ALLOWED_ACTORS" \
+            --destination "$GITHUB_WORKSPACE"
 
       - name: Show restored state summary
         if: ${{ inputs.persist_state }}
