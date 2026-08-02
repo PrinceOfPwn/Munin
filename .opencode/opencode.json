@@ -1,17 +1,28 @@
-﻿{
+{
   "$schema": "https://opencode.ai/config.json",
   "username": "Raven-Mind",
   "default_agent": "raven-mind",
-  "instructions": ["AGENTS.md", "ARCHITECTURE.md", "MAP.md"],
+  "instructions": ["AGENTS.md", "ARCHITECTURE.md", "MAP.md", ".opencode/agent/antigravity-delegation.md"],
   "skills": { "paths": [".opencode/skills"] },
   "agent": {
     "raven-mind": {
       "mode": "primary",
-      "description": "Munin operator agent. Pulls remote changes, reads CI/CD and issues via GitHub, verifies libraries via Context7, drives Chrome via DevTools MCP, and builds frontend against the Munin design system without reinventing the wheel.",
+      "description": "Munin operator agent. Pulls remote changes, reads CI/CD and issues via GitHub, delegates bounded coding work to Antigravity CLI using the user's Google subscription quota and reviews the resulting Git diff, verifies libraries via Context7, drives Chrome via DevTools MCP, and builds frontend against the Munin design system without reinventing the wheel.",
       "model": "nvidia/z-ai/glm-5.2",
       "permission": {
-        "bash": { "git *": "allow", "gh *": "allow", "npm *": "allow", "npx *": "allow", "*": "ask" },
+        "bash": {
+          "git *": "allow",
+          "gh *": "allow",
+          "npm *": "allow",
+          "npx *": "allow",
+          "python .opencode/antigravity/configure_defaults.py": "allow",
+          "python3 .opencode/antigravity/configure_defaults.py": "allow",
+          "agy --version": "allow",
+          "*": "ask"
+        },
         "edit": "allow",
+        "skill": { "antigravity-coder": "allow", "*": "allow" },
+        "antigravity_delegate": "allow",
         "external_directory": { ".opencode/**": "allow", "app/**": "allow", "munin/**": "allow", "*": "ask" }
       }
     }
