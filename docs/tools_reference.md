@@ -1,70 +1,46 @@
 # Capability and skill reference
 
-Munin exposes a live capability surface. This document explains how to reason
-about it; the server or MCP discovery response is the authoritative list for a
-particular deployment.
+Munin exposes a live capability surface. Runtime discovery through MCP and the
+server registry is authoritative; documentation describes capability families,
+not a guaranteed static list.
 
-## Discover the current surface
+## Capability families
 
-Use the web capability view or authenticated MCP discovery to inspect enabled
-tools, schemas and specialist profiles. A tool may exist in source control yet
-be disabled, unregistered, unavailable in the current deployment or prohibited
-for the current operation.
+| Family | Purpose |
+| --- | --- |
+| Conversation and production | Durable conversations, runs, events, approvals and artifacts |
+| Reconnaissance | Network, web and service observation under OPSEC controls |
+| Intelligence | CVE, package, source and campaign enrichment |
+| Valravn | IOC, organization, asset, historical-web, network and browser evidence |
+| Hugin | Passive source-linked knowledge retrieval and planning context |
+| Memory and coordination | Semantic memory, shared intelligence, tasks and messages |
+| Autonomy kernel | Create, inspect and invoke tools, agents and workflows |
+| Generated capabilities | Reviewed `gen__*` tools and bounded specialist graphs |
+| Soul | List, read and propose human-reviewed profile changes |
+| Diagnostics | Health, registry discovery and operational status |
 
-## Capability groups
+## Authority model
 
-| Group | Typical role | Operator question |
-| --- | --- | --- |
-| Diagnostics and administration | Service health, environment checks and controlled local work | Is this required and within the host boundary? |
-| Passive knowledge | CVE/package research, documentation, Hugin retrieval and evidence lookup | Is the source current and traceable? |
-| Directory services | Authorised LDAP/identity review | Are credentials and directory scope approved? |
-| Active assessment | Scoped discovery and validation tools | Is the exact target and impact approved? |
-| Evidence and coordination | Artifacts, memory, delegation and reporting | Does the result preserve provenance? |
-| Generated capabilities | Registered `gen__*` tools and subgraphs | Has this extension been validated and enabled? |
+Discovery is not permission. Every invocation remains subject to actor identity,
+authorized scope, server policy, approval class and run state. Skills, Soul
+files and Hugin material provide context; they do not automatically gain tool
+access or become executable authority.
 
-## Call lifecycle
+## Generated capabilities
 
-The timeline records the lifecycle rather than reducing it to a single chat
-message:
+A generated capability requires a narrow contract, validation, visible
+provenance, registration and the same policy checks as a native capability.
+The `gen__*` namespace makes its origin explicit. Generation alone does not
+establish correctness; the capability must be invoked and its output validated.
 
-1. **Intent** — what tool is proposed or started.
-2. **Output** — streamed command or tool output when available.
-3. **Result or failure** — the terminal returned evidence or error.
-4. **Interpretation** — the agent's conclusion, which remains distinct from
-   the raw result.
+## Specialists
 
-Always inspect the result before treating an assistant statement as established
-fact. A tool intent without terminal result is not a completed call.
+Specialists are bounded by an explicit task, capability allowlist, evidence
+contract and stop condition. Delegation does not create new scope. Their
+activity and results remain visible in the durable event timeline.
 
-## Generated capabilities and subgraphs
+## Soul tools
 
-A generated extension is governed like any other capability. The safe path is
-to define a narrow contract, validate it in its intended sandbox, register it
-with explicit metadata and check policy at each invocation. The `gen__*`
-namespace makes generated origin visible; it does not make an extension safe or
-automatically authorised.
-
-## Skills and Hugin research
-
-Skills are instruction and research documents, not server-side tool schemas.
-The Hugin-derived material has source identifiers and graph cross-references so
-an agent or operator can trace a technique back to its evidence context.
-
-Use this retrieval model:
-
-1. search metadata for the bounded task;
-2. select a small relevant subset;
-3. inspect the content through the controlled reader;
-4. retain its source/provenance with notes; and
-5. validate the resulting hypothesis with authorised target-specific evidence.
-
-Do not inject an entire skill tree into a run, treat a skill as proof of a
-vulnerability, or invoke actions from a skill without the normal capability and
-approval path.
-
-## Support and diagnosis
-
-When a capability behaves unexpectedly, record the run ID, tool name,
-arguments, timeline events and any artifact reference. Then check live registry
-state, deployment configuration and server logs. This makes a missing tool,
-policy rejection and execution failure distinguishable.
+`soul_list` and `soul_read` inspect profiles. `soul_propose_edit` creates a
+reviewable proposal. The bundled Soul is specialized for CTF/lab scenarios and
+is not the recommended default for production or defensive use.

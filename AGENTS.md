@@ -1,82 +1,59 @@
-# AGENTS.md — Munin
+# Working on Munin
 
-Guía operativa para agentes (opencode Raven-Mind, Claude Code, Codex) que trabajan
-en el repositorio `PrinceOfPwn/Munin`.
+This guide is for coding agents and contributors working on `PrinceOfPwn/Munin`.
+It describes the v1.0.0 repository and runtime; it is not an instruction to use
+the CTF-oriented prompts in `soul/` as the default personality.
 
-## TL;DR — Munin se ejecuta en GitHub Actions, no en tu máquina
+## Project contract
 
-**CRÍTICO**: El runtime completo de Munin (backend MCP + frontend React + estado
-persistente) vive dentro de **GitHub Actions**. No arranques el MCP server ni
-pytest localmente salvo orden explícita del operador.
+Munin is a durable, operator-governed runtime for autonomous security
+operations. The server owns identity, policy, approvals, state and capability
+composition. The Web GUI, MCP and Discord are control surfaces over that same
+runtime.
 
-| Workflow `.github/workflows/` | Dispara | Qué hace |
-|---|---|---|
-| `ci.yml` | push a `main`/`agent/**`/`codex/**`, PRs, manual | Backend (compileall + pytest + Turso online) + Frontend (`next build`, `next lint`). 20/15 min timeout. |
-| `live-session.yml` | manual/dispatch | Arranca el runtime unificado `munin serve` en `:8787`, restaura estado (artifact SQLite o Turso/libsql), abre tunnel para el frontend React. Crea dirs de home escribibles + `reports/`/`evidence/`. |
-| `reset-turso-state.yml` | manual (confirmación `WIPE_MUNIN_TURSO`) | Reset total del estado Turso: limpia **todas** las tablas operacionales (descubiertas dinámicamente, incluye producción/autonomía), preserva `schema_migrations`. |
-| `valravn-smoke.yml` | paths `munin/valravn/**` + `soul/valravn.md` + tests valravn, manual | Compile + protocol smoke + tests de la mesh Valravn; probes opcionales de APIs externas/browser. |
+The configuration tested and verified for **v1.0.0** is:
 
-**Estado** (`data/shared_state.sqlite` WAL) sobrevive a la muerte del runner
-entre las 3 capas: Soul (`soul/*.md`), Forged tools (`munin/generated/`),
-Memoria/working state (artifact o Turso). Ver `ARCHITECTURE.md`.
+- Web GUI
+- GitHub Actions execution environment
+- MiMo V2.5
 
-## Cómo verificar ejecución — usa el GitHub MCP o `gh`
+Other combinations may work, but are not verified unless documented.
 
-No adivines el estado de CI/CD. Úsa:
+## Repository map
 
-- **MCP `github`** (configurado en `.opencode/opencode.json`) para listar runs,
-  check runs, issues, PRs, releases.
-- **`gh`** local (`gh run list`, `gh pr checks <n>`, `gh issue list`, `gh pr view <n>`).
-  El operador está autenticado en `github.com`.
-
-Reportar estado con IDs reales: run_id, PR number, commit SHA, workflow name.
-
-## Estructura del repo
-
-```
-app/                 Frontend Next.js 14 (React 18 + Tailwind 3.4 + Radix + TanStack Query + zustand)
-  src/app/           globals.css, page.tsx
-  src/components/    FlightDeckStable, Providers, ...
-  src/lib/           queries.ts, query-cache.ts, useConversationEvents.ts
-  tailwind.config.ts PALETA COMPLETA — todos los hex viven aquí
-  public/raven-mark.png  asset de marca (reusar antes de crear otro)
-munin/               Backend Python — FastMCP server (unificado en `munin serve` :8787)
-  core/              llm_client, llm_stream, prompting (contratos chino-first), autonomy (modos)
-  mcp/tools/         audit, opsec, LDAP, Forge, Memory, Recon, Intel
-  mcp/persistence.py SQLite/Turso abstraction
-  production/        Production Suite (store, chat, asgi, timers, agents)
-  valravn/           mesh de recon externa (IOC/CVE/assets/wayback)
-soul/                identidad, doctrina y principios (merge vía soul-proposal PRs)
-data/shared_state.sqlite  estado WAL (artifact o Turso)
-.github/workflows/   ci + live-session + reset-turso + valravn-smoke
-docs/  specs/  reports/  evidence/  intel/  knowledge_sync/  templates/
+```text
+app/                    Next.js 15 / React 18 / TypeScript Web GUI
+munin/                  Python 3.11+ backend and runtime
+  core/                 prompting, model integration and autonomy contracts
+  production/           ASGI API, durable chat, runs, events and recovery
+  mcp/                  MCP transport and native capabilities
+  valravn/              external reconnaissance and CTI mesh
+soul/                   optional, human-governed persona packages
+scripts/                operational and maintenance scripts
+docs/                   canonical references and multilingual handbooks
+tests/                  backend and integration tests
+.github/workflows/       CI and operational runner workflows
 ```
 
-## Reglas de arte y código
+## Engineering rules
 
-- **No rehagas la rueda.** Inspecciona antes de escribir nuevo CSS/componentes.
-- Paleta y tokens en `app/tailwind.config.ts` (vía Tailwind utilities, nunca hex).
-- Acento único violeta `#7c3aed`; semánticos solo para señales reales.
-- Tipografía: Inter/Geist (body); Geist Mono (telemetría/código).
-- Motivo raven: reusa `app/public/raven-mark.png`. No skulls/locks/matrix-rain.
-- Ver `ARCHITECTURE.md`, `MAP.md`, y la skill `munin-frontend` para detalle.
+1. Read live code before trusting a static capability list.
+2. Keep authority server-side; UI, skills and prompts cannot bypass policy.
+3. Preserve the separation between checkpoints, events and artifacts.
+4. Treat `soul/` as optional characterization. The bundled profile is for CTFs
+   and controlled labs, not the recommended production default.
+5. Do not claim provider or deployment compatibility without a verified test.
+6. Update documentation whenever behavior, storage, interfaces or workflows change.
 
-## Lint / build / tests
+## Validation
 
-Ejecutar en el runner via CI, no localmente salvo petición explícita:
+```bash
+poetry run pytest
+cd app && npm run build
+```
 
-- Frontend: `npm run lint`, `npm run build` (dentro de `app/`).
-- Backend: `python -m compileall -q munin tests scripts`, `python -m pytest -q`.
-- Ruff para estilo Python (viene en `pyproject.toml`).
+CI is the authoritative integration environment. Local tests remain useful, but
+the verified v1.0.0 path is the GUI on GitHub Actions with MiMo V2.5.
 
-## Sincronización del remoto
-
-1. `git fetch origin --prune`.
-2. `git pull` la rama base (`main` por defecto).
-3. Ramas nuevas `feat/*` o `fix/*` a consolidar → rama `raven-mind/sync-*` +
-   `git merge origin/<rama>` + PR. Nunca push directo a `main` sin PR.
-
-## Documentación
-
-Cualquier cambio no trivial se documenta en `changes.md` (formato histórico del
-repo). Si aplica, actualiza también `README.md` y este `AGENTS.md`.
+Start at [docs/README.md](docs/README.md), [ARCHITECTURE.md](ARCHITECTURE.md)
+and [MAP.md](MAP.md).

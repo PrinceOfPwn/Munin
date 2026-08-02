@@ -1,107 +1,67 @@
 # Runtime architecture
 
-This document describes the execution path behind Munin. The higher-level
-system boundary is in [the architecture overview](../ARCHITECTURE.md).
+This document describes the current execution path behind Munin. The broader
+system boundary is documented in [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## Server composition
 
-`munin serve` hosts the HTTP API, the streamable MCP endpoint and optional
-Discord adapter in one ASGI process. The server shares one authentication,
-policy, capability and persistence boundary across those surfaces.
+`munin serve` hosts the authenticated HTTP API, streamable MCP endpoint and
+optional Discord adapter in one ASGI process. Every surface shares one identity,
+policy, capability and persistence boundary.
 
 | Surface | Purpose | Authority |
 | --- | --- | --- |
-| `/api/*` | Web and programmatic conversations, artifacts and approvals | Authenticated operator API |
-| `/api/chat/{conversation_id}/stream` | Reattach a viewer to persisted activity | Durable event replay |
+| `/api/*` | GUI and programmatic conversations, artifacts and approvals | Authenticated server policy |
+| `/api/chat/{conversation_id}/stream` | Reattach to persisted activity | Durable event replay |
 | `/api/human-requests/{request_id}/resolve` | Decide one waiting action | Exact server-issued request |
-| `/mcp/` | Discover and call the live MCP surface | MCP bearer authentication plus server policy |
+| `/mcp/` | Discover and invoke live capabilities | MCP authentication plus server policy |
 
 ## Execution path
 
-1. The chat endpoint validates the actor and conversation, creates or finds an
-   idempotent run, and claims a renewable lease.
-2. The supervisor creates a per-run Deep Agents/LangGraph context from the
-   stable conversation thread, relevant messages, evidence and active registry.
-3. LangGraph streams provider deltas and middleware emits tool lifecycle
-   envelopes. The production adapter persists these as Munin events.
-4. The same event envelopes are streamed to the connected browser and remain
-   available through the replay endpoint.
-5. Completion, failure, cancellation or a human interrupt updates durable run
-   state. A lease heartbeat stops any executor that loses its fenced claim.
+1. The server validates the actor, conversation and request idempotency.
+2. It creates or resumes a run and claims a renewable fenced lease.
+3. The supervisor loads the stable LangGraph thread, relevant evidence and the
+   live capability registry.
+4. Model, activity, tool, specialist, artifact and approval events are persisted
+   before or while they are streamed to clients.
+5. Completion, failure, cancellation or a human interrupt updates durable state.
+6. Reconnecting clients replay the event log without repeating provider work.
 
-## Threads, checkpoints and compaction
+## Threads, checkpoints and events
 
-The conversation ID is the stable LangGraph `thread_id`. Checkpoints let the
-runtime resume its executable state after an interruption or recoverable
-process loss. They do not replace conversation events or artifacts.
+The conversation ID maps to a stable LangGraph thread. Checkpoints preserve
+executable graph state. Events preserve the operator-visible and auditable
+history. Context compaction only reduces model input and replaces neither one.
 
-Context compaction is a model-context strategy: it reduces the material sent to
-the model while retaining the durable event and evidence record outside the
-prompt. It enables long conversations without treating a compacted summary as
-the complete audit trail.
+## Capability registry
 
-## Live capability registry
+The registry is assembled from current server-side state at run time. It may
+contain native tools, Valravn capabilities, registered `gen__*` tools and
+bounded specialists. Static screenshots and prompt lists are not authoritative.
 
-The registry is assembled from current server-side capability state at run
-time. It contains enabled native tools, registered generated `gen__*`
-capabilities and bounded specialist profiles. An MCP schema discovery call is
-the authoritative client view; a static screenshot or documentation table is
-not.
-
-Skills and Hugin material are a separate, passive research layer. Selective
-metadata retrieval and sandboxed reading can provide provenance-labelled
-context for a bounded subtask. Material retrieved from a skill never becomes a
-tool call, target authorisation or evidence of target behaviour by itself.
-
-Valravn (`munin/valravn/`) is a native external-recon capability mesh exposed
-as `valravn_*` MCP tools: IOC/CVE enrichment, asset search, historical-web
-pivots, routing/RPKI, dark-web search and browser evidence capture. It is
-passive research and evidence, not an execution boundary.
+Skills, Hugin material and Soul files provide context. They do not become tools,
+authorization or evidence of target behavior merely by being present.
 
 ## Operation modes
 
-Each turn runs under an autonomy contract chosen by the operator over the same
-supervised loop: **Standard** (per-action approvals), **YOLO** (no approvals
-except admin/critical), **GOAL** (persistent durable objective + TODO plan),
-and **BEAST** (deep planning + delegation with explicit scope and raised
-anti-runaway budgets). Modes relax which audit levels pause for approval; the
-hard invariants (preflight, audit, the `critical` approval floor, secret
-redaction) do not change. Under the doctrine the operator's order is the
-authorization (命令即授权): the objective is the campaign scope, success
-criteria are self-appointed, and the agent presses until the goal is met or
-proven unreachable.
-
-## Run event contract
-
-The runtime normalises events into an operator-facing timeline. Important kinds
-include:
-
-- assistant text and explicit provider reasoning;
-- planning and operational activity;
-- tool intent, output, completion and failure;
-- specialist/subagent creation and result;
-- artifacts;
-- human request and decision; and
-- terminal run state.
-
-Explicit provider fields such as `reasoning_content`, `thinking` and tagged
-`<think>` blocks are emitted separately from final assistant text. Munin does
-not derive private reasoning from graph nodes, tool calls or server logs.
+Standard, YOLO, GOAL and BEAST modify autonomy budgets and which noncritical
+actions pause for approval. They do not remove server policy, audit, secret
+redaction, preflight checks or the critical approval floor.
 
 ## Approval interrupts
 
-Deep Agents HITL interrupts are translated into durable human requests. A
-request is bound to its run, action, arguments, participant and expiry. An
-approval resumes the saved command at the checkpoint; a rejection or expiry
-does not fall through to a different action.
+A sensitive action produces a durable request bound to the actor, conversation,
+run, capability, arguments and expiry. Approval resumes that exact action.
+Rejection or expiry closes it. Decisions cannot be reused for changed calls.
 
-## Failure handling
+## Recovery
 
-A disconnected browser leaves the server-owned run alone. A failed executor
-eventually loses its lease; the recovery worker may requeue the run and resume
-it from a usable checkpoint. An unresolved human request is intentionally
-excluded from automatic recovery.
+A disconnected GUI does not cancel a server-owned run. If an executor loses its
+lease, a recovery worker may resume a recoverable run from the same thread and
+checkpoint. A run waiting for human approval remains paused.
 
-Use [the persistence guide](architecture-persistence.md) for storage and
-recovery tests, and [the operator guide](operator-guide.md) for practical
-triage.
+## Soul clarification
+
+The bundled `soul/` prompts are a specific CTF/lab characterization, not the
+recommended default for production, defensive or enterprise deployments. Soul
+never expands scope or bypasses server controls.
