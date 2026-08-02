@@ -7,24 +7,26 @@ Referencia técnica completa. Para instrucciones de uso ver `README.md`.
 ## Flujo de una petición
 
 ```
-Usuario (CLI / Frontend / Claude Code / curl)
+Usuario (Frontend / MCP client / curl / Discord)
     │
     ▼
-MCP Server — FastMCP streamable-http :8890
-    │  Authorization: Bearer <token>
-    │  JSON-RPC 2.0: tools/call { name, arguments }
+munin serve — ASGI unificado :8787
+    │  HTTP API /api/* (auth + policy)
+    │  MCP streamable-http /mcp/  (Bearer token, JSON-RPC 2.0)
+    │  Discord adapter (opcional)
     │
     ▼
-Tool handler (en munin/mcp/tools/)
+Tool handler (en munin/mcp/tools/ y munin/valravn/)
     │
     ├── audit.py → events.jsonl (redacción de secrets)
     ├── opsec.py → preflight check (OSINT/active level gate)
     │
     ├── LDAP tools → ldap3 → OpenLDAP / AD
     ├── Forge tools → ToolForgeSubagent → sandbox → gen__*.py → registry.register()
-    ├── Memory tools → SharedStateStore → SQLite
+    ├── Memory tools → SharedStateStore → SQLite / Turso (libsql)
     ├── Recon tools → nmap/nuclei/ffuf/... (subproceso)
-    └── Intel tools → NVD/EPSS/CISA/Hugin/Tavily (HTTP)
+    ├── Intel tools → NVD/EPSS/CISA/Hugin/Tavily (HTTP)
+    └── Valravn tools → valravn_* (recon mesh: IOCs, CVE, Shodan/Censys, Wayback, ...)
 ```
 
 ---
@@ -35,26 +37,28 @@ Tool handler (en munin/mcp/tools/)
 
 | Interfaz | Cómo conecta | Cuándo usar |
 |----------|-------------|-------------|
-| `munin run` CLI | REPL directo, sin red | Desarrollo, debug |
-| Frontend React | MCP HTTP → localhost:8890 | Uso normal local |
-| Claude Code | `~/.claude.json` mcpServers | Tools nativas en sesión |
-| GitHub Actions | MCP HTTP → URL pública (tunnel) | Demo remota, sesión temporal |
+| `munin serve` | API + MCP en un proceso :8787 | Runtime único (dev y producción) |
+| Frontend React | HTTP API → localhost:8787 | Uso normal local / GUI |
+| Claude Code / opencode | MCP streamable-http → `/mcp/` | Tools nativas en sesión |
+| GitHub Actions | live-session.yml → MCP HTTP → URL pública (tunnel) | Sesión temporal operativa |
 | curl / cualquier cliente MCP | JSON-RPC 2.0 directo | Integración, scripting |
+| Discord | Adapter opcional (`MUNIN_DISCORD_BOT_TOKEN`) | Continuidad remota |
 
 ### 2. MCP Server
 
-- **Framework:** `mcp.server.fastmcp.FastMCP`
-- **Transports:** `stdio` / `sse` / `streamable-http`
+- **Framework:** `mcp.server.fastmcp.FastMCP` montado en `munin serve` bajo `/mcp/`
+- **Transports:** `streamable-http` (canónico en producción) / `stdio` local
 - **Auth:** Bearer token en header `Authorization`
-- **Tools registradas al iniciar:** 65 fijas + N generadas (rehydrate del SQLite)
+- **Catálogo:** tools nativas (recon, LDAP, Forge, Memory, Intel, Valravn, diagnostics) + N generadas (rehydrate del SQLite/Turso)
 - **Audit:** cada tool call → `data/events.jsonl` con secrets redactados
+- **Modos de operación:** Standard / YOLO / GOAL / BEAST (contrato por turno; ver README)
 
-### 3. Tools (65 fijas)
+### 3. Tools (catálogo nativo)
+
+Los conteos aproximados por grupo; el catálogo real se descubre en runtime vía
+MCP `tools/list` (ver `docs/tools_reference.md`). Los grupos principales:
 
 #### LDAP — 8 tools (ice blue)
-
-Todas los parámetros de usuario pasan por `ldap3.utils.conv.escape_filter_chars` (CWE-90).
-Credenciales sólo desde `.env`, nunca desde parámetros.
 
 | Tool | Qué hace |
 |------|----------|
@@ -122,13 +126,22 @@ Heredadas de OFFX-MCP con fixes de PR#1. Requieren herramientas instaladas en el
 
 `nmap_scan`, `nmap_advanced_scan`, `nuclei_scan`, `feroxbuster_scan`, `ffuf_scan`, `httpx_probe`, `katana_crawl`, `smbmap_scan`, `netexec_scan`, `hydra_attack`, `sqlmap_scan`, `web_evidence_screenshotter`, `execute_command`, `vpn_status`
 
-#### Intel / CVE — 11 tools (muted)
+#### Intel / CVE — tools (muted)
 
 `cve_lookup`, `cve_search`, `cve_enrich`, `exploit_search`, `package_vuln_lookup`, `tavily_search`, `hugin_search`, `hugin_refresh`, `publish_shared_intel`, `query_shared_intel`, `shared_state_overview`
 
-#### Admin — 4 tools
+#### Valravn — ~12 tools (recon mesh)
 
-`health_check`, `job_status`, `job_cancel`, `wiki_git_syncer`
+Mesh nativo de recon inteligencia externa (`munin/valravn/`), expuesto como
+`valravn_*`: enriquecimiento IOC/malware/ransomware/CVE-KEV-EPSS, búsqueda de
+assets en Shodan/Censys/ZoomEye/Netlas/LeakIX, pivotes web históricos
+(Wayback/Common Crawl/urlscan), routing y RPKI (RIPEstat), contexto Cloudflare
+Radar, dark-web (Ahmia vía Tor2Web), captura de evidencia CloakBrowser y
+traducción. Ver `docs/VALRAVN.md` para el detalle de cada tool.
+
+#### Admin / Diagnostics — tools
+
+`health_check`, `job_status`, `job_cancel`, `wiki_git_syncer`, `munin_diagnostics`, `munin_read_source`, `munin_self_diagnose`, capabilities/skills helpers.
 
 ---
 
@@ -148,14 +161,15 @@ Al reiniciar el servidor: `registry.rehydrate()` recarga todas las tools `active
 
 ---
 
-### 5. Memoria — SQLite compartido
+### 5. Memoria — SQLite / Turso (libsql)
 
-Archivo único: `data/shared_state.sqlite` (WAL mode, busy_timeout=5s)
+Backend por defecto: `data/shared_state.sqlite` (WAL mode, busy_timeout=5s).
+Con `MUNIN_DB_URL` + token → Turso remoto (estado persistente multi-sesión).
 
 | Tabla | Origen | Contenido |
 |-------|--------|-----------|
 | `shared_intel` | OFFX-MCP | Hallazgos de recon (CVEs, puertos, servicios) |
-| `tasks` | OFFX-MCP | Tareas del pool multi-agente |
+| `active_tasks` | OFFX-MCP | Tareas del pool multi-agente |
 | `agent_messages` | OFFX-MCP | Mensajes inter-agente |
 | `agent_presence` | OFFX-MCP | Estado RUNNING/IDLE de agentes |
 | `episodic` | Munin | Log de tool calls y decisiones del orquestador |
@@ -163,6 +177,19 @@ Archivo único: `data/shared_state.sqlite` (WAL mode, busy_timeout=5s)
 | `procedural` | Munin | Tools generadas (script_path, signature, tags, active) |
 | `generated_graphs` | Munin | Configuraciones de subagentes forjados |
 | `agent_wake_queue` | Munin | Cola de wake requests (claimed atómicamente con EXCLUSIVE) |
+| `runtime_cache` | Munin | Caché con TTL por namespace |
+| `conversations` / `conversation_messages` / `conversation_artifacts` | Munin | Conversaciones persistentes del operador y sus artifacts |
+| `provider_profiles` | Munin | Credenciales de provider cifradas (BYOK) |
+
+Además, la Production Suite (`munin/production/store.py`) añade las tablas
+operacionales: `users`, `auth_sessions`, `auth_rate_limits`, `messages`,
+`agent_runs`, `run_events`, `tool_calls`, `human_requests`, `audit_events`,
+`goals`, `todo_events`, `timers`, `operation_snapshots`/`branches`,
+`run_guidance_queue`, `conversation_broadcasts`, `_sync_*`, más los registros
+de autonomía `workflow_registry` y `agent_registry`. El script
+`scripts/reset_turso_state.py` limpia **todas** estas tablas dinámicamente
+(descubre tablas en runtime, preserva `schema_migrations`) — ver el workflow
+`reset-turso-state.yml`.
 
 ---
 
@@ -170,15 +197,16 @@ Archivo único: `data/shared_state.sqlite` (WAL mode, busy_timeout=5s)
 
 ```
 soul/
-├── identity.md    # Quién es Munin, qué es soul/memory/manos/subagentes
-├── principles.md  # Reglas: escapar LDAP, consultar catálogo antes de forjar, etc.
-├── goals.md       # Misión actual (AKATSUKI challenge, tool forging, multi-agent)
-└── skills.md      # Inventario de tools nativas + catálogo autogenerado
+├── identity.md    # Quién es Munin (战争之鸦 / war-raven), carácter operacional
+├── principles.md  # Doctrina: dogma, 命令即授权 (la orden ES la autorización), 孙子兵法, campaign loop, OPSEC
+├── goals.md       # Misión actual y definición de excelencia (guerra al ritmo del dogma)
+├── skills.md      # Inventario de tools nativas + catálogo autogenerado
+└── valravn.md     # Protocolo de la mesh de recon Valravn
 ```
 
 - `soul_read` / `soul_list` → Munin puede leer su propia identidad
 - `soul_propose_edit` → propone un cambio → va a `data/soul_pending/` → humano lo revisa y aprueba
-- Munin **no puede reescribirse a sí mismo en runtime**
+- Munin **no puede reescribirse a sí mismo en runtime** (propuestas pasan por review humano)
 - `munin snapshot-soul` → freeze en `data/soul.snapshot.json`
 - `munin reset` → restaura soul desde snapshot
 
@@ -241,12 +269,12 @@ Subagentes nativos: `ldap`, más cualquier grafo en `generated_graphs` (cargados
 
 | Riesgo | Mitigación |
 |--------|-----------|
-| LDAP Injection (CWE-90) | `escape_filter_chars` en todos los params de usuario |
 | Path Traversal (CWE-22) | `_safe_soul_path()` rechaza `../` que escape `soul/` |
 | SSRF | `_validate_base_url()` en LLM client; `_validate_url()` en Hugin |
 | Secret leak en logs | `audit.py` redacta Bearer, api_key, sk-, nvapi-, tvly-, ghp_ |
 | Código malicioso en tool_forge | AST guard + builtins restringidos + cwd jailed |
 | Token leak entre proveedores | Sesiones HTTP aisladas por proveedor en intel.py |
+| Escritura fuera del workspace | Contrato de prompts: reportes/evidencia solo en `reports/` y `evidence/`; runner crea dirs escribibles |
 
 ---
 
@@ -254,3 +282,5 @@ Subagentes nativos: `ldap`, más cualquier grafo en `generated_graphs` (cargados
 Scripts ya incluidos que el workflow referencia:
 - `scripts/open_tunnel.sh` — abre tunnel público (localhost.run → cloudflared fallback)
 - `scripts/ldap_mock.ldif` — datos del mock LDAP
+- `scripts/reset_turso_state.py` — limpieza total del estado Turso (workflow `reset-turso-state.yml`)
+- `scripts/restore_munin_artifact.py` — restaura estado durable desde artifact de sesión anterior

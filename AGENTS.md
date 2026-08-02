@@ -12,8 +12,9 @@ pytest localmente salvo orden explícita del operador.
 | Workflow `.github/workflows/` | Dispara | Qué hace |
 |---|---|---|
 | `ci.yml` | push a `main`/`agent/**`/`codex/**`, PRs, manual | Backend (compileall + pytest + Turso online) + Frontend (`next build`, `next lint`). 20/15 min timeout. |
-| `live-session.yml` | manual/dispatch | Arranca FastMCP MCP server en `:8890`, restaura estado (artifact SQLite o Turso/libsql), abre tunnel para el frontend React. |
-| `reset-turso-state.yml` | manual | Reset controlado de estado Turso. |
+| `live-session.yml` | manual/dispatch | Arranca el runtime unificado `munin serve` en `:8787`, restaura estado (artifact SQLite o Turso/libsql), abre tunnel para el frontend React. Crea dirs de home escribibles + `reports/`/`evidence/`. |
+| `reset-turso-state.yml` | manual (confirmación `WIPE_MUNIN_TURSO`) | Reset total del estado Turso: limpia **todas** las tablas operacionales (descubiertas dinámicamente, incluye producción/autonomía), preserva `schema_migrations`. |
+| `valravn-smoke.yml` | paths `munin/valravn/**` + `soul/valravn.md` + tests valravn, manual | Compile + protocol smoke + tests de la mesh Valravn; probes opcionales de APIs externas/browser. |
 
 **Estado** (`data/shared_state.sqlite` WAL) sobrevive a la muerte del runner
 entre las 3 capas: Soul (`soul/*.md`), Forged tools (`munin/generated/`),
@@ -39,14 +40,15 @@ app/                 Frontend Next.js 14 (React 18 + Tailwind 3.4 + Radix + TanS
   src/lib/           queries.ts, query-cache.ts, useConversationEvents.ts
   tailwind.config.ts PALETA COMPLETA — todos los hex viven aquí
   public/raven-mark.png  asset de marca (reusar antes de crear otro)
-munin/               Backend Python — FastMCP server (porta 8890)
-  core/              llm_client, llm_stream
+munin/               Backend Python — FastMCP server (unificado en `munin serve` :8787)
+  core/              llm_client, llm_stream, prompting (contratos chino-first), autonomy (modos)
   mcp/tools/         audit, opsec, LDAP, Forge, Memory, Recon, Intel
   mcp/persistence.py SQLite/Turso abstraction
-  production/        dispatcher (durables más allá del browser)
-soul/                identidad y principios (merge vía soul-proposal PRs)
+  production/        Production Suite (store, chat, asgi, timers, agents)
+  valravn/           mesh de recon externa (IOC/CVE/assets/wayback)
+soul/                identidad, doctrina y principios (merge vía soul-proposal PRs)
 data/shared_state.sqlite  estado WAL (artifact o Turso)
-.github/workflows/   CI + live-session + reset-turso
+.github/workflows/   ci + live-session + reset-turso + valravn-smoke
 docs/  specs/  reports/  evidence/  intel/  knowledge_sync/  templates/
 ```
 
