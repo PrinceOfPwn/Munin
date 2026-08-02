@@ -30,19 +30,26 @@ def deep_merge(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, 
     return result
 
 
+def load_json(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return data
+
+
 def main() -> None:
-    defaults = json.loads(TEMPLATE.read_text(encoding="utf-8"))
+    defaults = load_json(TEMPLATE)
     existing: dict[str, Any] = {}
 
     if TARGET.exists():
-        existing = json.loads(TARGET.read_text(encoding="utf-8"))
+        existing = load_json(TARGET)
 
     merged = deep_merge(existing, defaults)
     TARGET.parent.mkdir(parents=True, exist_ok=True)
 
     if TARGET.exists():
         backup = TARGET.with_suffix(".json.bak")
-        backup.write_text(TARGET.read_text(encoding="utf-8"), encoding="utf-8")
+        backup.write_text(TARGET.read_text(encoding="utf-8-sig"), encoding="utf-8")
         print(f"Backup written to {backup}")
 
     TARGET.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
