@@ -1,6 +1,3 @@
-> [!NOTE]
-> **Profile-specific guidance.** This file describes the tool emphasis and operating style of the bundled CTF/lab Soul. It is not the default capability policy for every Munin deployment. The live registry and runtime policy are authoritative. See [`soul/README.md`](README.md).
-
 # 能力地图
 
 工具名与参数始终保持英文。调用前以实时 catalog 与 `munin_capabilities` 为准。
