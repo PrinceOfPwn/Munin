@@ -36,7 +36,9 @@ Frame a task with:
 For example: “Within the authorised lab range, inventory HTTP service versions
 and status codes; do not authenticate or modify state.” This lets the runtime
 choose the smallest relevant capability and lets the operator judge every next
-step against a known boundary.
+step against a known boundary. Remember the doctrine: once the objective is
+given, that objective is the authorization — the runtime presses the campaign
+until the goal is met or proven unreachable.
 
 ## During a run
 
@@ -94,11 +96,15 @@ executor and does not bypass scope or HITL.
 
 ## Approval boundaries
 
-Use HITL whenever scope, credentials, impact, target interpretation, material
-capability changes or publication are ambiguous. A human request records the
+Under the operational doctrine, the operator's order is the authorization
+(命令即授权): the objective defines the campaign scope and the agent appoints
+its own success criteria. The autonomy mode chosen per turn (Standard / YOLO /
+GOAL / BEAST) decides which audit levels pause for human approval — YOLO and
+BEAST only stop at the admin/`critical` floor. A human request records the
 exact action and pauses execution at a graph interrupt. Approval resumes that
 same action; rejection ends it. An approval is not a reusable session-wide
-permit.
+permit. Final reports and evidence must be written inside the workspace under
+`reports/` and `evidence/` so they survive the runner as artifacts.
 
 ## Long-running work
 
