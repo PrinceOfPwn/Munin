@@ -155,3 +155,100 @@ When the patch is close, re-delegate a narrow correction based on observable def
 ## Completion report
 
 Report what Antigravity changed, what Raven-Mind independently verified, exact validation results, remaining risks, pre-existing worktree changes, and whether `agy` successfully used its authenticated Google session.
+
+## Recommended invocation per OS
+
+This is the bottom-line summary of "what to actually run" on each supported OS, in priority order. The MCP wrapper (`antigravity_delegate`) is the recommended path when it works; on hosts where it fails reproducibly, fall back to the per-OS form below. The `agy` flag set documented here was verified against `agy 1.1.9` on the host that produced the Russian and Korean README localizations in commit `raven-mind/antigravity-localized-readmes`; verify the live flags with `agy --help` before relying on them.
+
+### Tier 1 — MCP wrapper (preferred on every OS when it works)
+
+```text
+antigravity_delegate(
+    task="<self-contained task>",
+    allowed_paths=["repo/relative/path"],
+    validation=["<read-only check command after worker finishes>"],
+    agent_timeout=...,  # seconds, only if longer default needed
+)
+```
+
+If the wrapper returns `{"status":"error","message":"Antigravity wrapper returned invalid JSON"}` with `process_exit_code 143`, or crashes with `undefined is not an object (evaluating 'args.validation.length')` when `validation` is omitted, you are on a hostile host — move to Tier 2 for that OS. The wrapper bug is a wrapper-layer issue, not a flaw in the worker; the underlying `agy` can still complete real coding tasks when invoked with a quoting-safe token list.
+
+### Tier 2 — Quoting-safe token-list fallback
+
+Identical core flags on every OS. The only thing that changes is the tool used to assemble the token list safely.
+
+| OS | Recommended tool | Avoid |
+|---|---|---|
+| Windows / PowerShell 5.x | Python `subprocess.run(cmd_list, cwd=repo, capture_output=True, encoding="utf-8")` | `Start-Process -ArgumentList`, `System.Diagnostics.ProcessStartInfo.Arguments` (single-string form), `cmd /c` chains |
+| macOS / Linux (bash/sh) | `bash -c 'agy -p "$PROMPT" --mode=accept-edits --print-timeout 30m --output-format text'` with `PROMPT` exported as an env var, or Python `subprocess.run` | Single-quoted PowerShell-style strings passed through any shell that re-parses them |
+
+Core command line (token list form):
+
+```text
+["agy", "-p", "<delegated task>", "--mode=accept-edits",
+ "--print-timeout", "30m", "--output-format", "text"]
+```
+
+Notes:
+
+- `-p` / `--print` / `--prompt` all accept the prompt as the next positional token. Keep the prompt as ONE list element, never re-quote it as a single shell string.
+- `--mode=accept-edits` (with the `=`) is the headless auto-approve flag on `agy 1.1.9`. The form `--mode accept-edits` (space-separated) sometimes parses fine but has been observed to fail on hostile shells — prefer the `=` form.
+- `--headless` and `--approve` are NOT real flags on `agy 1.1.9` despite community blog posts.
+- Set `cwd` of the subprocess to the registered trusted workspace (the repo path that `configure_defaults.py` registered). `agy` will soft-deny writes if its cwd is not a trusted workspace.
+- Default `--print-timeout` is 5m. For README-sized work (a few MB of generated text), `agy` finished in ~70s. For bounded feature work, set `--print-timeout 30m` to avoid premature timeouts.
+
+### Tier 2 reference shim (Python, cross-platform)
+
+Drop this into a runnable Python script and adapt `prompt`, `repo_path`, and `validate_cmd`:
+
+```python
+import os, subprocess, time
+
+AGY = os.path.join(os.environ["LOCALAPPDATA"], "agy", "bin", "agy.exe")  # Windows
+# macOS / Linux: AGY = os.path.expanduser("~/.local/bin/agy")
+
+repo_path = r"C:\path\to\repo"  # must be a registered trusted workspace
+prompt = "<your single-string delegated task; newlines fine, avoid unbalanced quotes>"
+validate_cmd = ["git", "diff", "--stat"]  # read-only check; "DY validation"
+
+cmd = [AGY, "-p", prompt, "--mode=accept-edits",
+       "--print-timeout", "30m", "--output-format", "text"]
+
+t = time.time()
+r = subprocess.run(cmd, cwd=repo_path, capture_output=True, timeout=2100,
+                   encoding="utf-8", errors="replace")
+print(f"agy exit={r.returncode} time={time.time()-t:.1f}s")
+print("STDOUT:"); print(r.stdout)
+err = r.stderr or ""
+if err: print("STDERR:"); print(err[:5000])
+
+# Independent validation (NOT executed by the worker)
+v = subprocess.run(validate_cmd, cwd=repo_path, capture_output=True,
+                   encoding="utf-8", errors="replace")
+print(f"validate exit={v.returncode}")
+print(v.stdout)
+```
+
+### Real coding task flow (not just docs)
+
+`agy` can perform real coding tasks under the same invocation scheme used for the README localizations. The operator workflow is:
+
+1. **Inspect** the relevant code with Read / Grep / Glob to write a precise task spec.
+2. **Compose** the prompt with: exact desired behavior, expected module paths, constraints to preserve (public API, schemas, behavior invariants), acceptance criteria, and "do not stage / push / commit" guardrails.
+3. **Invoke** `agy` with the Tier 2 token-list form (or Tier 1 MCP wrapper if working on the host).
+4. **Verify** independently with the same tooling the wrapper would have used: `git diff --check`, `git diff --stat`, Read/Grep over every changed file, and the project validation command (`poetry run pytest`, `cd app && npm run build`, etc.) as appropriate to the touched surface.
+5. **Iterate** — if the patch is close but has a specific defect, re-delegate a narrow correction with the observable defect quoted in the prompt; each invocation is a fresh headless turn.
+6. **Decide** — accept the patch (and report what was delegated, what was independently verified, and what risk remains) or revert and re-delegate.
+
+`agy` itself is not the reviewer; this skill is. The mandatory-review section above applies whichever tier the worker was invoked through.
+
+### What downstream hosts need before Tier 2 works
+
+Run the `antigravity-setup` skill first on any fresh host. Without its repository-trust and scoped `write_file` / `read_file` / inspection-command rules, `agy` will soft-deny every `write_file` (even inside the repo) with `a tool required the "write_file" permission that headless mode cannot prompt for`, regardless of which tier the invocation goes through.
+
+### What you should NEVER do
+
+- Use `--dangerously-skip-permissions` for a real delegation. It is acceptable only for a one-off diagnostic probe that you discard.
+- Pass the prompt as a single re-quoted shell string on Windows. Always prefer a token list (Python `subprocess.run` with `cmd` as a list).
+- Trust the worker's word that the file was written. Inspect the worktree diff; the `agy` worker has been observed answering "DONE" without actually creating the file when its `write_file` call was silently denied.
+- Re-introduce a delegation result without running project validation when the task touched executable code (`munin/**`, `app/src/**`). Validation is skipped only for documentation-only changes.
