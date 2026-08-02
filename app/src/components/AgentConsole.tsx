@@ -1061,11 +1061,6 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               </Button>
             </div>
           </form>
-          <small className="hidden">
-            Streams via <code className="font-mono">/api/chat</code> (AI SDK v5
-            BFF). Draft auto-saves locally per conversation. Turso remains the
-            authoritative archive.
-          </small>
         </div>
       </footer>
     </div>
@@ -1090,9 +1085,6 @@ function NoConversationState() {
             its live AI SDK console stream.
           </p>
         </div>
-        <p className="hidden">
-          CONSOLE / AI SDK v5 / BFF transport active
-        </p>
       </div>
     </div>
   );
