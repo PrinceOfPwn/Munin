@@ -42,6 +42,12 @@
 > [!WARNING]
 > **Authorised use only.** Munin is designed for legitimate security research, threat intelligence and controlled red-team operations. You are responsible for obtaining permission, defining scope, protecting credentials, reviewing impact and complying with applicable law. A working deployment or successful tool call does not establish authorisation.
 
+## Prompt design and ROGUE laboratory profile
+
+Munin's research prompts use **ROGUE mode by default**: an intentionally aggressive profile for testing planning, delegation, tool use, persistence and recovery inside isolated, explicitly authorised laboratories. ROGUE changes prompt posture, not authority—written scope, runtime policy, approvals and audit controls remain binding.
+
+Parts of the internal control language are written in **Simplified Chinese** because it offers compact human-readable instructions and can align naturally with Chinese-developed model families used during testing. This is an empirical design choice, not a claim that Chinese is always cheaper in tokens or universally better. See [Prompt design, validation matrix and references](README.PROMPTS.md).
+
 ## Verified v1.0.0 configuration
 
 > [!IMPORTANT]
@@ -391,6 +397,7 @@ cd app && npm run build
 | [Operator guide](docs/operator-guide.md) | Deployment and operating practices |
 | [Capability reference](docs/tools_reference.md) | Tools, skills and generated extensions |
 | [Provider contract](docs/llm-providers.md) | Model endpoint expectations |
+| [Prompt design](README.PROMPTS.md) | ROGUE laboratory profile, Chinese control language and model validation matrix |
 | [Security notes](docs/security-notes.md) | Boundaries and review checklist |
 | [GitHub Actions guide](docs/github-actions-tutorial.md) | Temporary live sessions |
 | [Valravn](docs/VALRAVN.md) | Reconnaissance mesh and providers |
