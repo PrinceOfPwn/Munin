@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bring up the OpenLDAP challenge stack (openldap + phpldapadmin).
+# Bring up the OpenLDAP lab stack (openldap + phpldapadmin).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

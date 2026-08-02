@@ -138,16 +138,53 @@ def test_graph_forge_can_expand_requested_whitelist(store) -> None:
 
 
 def test_soul_is_campaign_wide_not_ldap_only() -> None:
+    """Soul must read as a campaign agent, not an LDAP-only specialist.
+
+    The regression this test was written for is still real: the soul must not
+    hypertrophy around one capability (LDAP) or cite maintainer-facing
+    infrastructure (Turso / GitHub Actions / pytest). The earlier version of
+    this test asserted the literal phrases "LDAP 是重要能力" and "但不是唯一中心"
+    as a *negative* guard — i.e. they were the tell that an author was trying
+    to over-balance against an LDAP-only soul. Once the soul was properly
+    rebuilt, those phrases stopped needing to appear, and the guard evolved to
+    check for the campaign-wide shape directly.
+    """
     root = Path(__file__).resolve().parents[1] / "soul"
     identity = (root / "identity.md").read_text(encoding="utf-8")
     goals = (root / "goals.md").read_text(encoding="utf-8")
     principles = (root / "principles.md").read_text(encoding="utf-8")
+    skills = (root / "skills.md").read_text(encoding="utf-8")
+    valravn = (root / "valravn.md").read_text(encoding="utf-8")
 
-    assert "**Hugin** 是“思想之鸦”" in identity
-    assert "LDAP 是重要能力" in goals
-    assert "但不是唯一中心" in goals
-    assert "Campaign loop" in principles
-    assert "Hugin：思想兄弟" in principles
+    # Identity must frame Hugin as the knowledge brother, not generic encyclo.
+    assert "**Hugin**" in identity and "思想之鸦" in identity
+
+    # Goals must be operational excellence, not a product roadmap. The soul
+    # must not demand maintainer-facing infrastructure as success criteria.
+    assert "战役" in goals
+    for forbidden in ("Turso online", "GitHub Actions", "pytest tests", "munin reset"):
+        assert forbidden not in goals, f"maintainer-facing phrase leaked into goals: {forbidden!r}"
+    # The old LDAP-balance phrases were a hack around a hypertrophied soul;
+    # the rebuilt soul should neither need them nor center LDAP.
+    assert "LDAP 是重要能力" not in goals
+    assert "但不是唯一中心" not in goals
+
+    # Principles keep the immutable campaign loop and the Hugin section.
+    assert "战役循环" in principles
+    assert "Hugin" in principles
+
+    # Skills must surface the operator-facing chat portal and the idiomatic
+    # in-process delegation surface (Deep Agents Autonomy Kernel meta-tools).
+    assert "munin_chat" in skills
+    assert "create_subagent" in skills
+    assert "schedule_workers" in skills
+    # The nonexistent hardcoded default subagent must not be re-introduced.
+    assert "ldap_agent" not in skills
+
+    # Valravn stays operational only — no provider TOS / quota noise.
+    assert "valravn_investigate_ioc" in valravn
+    for forbidden in ("Safe Browsing", "FullHunt opt-in", "配额"):
+        assert forbidden not in valravn, f"operator / maintainer phrase leaked into valravn: {forbidden!r}"
 
 
 def test_operator_language_env_is_configurable(isolated_workspace, monkeypatch) -> None:
