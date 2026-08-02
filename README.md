@@ -95,6 +95,12 @@ the reviewed `hugin-research` Deep Agents skill in
 validate a small, relevant, provenance-labelled research subset for a bounded
 task. An externally generated folder of Hugin cards is not loaded implicitly.
 
+[Valravn](munin/valravn/) is Munin's external reconnaissance mesh: IOC/CVE
+enrichment, asset search (Shodan/Censys/ZoomEye/Netlas/LeakIX), historical-web
+pivots (Wayback/Common Crawl/urlscan), routing and RPKI, dark-web search and
+browser evidence capture, exposed as `valravn_*` MCP tools. See
+[docs/VALRAVN.md](docs/VALRAVN.md).
+
 That distinction matters:
 
 | Hugin and skills provide | Munin provides |
@@ -105,14 +111,22 @@ That distinction matters:
 ## Operation modes
 
 Operators choose an autonomy contract per turn over the same supervised loop:
-**Standard** (per-action approvals), **YOLO** (proceed within authorized scope;
-admin/critical only), **GOAL** (persistent durable objective + TODO plan with
-refresh/restart-safe state), and **BEAST** (deep planning + delegation with
-explicit scope and raised anti-runaway budgets). The mode only changes which
-audit levels pause for approval — the hard boundaries (scope, preflight, audit,
-the `critical` approval floor) never widen. GOAL/BEAST carry a durable goal
-editable via `PATCH /api/goals/{id}`; server-side timers can wake a GOAL run for
-re-evaluation.
+**Standard** (per-action approvals), **YOLO** (no approvals except admin/critical),
+**GOAL** (persistent durable objective + TODO plan with refresh/restart-safe
+state), and **BEAST** (deep planning + delegation with explicit scope and raised
+anti-runaway budgets). The mode changes which audit levels pause for approval;
+the hard invariants (preflight, audit, the `critical` approval floor, token
+redaction) never widen.
+
+Under the operational doctrine, **the operator's order is the authorization**
+(命令即授权): giving Munin an objective makes that objective the full scope of
+the campaign, and Munin appoints its own success criteria and presses until the
+goal is met or proven unreachable. The agent runs its internal reasoning in
+Chinese (high-density, evidence-first) and writes all code and technical
+artifacts in idiomatic English. GOAL/BEAST carry a durable goal editable via
+`PATCH /api/goals/{id}`; server-side timers can wake a GOAL run for
+re-evaluation. Final reports and evidence are written under `reports/` and
+`evidence/` in the workspace.
 
 ## Capabilities and self-extension
 

@@ -53,6 +53,24 @@ metadata retrieval and sandboxed reading can provide provenance-labelled
 context for a bounded subtask. Material retrieved from a skill never becomes a
 tool call, target authorisation or evidence of target behaviour by itself.
 
+Valravn (`munin/valravn/`) is a native external-recon capability mesh exposed
+as `valravn_*` MCP tools: IOC/CVE enrichment, asset search, historical-web
+pivots, routing/RPKI, dark-web search and browser evidence capture. It is
+passive research and evidence, not an execution boundary.
+
+## Operation modes
+
+Each turn runs under an autonomy contract chosen by the operator over the same
+supervised loop: **Standard** (per-action approvals), **YOLO** (no approvals
+except admin/critical), **GOAL** (persistent durable objective + TODO plan),
+and **BEAST** (deep planning + delegation with explicit scope and raised
+anti-runaway budgets). Modes relax which audit levels pause for approval; the
+hard invariants (preflight, audit, the `critical` approval floor, secret
+redaction) do not change. Under the doctrine the operator's order is the
+authorization (命令即授权): the objective is the campaign scope, success
+criteria are self-appointed, and the agent presses until the goal is met or
+proven unreachable.
+
 ## Run event contract
 
 The runtime normalises events into an operator-facing timeline. Important kinds
