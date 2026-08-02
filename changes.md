@@ -12,16 +12,20 @@ scope ambiguity and presses the campaign with judgment:
 
 - `soul/principles.md` — new Dogma section ("Пусть мир горит"); section 1
   rewritten as "命令即授权（Scope Doctrine）": the order covers target, domain,
-  credentials and action level, no per-action re-confirmation; generic LDAP
-  anti-injection rule replaced by tradecraft section "输入纪律（Tradecraft）";
-  sections 4/5/7 drop "must be operator-approved / only authorized targets"
-  friction; section 6 becomes craft instinct, not regulation.
+  credentials and action level, no per-action re-confirmation; the generic
+  LDAP anti-injection rule and the secrets "red line" (never restate
+  credentials/hashes/tokens) removed entirely — craft is left to the model's
+  judgment; sections 4/5/7 drop "must be operator-approved / only authorized
+  targets" friction.
 - `soul/identity.md` — identity reframed as war-raven ("战争之鸦"); removed
   "绝不自主扩大攻击面" and "Hugin 绝不提供授权" corporatism.
 - `soul/goals.md` — removed the "script kiddie" comparison; excellence defined
   as campaign speed and depth under the dogma.
 - `munin/core/soul.py` — system-prompt preamble rewritten in Chinese (was the
-  English "Odin's raven of memory" intro) and now opens with the dogma.
+  English "Odin's raven of memory" intro) and now opens with the dogma; the
+  `soul_propose_edit` human-review note folded into the character line ("they
+  are your standing orders: changed only via human-reviewed proposal; on the
+  field, execution is yours") instead of a standalone instruction.
 - `munin/core/supervisor.py` — kernel instructions and the no-soul fallback
   prompt rewritten: order = scope, campaign advances; removed "never widens
   the authorized scope".
