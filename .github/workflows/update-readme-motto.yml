@@ -1,0 +1,61 @@
+name: Update multilingual README motto
+
+on:
+  push:
+    branches:
+      - agent/refresh-readme-branding
+    paths:
+      - .github/workflows/update-readme-motto.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update-motto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/refresh-readme-branding
+          fetch-depth: 0
+
+      - name: Replace README mottos
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          replacements = {
+              "README.md": "Knowledge outlives the battle.",
+              "README.es.md": "El conocimiento sobrevive a la batalla.",
+              "README.pt-BR.md": "O conhecimento sobrevive à batalha.",
+              "README.zh-CN.md": "知识超越战场，历久弥存。",
+          }
+
+          pattern = re.compile(
+              r'<p align="center"><em>.*?</em></p>(?:\s*<p align="center"><sub>.*?</sub></p>)?\s*$',
+              re.DOTALL,
+          )
+
+          for filename, translation in replacements.items():
+              path = Path(filename)
+              content = path.read_text(encoding="utf-8")
+              footer = (
+                  '<p align="center"><em>Знание переживает битву.</em></p>\n'
+                  f'<p align="center"><sub>{translation}</sub></p>\n'
+              )
+              updated, count = pattern.subn(footer, content)
+              if count != 1:
+                  raise RuntimeError(f"Expected one footer in {filename}, replaced {count}")
+              path.write_text(updated, encoding="utf-8")
+
+      - name: Remove one-off workflow
+        run: rm .github/workflows/update-readme-motto.yml
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md README.es.md README.pt-BR.md README.zh-CN.md .github/workflows/update-readme-motto.yml
+          git commit -m "docs: adopt Russian knowledge motto"
+          git push origin HEAD:agent/refresh-readme-branding
