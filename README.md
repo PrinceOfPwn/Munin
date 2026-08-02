@@ -4,6 +4,17 @@
 
 # Munin
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C" alt="LangGraph" />
+  <img src="https://img.shields.io/badge/MCP-1.x-6F42C1" alt="Model Context Protocol" />
+  <img src="https://img.shields.io/badge/Next.js-15-black?logo=next.js&logoColor=white" alt="Next.js 15" />
+  <img src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/SQLite-persistent-003B57?logo=sqlite&logoColor=white" alt="SQLite" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-red" alt="PolyForm Noncommercial License" /></a>
+</p>
+
 > What was once seen is never forgotten.
 
 Munin is a durable, operator-governed agent runtime for authorised security
