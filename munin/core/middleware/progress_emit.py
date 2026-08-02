@@ -75,6 +75,7 @@ def _render_tool_result(result: Any) -> str:
     else:
         artifact = getattr(result, "artifact", None)
         value = artifact if artifact not in (None, "", []) else result
+    value = _deep_redact(value)
     if isinstance(value, str):
         return value[:8_000]
     try:

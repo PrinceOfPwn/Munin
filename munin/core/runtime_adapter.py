@@ -16,6 +16,7 @@ UI-message-stream adapter.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any, AsyncIterator, Callable, Iterable
 
@@ -40,6 +41,8 @@ def _recursion_limit_from_environment() -> int:
 
 
 DEFAULT_RECURSION_LIMIT = _recursion_limit_from_environment()
+
+logger = logging.getLogger(__name__)
 
 _ROOT_GRAPH_NAMES = frozenset({"LangGraph", "munin", "munin_supervisor", "__end__"})
 
@@ -359,7 +362,12 @@ async def supervisor_runner(
                 try:
                     event_queue.put_nowait(("envelope", dict(envelope)))
                 except asyncio.QueueFull:  # pragma: no cover - backpressure guard
-                    pass
+                    logger.warning(
+                        "dropping progress envelope because the run queue is full "
+                        "(run_id=%s kind=%s)",
+                        run_id,
+                        envelope.get("kind"),
+                    )
 
             loop.call_soon_threadsafe(enqueue)
         except RuntimeError:  # pragma: no cover - shutdown guard
@@ -435,9 +443,11 @@ async def supervisor_runner(
                 for event in JOBS.progress_for_run(run_id, cursors):
                     await event_queue.put(("envelope", event))
                 if graph_finished.is_set() and not JOBS.has_active_run(run_id):
-                    # All queued output was emitted before this sentinel was
-                    # inserted.  The consumer can now close deterministically
-                    # without racing the final process-reader lines.
+                    # A job can append its last chunks and become inactive
+                    # between the drain above and this check. Read once more
+                    # before inserting the terminal sentinel.
+                    for event in JOBS.progress_for_run(run_id, cursors):
+                        await event_queue.put(("envelope", event))
                     await event_queue.put(("progress_done", None))
                     return
                 await asyncio.sleep(0.2)

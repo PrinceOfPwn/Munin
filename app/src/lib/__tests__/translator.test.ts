@@ -212,7 +212,7 @@ describe("createTranslator - tool parts", () => {
     ]);
   });
 
-  it("keeps quiet-command heartbeats visible and transient", () => {
+  it("keeps quiet-command heartbeats visible in message parts", () => {
     const { translate } = createTranslator("run-x");
     expect(
       translate(
@@ -236,7 +236,6 @@ describe("createTranslator - tool parts", () => {
           lastOutputMs: 4_000,
           text: "command still running",
         },
-        transient: true,
       },
     ]);
   });

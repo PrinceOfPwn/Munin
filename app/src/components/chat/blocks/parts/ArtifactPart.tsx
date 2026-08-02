@@ -79,7 +79,7 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
       {isImage && (
         <div className="overflow-hidden rounded-md border border-border bg-bg">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={safeUri || previewUri} alt={filename} className="max-h-96 max-w-full object-contain" />
+          <img src={previewUri} alt={filename} className="max-h-96 max-w-full object-contain" />
         </div>
       )}
       <a

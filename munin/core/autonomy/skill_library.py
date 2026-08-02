@@ -51,13 +51,16 @@ class BundledSkillLibrary:
             return None
         if not lines or lines[0].strip() != "---":
             return None
+        declared: str | None = None
+        closed = False
         for line in lines[1:]:
             if line.strip() == "---":
+                closed = True
                 break
-            if line.lstrip().startswith("name:"):
-                value = line.split(":", 1)[1].strip()
-                return value.strip("\"'") or None
-        return None
+            if line.startswith("name:"):
+                value = line[len("name:") :].strip()
+                declared = value.strip("\"'") or None
+        return declared if closed else None
 
     def validation_errors(self) -> tuple[str, ...]:
         """Return deterministic errors for malformed or misnamed packages."""

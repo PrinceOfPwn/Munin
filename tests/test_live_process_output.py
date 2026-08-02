@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -150,3 +151,149 @@ def test_completed_tool_replay_joins_by_stable_call_id():
         "tool_name": "execute_command",
         "output": "final output",
     }
+
+def test_partial_newline_free_output_is_streamed(tmp_path):
+    events: list[dict] = []
+    job = SimpleNamespace(
+        cancel_requested=False,
+        process_handle=None,
+        process_pid=0,
+        progress_sink=events.append,
+    )
+    engine = ExecutionEngine(_settings(tmp_path))
+    code = "import sys,time; sys.stdout.write('working'); sys.stdout.flush(); time.sleep(0.2)"
+    result = engine.execute_job(
+        job=job,
+        tool="execute_command",
+        level="active",
+        command=subprocess.list2cmdline([sys.executable, "-c", code]),
+        timeout=10,
+    )
+    chunks = [event["text"] for event in events if event.get("kind") == "tool_output"]
+    assert result["ok"] is True
+    assert "working" in "".join(chunks)
+
+
+def test_long_newline_free_output_is_not_truncated(tmp_path, monkeypatch):
+    import munin.mcp.opsec as opsec
+
+    monkeypatch.setattr(opsec, "_PROCESS_OUTPUT_CHUNK_CHARS", 256)
+    payload = "x" * 4_000
+    events: list[dict] = []
+    job = SimpleNamespace(
+        cancel_requested=False,
+        process_handle=None,
+        process_pid=0,
+        progress_sink=events.append,
+    )
+    engine = ExecutionEngine(_settings(tmp_path))
+    result = engine.execute_job(
+        job=job,
+        tool="execute_command",
+        level="active",
+        command=subprocess.list2cmdline([sys.executable, "-c", f"print({payload!r}, end='')"]),
+        timeout=10,
+    )
+    streamed = "".join(
+        event["text"] for event in events if event.get("kind") == "tool_output"
+    )
+    assert result["ok"] is True
+    assert streamed == payload
+    assert result["data"]["stdout"] == payload
+
+
+def test_live_output_is_redacted_before_progress_emission(tmp_path):
+    events: list[dict] = []
+    job = SimpleNamespace(
+        cancel_requested=False,
+        process_handle=None,
+        process_pid=0,
+        progress_sink=events.append,
+    )
+    engine = ExecutionEngine(_settings(tmp_path))
+    secret = "sk-" + "a" * 40
+    result = engine.execute_job(
+        job=job,
+        tool="execute_command",
+        level="active",
+        command=shlex.join([sys.executable, "-c", f"print({secret!r})"]),
+        timeout=10,
+    )
+    rendered = "".join(
+        event.get("text", "") for event in events if event.get("kind") == "tool_output"
+    )
+    assert secret not in rendered
+    assert secret not in result["data"]["stdout"]
+    assert "REDACTED" in rendered
+
+
+def test_job_manager_reserves_cursor_metadata_and_keeps_unread_events(monkeypatch):
+    import munin.mcp.jobs as jobs
+
+    monkeypatch.setattr(jobs, "MAX_PENDING_PROGRESS_EVENTS", 512)
+    manager = jobs.JobManager(workers=1)
+    try:
+        job = manager.submit(
+            tool="execute_command",
+            level="active",
+            target="localhost",
+            command_preview="echo",
+            run_id="run-cursor",
+            tool_call_id="call-cursor",
+            fn=lambda _job: {"ok": True},
+        )
+        for value in range(250):
+            manager.add_progress(
+                job.job_id,
+                {
+                    "kind": "tool_output",
+                    "text": str(value),
+                    "sequence": 1,
+                    "run_id": "attacker-run",
+                    "job_id": "attacker-job",
+                },
+            )
+        cursors: dict[str, int] = {}
+        events = manager.progress_for_run("run-cursor", cursors)
+        assert len(events) == 250
+        assert [event["sequence"] for event in events] == list(range(1, 251))
+        assert all(event["run_id"] == "run-cursor" for event in events)
+        assert all(event["job_id"] == job.job_id for event in events)
+        assert all(event["source_sequence"] == 1 for event in events)
+        assert manager.progress_for_run("run-cursor", cursors) == []
+    finally:
+        manager.shutdown()
+
+
+def test_durable_tool_output_is_compacted_to_a_bounded_tail(tmp_path, monkeypatch):
+    pytest.importorskip("argon2")
+    import munin.production.store as store_module
+    from munin.production.store import ProductionStore
+
+    monkeypatch.setattr(store_module, "_MAX_DURABLE_TOOL_OUTPUT_EVENTS", 16)
+    monkeypatch.setattr(store_module, "_MAX_DURABLE_TOOL_OUTPUT_BYTES", 65_536)
+    store = ProductionStore.for_sqlite(tmp_path / "bounded-output.sqlite", master_key=b"b" * 32)
+    operator = store.create_user(username="bounded-output", password="a strong bounded password", role="operator")
+    conversation = store.create_conversation(owner_id=operator["id"], title="Bounded output")
+    turn = store.create_turn(
+        actor_id=operator["id"],
+        conversation_id=conversation["id"],
+        content="stream output",
+        idempotency_key="bounded-output",
+    )
+    run_id = turn["run"]["id"]
+    for sequence in range(40):
+        store.append_tool_output_event(
+            run_id=run_id,
+            tool_name="execute_command",
+            tool_call_id="call-bounded",
+            job_id="job-bounded",
+            stream="stdout",
+            text=f"line-{sequence}",
+            sequence=sequence,
+        )
+    output_events = [event for event in store.list_run_events(run_id) if event["kind"] == "tool.output"]
+    assert len(output_events) == 16
+    assert [event["payload"]["text"] for event in output_events] == [
+        f"line-{sequence}" for sequence in range(24, 40)
+    ]
