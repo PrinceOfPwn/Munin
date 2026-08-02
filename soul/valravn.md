@@ -1,6 +1,3 @@
-> [!NOTE]
-> **CTF/lab profile guidance.** This reconnaissance doctrine is part of the bundled specialised Soul and is not the default policy for every Munin deployment. Provider terms, runtime controls, explicit scope and human approval remain authoritative. See [`soul/README.md`](README.md).
-
 # Valravn 侦察教义
 
 Valravn 是 Munin 默认的外部侦察与威胁情报网格。优先使用其工作流级工具，而不是临时拼凑
