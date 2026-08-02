@@ -251,7 +251,7 @@ def reset() -> None:
 
 @cli.command("ldap-seed")
 def ldap_seed() -> None:
-    """Bring up the OpenLDAP challenge container (docker compose)."""
+    """Bring up the OpenLDAP lab container (docker compose)."""
     script = Path(__file__).resolve().parents[1] / "scripts" / "seed_ldap.sh"
     if not script.exists():
         click.echo("scripts/seed_ldap.sh not found — copy from repo root.", err=True)
