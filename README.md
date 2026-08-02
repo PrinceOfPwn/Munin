@@ -26,7 +26,8 @@
 <p align="center">
   <a href="#quick-start"><strong>Quick start</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
-  <a href="#operation-modes"><strong>Operation modes</strong></a> ·
+  <a href="#operation-lifecycle"><strong>Lifecycle</strong></a> ·
+  <a href="#operation-modes"><strong>Modes</strong></a> ·
   <a href="#documentation"><strong>Documentation</strong></a>
 </p>
 
@@ -48,6 +49,22 @@ They last hours or days. They cross tools, models and interfaces. They require e
 | Capabilities are copied into a static prompt | The live registry composes tools and specialists at runtime |
 | Reconnects risk duplicate execution | Renewable leases and persisted run state protect continuity |
 | Long tasks become opaque | Operators can follow progress across web, MCP and Discord |
+
+```mermaid
+flowchart LR
+    Chat[Disposable chat] --> Context[Temporary context]
+    Context --> Tool[Opaque tool call]
+    Tool --> Result[Final response]
+    Result -. window closes .-> Lost[State and evidence lost]
+
+    Objective[Munin objective] --> Run[Durable run]
+    Run --> Events[Replayable event timeline]
+    Run --> Approval[Human approval boundary]
+    Run --> Checkpoint[Executable checkpoint]
+    Events --> Evidence[Evidence and artifacts]
+    Checkpoint --> Resume[Recover and resume]
+    Approval --> Resume
+```
 
 ## What Munin gives you
 
@@ -74,25 +91,50 @@ Assistant messages, provider-emitted reasoning, tool lifecycle, streamed output,
 ## Architecture
 
 ```mermaid
-flowchart LR
-    Operator[Operator] --> Web[Web console]
-    Operator --> Discord[Discord]
-    Client[MCP client] --> MCP[/mcp/]
+flowchart TB
+    subgraph Interfaces[Control surfaces]
+        Web[Web console]
+        Discord[Discord]
+        MCPClient[MCP client]
+    end
 
-    Web --> API[/api/]
-    Discord --> Server[Munin server]
+    subgraph Control[Munin control plane]
+        API[FastAPI /api]
+        MCP[MCP /mcp]
+        Server[Munin server]
+        Identity[Identity and authentication]
+        Policy[Policy and approval engine]
+    end
+
+    subgraph Runtime[Agent runtime]
+        Graph[Deep Agents + LangGraph]
+        Registry[Live capability registry]
+        Specialists[Bounded specialist agents]
+        Generated[Generated gen__ capabilities]
+    end
+
+    subgraph State[Durable state]
+        Timeline[Run and event store]
+        Checkpoints[LangGraph checkpoints]
+        Artifacts[Reports and evidence]
+        Archive[Optional libSQL / Turso archive]
+    end
+
+    Web --> API
+    Discord --> Server
+    MCPClient --> MCP
     API --> Server
     MCP --> Server
-
-    Server --> Policy[Identity, policy and approvals]
-    Server --> Runtime[Deep Agents + LangGraph]
-    Runtime --> Registry[Live capability registry]
-    Runtime --> Checkpoints[Persistent checkpoints]
-    Server --> Timeline[Run and event store]
-    Timeline --> Replay[Replayable stream]
-
-    Registry --> Hugin[Hugin research skill]
-    Registry --> Valravn[Valravn reconnaissance mesh]
+    Server --> Identity
+    Server --> Policy
+    Policy --> Graph
+    Graph --> Registry
+    Registry --> Specialists
+    Registry --> Generated
+    Graph --> Timeline
+    Graph --> Checkpoints
+    Timeline --> Artifacts
+    Timeline --> Archive
 ```
 
 Munin separates four concerns that are often blurred together:
@@ -106,11 +148,61 @@ Munin separates four concerns that are often blurred together:
 
 ## Operation lifecycle
 
+```mermaid
+stateDiagram-v2
+    [*] --> Created: objective + authorised scope
+    Created --> Running: load thread, evidence and registry
+    Running --> Delegating: bounded specialist task
+    Delegating --> Running: specialist result
+    Running --> ToolCall: permitted capability selected
+    ToolCall --> WaitingApproval: sensitive action
+    ToolCall --> Executing: approval not required
+    WaitingApproval --> Executing: approved
+    WaitingApproval --> Cancelled: rejected or expired
+    Executing --> Running: result persisted
+    Running --> Completed: evidence-backed result
+    Running --> Failed: unrecoverable error
+    Running --> Cancelled: operator cancellation
+    Failed --> Recovering: checkpoint + valid lease policy
+    Recovering --> Running: resume exact run
+    Completed --> [*]
+    Cancelled --> [*]
+```
+
 1. The operator creates or resumes a conversation and provides an objective, authorised scope and desired evidence.
 2. Munin loads the stable thread, current evidence and live capability registry.
 3. The runtime can answer, delegate, call a permitted tool, request approval or stop with an evidence-backed result.
 4. Every meaningful transition is persisted and streamed to connected clients.
 5. Completed, failed and cancelled runs remain auditable; interrupted runs may recover from checkpoints and leases.
+
+## Persistence and recovery
+
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant S as Munin server
+    participant G as LangGraph runtime
+    participant E as Event store
+    participant C as Checkpoint store
+    participant UI as Web / MCP / Discord
+
+    O->>S: Start or resume operation
+    S->>G: Load stable thread and capabilities
+    G->>E: Persist run_started
+    G->>C: Save executable checkpoint
+    G-->>UI: Stream assistant and tool events
+    G->>E: Persist evidence, outputs and approvals
+    G->>C: Advance checkpoint
+    Note over S,G: Process or client may disconnect
+    UI->>S: Reconnect to operation
+    S->>E: Replay durable timeline
+    S->>C: Restore executable state when needed
+    S-->>UI: Continue the same run
+```
+
+SQLite is the fast transactional store for active conversations, runs and events. LangGraph checkpoints use persistent SQLite by default. A libSQL or Turso archive can mirror durable records for longer-lived continuity.
+
+Production deployments must persist both the hot store and checkpoint path. A disposable filesystem cannot recover in-flight state after a restart.
 
 ## Operation modes
 
@@ -123,13 +215,45 @@ All modes use the same supervised runtime. They change the autonomy contract, no
 | **GOAL** | Persistent objectives that must survive refreshes or restarts | Durable goal, TODO state and scheduled re-evaluation |
 | **BEAST** | Deep planning and specialist delegation | Expanded budgets with explicit scope and anti-runaway controls |
 
+```mermaid
+flowchart LR
+    Standard[Standard] --> Guardrails[Shared hard invariants]
+    YOLO[YOLO] --> Guardrails
+    Goal[GOAL] --> Guardrails
+    Beast[BEAST] --> Guardrails
+
+    Guardrails --> Preflight[Preflight validation]
+    Guardrails --> Critical[Critical approval floor]
+    Guardrails --> Audit[Durable audit trail]
+    Guardrails --> Redaction[Token redaction]
+```
+
 The `critical` approval floor, preflight validation, audit trail and token redaction remain enforced across every mode.
 
 ## Hugin and Valravn
 
-Munin separates knowledge from authority.
+```mermaid
+flowchart LR
+    Hugin[Hugin
+Knowledge graph] -->|provenance-labelled context| Munin[Munin
+Authority + orchestration]
+    Munin -->|bounded research request| Hugin
+    Munin -->|authorised tool call| Valravn[Valravn
+External reconnaissance mesh]
+    Valravn -->|IOC, CVE, asset and web evidence| Munin
+    Munin --> Timeline[Durable timeline]
+    Munin --> Reports[Reports and evidence]
 
-[Hugin](https://github.com/PrinceOfPwn/Hugin) is its knowledge sibling: a passive graph of source-linked security research and relationships. Munin includes the reviewed `hugin-research` skill to retrieve a small, relevant and provenance-labelled subset for a bounded task.
+    Scope[Operator scope] --> Munin
+    Approval[Human approval] --> Munin
+
+    Hugin -. does not grant .-> Authority[Execution authority]
+    Valravn -. does not grant .-> Authority
+    Scope --> Authority
+    Approval --> Authority
+```
+
+[Hugin](https://github.com/PrinceOfPwn/Hugin) is Munin's knowledge sibling: a passive graph of source-linked security research and relationships. Munin includes the reviewed `hugin-research` skill to retrieve a small, relevant and provenance-labelled subset for a bounded task.
 
 [Valravn](munin/valravn/) is the external reconnaissance mesh. It exposes IOC and CVE enrichment, asset search through sources such as Shodan, Censys, ZoomEye, Netlas and LeakIX, historical-web pivots, routing and RPKI context, dark-web search and browser evidence capture through `valravn_*` MCP tools.
 
@@ -180,13 +304,20 @@ Open `http://localhost:3000`. MCP clients connect to `http://127.0.0.1:8787/mcp/
 - Use persistent hot and checkpoint storage when the run must survive restarts.
 - Confirm who can approve, reject and cancel sensitive actions.
 
-## Storage and recovery
-
-SQLite is the fast transactional store for active conversations, runs and events. LangGraph checkpoints use persistent SQLite by default. A libSQL or Turso archive can mirror durable records for longer-lived continuity.
-
-Production deployments must persist both the hot store and checkpoint path. A disposable filesystem cannot recover in-flight state after a restart.
-
 ## Skills and self-extension
+
+```mermaid
+flowchart LR
+    Skill[Reviewed SKILL.md] --> Registry[Capability registry]
+    Spec[SubagentSpec explicitly lists skill] --> Specialist[Bounded specialist]
+    Registry --> Specialist
+
+    Draft[Generated capability] --> Contract[Narrow contract]
+    Contract --> Validation[Validation]
+    Validation --> Registration[Registration as gen__*]
+    Registration --> Policy[Policy and approval checks]
+    Policy --> Runtime[Available to runtime]
+```
 
 A `SKILL.md` file provides instructions and context; it does not become executable authority by existing on disk.
 
