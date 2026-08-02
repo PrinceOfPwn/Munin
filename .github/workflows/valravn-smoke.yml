@@ -1,0 +1,119 @@
+name: Valravn Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      probe_external_apis:
+        description: "Probe configured reconnaissance APIs"
+        required: false
+        default: false
+        type: boolean
+      probe_browser:
+        description: "Launch CloakBrowser and capture example.com"
+        required: false
+        default: false
+        type: boolean
+  push:
+    paths:
+      - "munin/valravn/**"
+      - "munin/mcp/tools/valravn_tool.py"
+      - "munin/mcp/tools/tavily_tool.py"
+      - "soul/valravn.md"
+      - "tests/test_valravn_integration.py"
+      - "scripts/valravn_protocol_smoke.py"
+      - ".github/workflows/valravn-smoke.yml"
+  pull_request:
+    paths:
+      - "munin/valravn/**"
+      - "munin/mcp/tools/valravn_tool.py"
+      - "munin/mcp/tools/tavily_tool.py"
+      - "soul/valravn.md"
+      - "tests/test_valravn_integration.py"
+      - "scripts/valravn_protocol_smoke.py"
+
+permissions:
+  contents: read
+
+jobs:
+  valravn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Munin
+        run: |
+          python -m pip install --upgrade pip
+          pip install poetry
+          poetry install --no-interaction
+      - name: Compile Valravn
+        run: poetry run python -m compileall -q munin/valravn munin/mcp/tools/valravn_tool.py
+      - name: Protocol smoke
+        run: poetry run python scripts/valravn_protocol_smoke.py
+      - name: Catalog smoke
+        env:
+          MUNIN_WORKSPACE: ${{ github.workspace }}
+          VALRAVN_RESOLVE_PUBLIC_HOSTS: "false"
+        run: |
+          poetry run python - <<'PY'
+          from munin.valravn.gateway import ValravnGateway
+          status = ValravnGateway().status(probe=False)
+          assert status["name"] == "Valravn"
+          assert status["sources"]["ripestat"]
+          assert status["sources"]["wayback"]
+          assert status["sources"]["commoncrawl"]
+          print(status)
+          PY
+      - name: Valravn integration tests
+        run: poetry run pytest -q tests/test_valravn_integration.py
+      - name: Existing Munin tests
+        run: poetry run pytest -q
+      - name: External API probe
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_external_apis }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          URLSCAN_API_KEY: ${{ secrets.URLSCAN_API_KEY }}
+          NETLAS_API_KEY: ${{ secrets.NETLAS_API_KEY }}
+          CLOUDFLARE_RADAR_TOKEN: ${{ secrets.CLOUDFLARE_RADAR_TOKEN }}
+          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+          CENSYS_API_ID: ${{ secrets.CENSYS_API_ID }}
+          CENSYS_API_SECRET: ${{ secrets.CENSYS_API_SECRET }}
+          LEAKIX_API_KEY: ${{ secrets.LEAKIX_API_KEY }}
+          ZOOMEYE_API_KEY: ${{ secrets.ZOOMEYE_API_KEY }}
+          VALRAVN_RESOLVE_PUBLIC_HOSTS: "false"
+        run: |
+          poetry run python - <<'PY'
+          from munin.valravn.gateway import ValravnGateway
+          g = ValravnGateway()
+          print(g.investigate_network("AS3333", depth="quick"))
+          print(g.search_historical_web("example.com", limit=5, depth="quick"))
+          print(g.investigate_ioc("1.1.1.1", depth="quick"))
+          PY
+      - name: Install optional CloakBrowser runtime
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_browser }}
+        run: poetry run pip install cloakbrowser==0.5.3
+      - name: CloakBrowser probe
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_browser }}
+        env:
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}
+          VALRAVN_BROWSER_ENABLED: "true"
+          VALRAVN_RESOLVE_PUBLIC_HOSTS: "true"
+        run: |
+          poetry run python - <<'PY'
+          import tempfile
+          from pathlib import Path
+          from munin.valravn.config import ValravnSettings
+          from munin.valravn.gateway import ValravnGateway
+          with tempfile.TemporaryDirectory() as d:
+              settings = ValravnSettings.from_env()
+              object.__setattr__(settings, "workspace_root", Path(d))
+              result = ValravnGateway(settings).capture_web_evidence("https://example.com", run_id="browser-smoke")
+              assert result["artifacts"]
+              print(result["summary"])
+          PY
