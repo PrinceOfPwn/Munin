@@ -50,19 +50,12 @@ jobs:
               source = json.load(response)
           text = base64.b64decode(source["content"]).decode("utf-8")
 
-          summary = '''      - name: Show restored state summary
-                if: __PERSIST__
-                run: |
-                  if [ -f data/shared_state.sqlite ]; then
-                      echo "✓ Restored data/shared_state.sqlite ($(du -h data/shared_state.sqlite | cut -f1))"
-                  fi
-                  restored_sources=$(find munin/generated -type f 2>/dev/null | wc -l)
-                  echo "✓ Restored ${restored_sources} generated source file(s)"
-
-          '''.replace("__PERSIST__", expression("inputs.persist_state"))
-          if text.count(summary) != 1:
-              raise SystemExit(f"expected one summary block, found {text.count(summary)}")
-          text = text.replace(summary, "", 1)
+          summary_start_marker = "      - name: Show restored state summary\n"
+          install_marker = "      - name: Install Munin runtime + offensive toolchain\n"
+          summary_start = text.index(summary_start_marker)
+          summary_end = text.index(install_marker, summary_start)
+          summary = text[summary_start:summary_end]
+          text = text[:summary_start] + text[summary_end:]
 
           restore = '''      - name: Restore Munin durable files from last session
                 if: __PERSIST__
