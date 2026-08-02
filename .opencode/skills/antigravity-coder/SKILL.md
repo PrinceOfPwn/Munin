@@ -18,27 +18,13 @@ The custom tool invokes Antigravity in headless print mode from the current Git 
 
 ## Responsibilities
 
-Raven-Mind must:
+Raven-Mind must inspect enough of Munin to define a precise task, call `antigravity_delegate` with explicit scope and acceptance criteria, inspect the returned Git diff, check validation exit codes, and independently decide whether to accept, repair, or narrowly re-delegate the patch.
 
-- inspect enough of Munin to define a precise task;
-- call `antigravity_delegate` with explicit scope and acceptance criteria;
-- review the returned Git diff rather than trusting the worker summary;
-- check every changed file and validation exit code;
-- run additional checks when necessary;
-- repair or re-delegate narrow defects;
-- never commit or push merely because Antigravity says the task is complete.
+Antigravity may inspect and modify files in the current worktree and run preapproved development commands. It must not stage, commit, push, stash, reset, clean, restore, checkout, switch branches, merge, rebase, or modify Git history.
 
-Antigravity may inspect and modify files in the current worktree and run allowed local development commands. It must not stage, commit, push, stash, reset, clean, restore, checkout, or modify Git history.
+## Installation and authentication
 
-## Prerequisites
-
-Install the official Antigravity CLI in the environment that runs OpenCode.
-
-macOS or Linux:
-
-```bash
-curl -fsSL https://antigravity.google/cli/install.sh | bash
-```
+Install the official CLI.
 
 Windows PowerShell:
 
@@ -46,58 +32,59 @@ Windows PowerShell:
 irm https://antigravity.google/cli/install.ps1 | iex
 ```
 
-Verify installation:
+macOS or Linux:
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+Then run:
 
 ```bash
 agy --version
+agy
 ```
 
-Run `agy` interactively once and sign in with the Google account that owns the Google AI Pro or Ultra subscription. The CLI stores and reuses the authenticated session through the system keyring. On SSH, follow the authorization URL shown by the CLI.
+Complete Google Sign-In using the account that owns Google AI Pro or Ultra. The CLI stores the session in the system keyring. No API key belongs in Munin, OpenCode configuration, prompts, diffs, logs, or final responses.
 
-No API key belongs in Munin, OpenCode configuration, prompts, diffs, logs, or final responses.
+## Install Munin's safe coding defaults
 
-## Permissions required for headless coding
+Run this once from the repository root:
 
-Headless mode cannot answer interactive permission prompts reliably. Configure Antigravity permissions before delegation using `/permissions` or:
+```bash
+python .opencode/antigravity/configure_defaults.py
+```
+
+The installer merges `.opencode/antigravity/default-settings.json` into:
 
 ```text
 ~/.gemini/antigravity-cli/settings.json
 ```
 
-Allow workspace file reads and writes plus only the development commands needed by Munin. Explicitly deny Git-history and destructive commands. Deny rules have precedence over ask and allow rules.
+It is idempotent, preserves existing user settings, adds only missing entries, and writes a `.bak` backup before replacing an existing file.
 
-Recommended minimum deny rules:
+The defaults configure:
 
-```text
-command(git commit)
-command(git push)
-command(git reset)
-command(git clean)
-command(git checkout)
-command(git restore)
-write_file(.git/)
-command(rm -rf)
-command(sudo)
-```
+- `artifactReviewPolicy: always-proceed`, so headless code writes do not stop on the visual artifact-review prompt;
+- `allowNonWorkspaceAccess: false`;
+- automatic workspace reads and writes, which Antigravity already scopes to the active project;
+- safe inspection commands such as `git status`, `git diff`, `git log`, `git show`, `git grep`, and `git ls-files`;
+- common test, lint, build, and type-check commands for Python and the Munin frontend;
+- explicit denial of staging, commits, pushes, branch/history mutations, destructive deletion, privilege escalation, and writes to `.git` or credential directories.
 
-Do not enable unrestricted `always-proceed` merely to make delegation work. Prefer narrow command grants and workspace-scoped file access.
+Do not add `command(*)` to `ask`: Antigravity evaluates `deny > ask > allow`, so a broad ask rule would override every safe command grant and make headless delegation block again.
+
+Do not use `--dangerously-skip-permissions`.
 
 ## When to use
 
-Delegate when the task is concrete and bounded, for example:
+Delegate concrete and bounded work such as a defined feature, reproducible bug, regression test, constrained refactor, small API migration, or repetitive related changes.
 
-- implement a defined feature;
-- fix a reproducible bug;
-- add regression tests;
-- perform a constrained refactor;
-- migrate a small API surface;
-- make repetitive changes across related files.
-
-Do not delegate vague architecture work, destructive operations, tasks requiring unavailable secrets, or work that cannot be independently reviewed.
+Do not delegate vague architectural decisions, destructive operations, tasks requiring unavailable secrets, or work that cannot be independently reviewed.
 
 ## Before calling the tool
 
-Inspect the relevant code and provide:
+Inspect the relevant implementation and provide:
 
 1. Exact desired behavior.
 2. Relevant modules or expected paths.
@@ -105,15 +92,9 @@ Inspect the relevant code and provide:
 4. Acceptance criteria.
 5. Targeted validation commands.
 
-Do not send prompts such as "fix the project" or "improve the code".
+Do not send prompts such as `fix the project` or `improve the code`.
 
-Before the first delegation in a new environment, verify:
-
-```bash
-agy --version
-```
-
-If `agy` asks for authentication or permissions, stop the delegation and report the required interactive setup instead of falling back to an API key.
+Before the first delegation in a new environment, verify `agy --version`. If authentication or permission setup is missing, report that requirement instead of falling back to a Gemini API key.
 
 ## Invocation
 
@@ -121,23 +102,17 @@ Call `antigravity_delegate` with:
 
 - `task`: self-contained implementation specification;
 - `allowed_paths`: expected repository-relative modification scope;
-- `validation`: commands that the wrapper must execute after the worker finishes;
+- `validation`: commands the wrapper executes after the worker finishes;
 - `agent`: optional custom Antigravity agent name;
 - `agent_timeout`: optional maximum headless runtime.
 
-The wrapper runs the equivalent of:
+The wrapper executes the equivalent of:
 
 ```bash
 agy --print "<delegated task>" --output-format json
 ```
 
-When `agent` is supplied, it also passes:
-
-```bash
---agent "<agent name>"
-```
-
-Example task:
+Example:
 
 ```text
 Fix cancellation handling in the run event stream. Trace the current lifecycle,
@@ -152,40 +127,21 @@ After the tool returns:
 
 1. Confirm `backend` is `antigravity-cli`.
 2. Inspect `worker_exit_code`, `worker_output`, and `worker_stderr`.
-3. Read `dirty_before` and `dirty_after`.
-4. Inspect `changed_files` and `diff_stat`.
-5. Read the complete returned `diff`.
-6. Compare every change with the delegated scope.
-7. Inspect each validation command, exit code, stdout, and stderr.
-8. Use OpenCode read, grep, LSP, and bash tools for independent verification.
-9. Run `git diff --check` before reporting success.
+3. Compare `dirty_before` with `dirty_after`.
+4. Inspect every changed file and the complete returned `diff`.
+5. Compare all changes with the delegated scope.
+6. Inspect every validation exit code and output.
+7. Use OpenCode read, grep, LSP, and bash tools for independent verification.
+8. Run `git diff --check` before reporting success.
 
-A zero `agy` exit code is not proof that the patch is correct. The real worktree diff and independent validation are authoritative.
+A zero `agy` exit code is not proof that the patch is correct. The actual worktree diff and independently executed validation are authoritative.
 
-Reject or repair a patch that:
-
-- touches unrelated files without justification;
-- overwrites pre-existing work;
-- changes public behavior unintentionally;
-- suppresses errors or tests instead of fixing behavior;
-- introduces needless dependencies or duplicate abstractions;
-- claims checks passed without a successful observed exit code;
-- includes generated or secret material that should not be committed;
-- performs or attempts any prohibited Git-history operation.
+Reject or repair a patch that touches unrelated files, overwrites pre-existing work, changes public behavior unintentionally, suppresses errors or tests, introduces needless dependencies, contains secrets or generated junk, or attempts a prohibited Git operation.
 
 ## Iteration
 
-When the patch is close, re-delegate a narrow correction based on observable defects. Do not ask Antigravity to redo the entire task when a focused repair is sufficient.
-
-Each invocation is a fresh headless turn unless an explicit, safely isolated session mechanism is added later. Include all context required for the requested correction in the delegated task.
+When the patch is close, re-delegate a narrow correction based on observable defects. Each invocation is a fresh headless turn, so include all context required for the correction.
 
 ## Completion report
 
-Report:
-
-- what Antigravity changed;
-- what Raven-Mind independently verified;
-- exact validation results;
-- remaining risks or unresolved issues;
-- whether the working tree already contained unrelated changes;
-- whether `agy` successfully used its authenticated Google session.
+Report what Antigravity changed, what Raven-Mind independently verified, exact validation results, remaining risks, pre-existing worktree changes, and whether `agy` successfully used its authenticated Google session.
