@@ -7,9 +7,6 @@ import {
   useState,
 } from "react";
 import type { FormEvent } from "react";
-import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import remarkGfm from "remark-gfm";
 import {
   Archive,
   Bot,
@@ -40,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "@/components/ui/sonner";
+import { Markdown } from "@/components/Markdown";
 
 import { OperationalTracePart } from "@/components/chat/blocks/parts/OperationalTracePart";
 import { ReasoningPart } from "@/components/chat/blocks/parts/ReasoningPart";
@@ -51,10 +49,24 @@ import type { HitlRequestPartProps } from "@/components/chat/blocks/parts/HitlRe
 import { ArtifactPart } from "@/components/chat/blocks/parts/ArtifactPart";
 import { NotePart } from "@/components/chat/blocks/parts/NotePart";
 import { GuidancePart } from "@/components/chat/blocks/parts/GuidancePart";
+import {
+  HypothesisPart,
+  PlanSnapshotPart,
+  TodoMutationPart,
+} from "@/components/chat/blocks/parts/PlanPart";
+import type {
+  PlanItemPartProps,
+  PlanSnapshotPartProps,
+} from "@/components/chat/blocks/parts/PlanPart";
+import { GoalPart } from "@/components/chat/blocks/parts/GoalPart";
+import type { GoalPartProps } from "@/components/chat/blocks/parts/GoalPart";
+import { TimerTickPart } from "@/components/chat/blocks/parts/TimerTickPart";
 import { CommandOutputPart } from "@/components/chat/blocks/parts/CommandOutputPart";
 import { ToolHeartbeatPart } from "@/components/chat/blocks/parts/ToolHeartbeatPart";
 import { HeartbeatPart } from "@/components/chat/blocks/parts/HeartbeatPart";
 import { ProviderSwitcher } from "@/components/ProviderSwitcher";
+import { ModeSwitcher, EMPTY_GOAL_DRAFT } from "@/components/ModeSwitcher";
+import type { GoalDraft, OperationMode } from "@/components/ModeSwitcher";
 
 import {
   approveHitlRequest,
@@ -108,6 +120,40 @@ interface RunStateData {
 interface ActivityData {
   stage: string;
   text: string;
+}
+
+// Fase 3 (autonomous modes): plan / goal / timer data part shapes.
+interface PlanData {
+  goal: PlanSnapshotPartProps["goal"];
+  items: PlanItemPartProps[];
+  updatedAtMs?: number;
+}
+
+interface TodoData {
+  op: string;
+  item?: PlanItemPartProps;
+  reason?: string;
+  resetIds?: string[];
+}
+
+interface HypothesisData {
+  statement: string;
+  status: string;
+  evidence?: string;
+}
+
+interface GoalData {
+  goal: GoalPartProps["goal"];
+  state?: string;
+}
+
+interface TimerTickData {
+  timerId: string;
+  timerKind?: string;
+  goalId?: string;
+  tickCount?: number;
+  dueAtMs?: number;
+  lastTickAtMs?: number;
 }
 
 interface CommandOutputData {
@@ -280,11 +326,7 @@ function PartRenderer({
         {role === "user" ? (
           <p className="whitespace-pre-wrap">{tp.text}</p>
         ) : (
-          <div className="prose prose-invert max-w-none prose-p:my-1 prose-headings:mb-2 prose-headings:mt-3 prose-pre:my-2 prose-pre:overflow-auto prose-code:text-accent">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-              {tp.text}
-            </ReactMarkdown>
-          </div>
+          <Markdown text={tp.text} />
         )}
       </div>
     );
@@ -419,6 +461,64 @@ function PartRenderer({
     return <GuidancePart key={key} text={d.text} />;
   }
 
+  // Fase 3 (autonomous modes): durable plan / goal / timer visibility.
+  if (part.type === "data-plan") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as PlanData;
+    return (
+      <PlanSnapshotPart
+        key={key}
+        goal={d.goal ?? null}
+        items={d.items ?? []}
+        updatedAtMs={d.updatedAtMs}
+      />
+    );
+  }
+
+  if (part.type === "data-todo") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as TodoData;
+    return (
+      <TodoMutationPart
+        key={key}
+        op={d.op ?? "update"}
+        item={d.item}
+        reason={d.reason}
+        resetIds={d.resetIds}
+      />
+    );
+  }
+
+  if (part.type === "data-hypothesis") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as HypothesisData;
+    return (
+      <HypothesisPart
+        key={key}
+        statement={d.statement}
+        status={d.status ?? "proposed"}
+        evidence={d.evidence}
+      />
+    );
+  }
+
+  if (part.type === "data-goal") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as GoalData;
+    return <GoalPart key={key} goal={d.goal ?? null} state={d.state} />;
+  }
+
+  if (part.type === "data-timer-tick") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as TimerTickData;
+    return (
+      <TimerTickPart
+        key={key}
+        timerId={d.timerId}
+        timerKind={d.timerKind}
+        goalId={d.goalId}
+        tickCount={d.tickCount}
+        dueAtMs={d.dueAtMs}
+        lastTickAtMs={d.lastTickAtMs}
+      />
+    );
+  }
+
   // data-run-state is metadata — skip rendering.
   if (part.type === "data-run-state") {
     return null;
@@ -494,6 +594,7 @@ interface StreamInsight {
   activeRunId: string | null;
   lastToolName: string | null;
   runState: string | null;
+  goalId: string | null;
 }
 
 function useStreamInsight(messages: UIMessage[]): StreamInsight {
@@ -501,6 +602,7 @@ function useStreamInsight(messages: UIMessage[]): StreamInsight {
     let activeRunId: string | null = null;
     let lastToolName: string | null = null;
     let runState: string | null = null;
+    let goalId: string | null = null;
     for (const message of messages) {
       if (message.role !== "assistant") continue;
       for (const rawPart of message.parts as AnyUIPart[]) {
@@ -512,10 +614,14 @@ function useStreamInsight(messages: UIMessage[]): StreamInsight {
         } else if (rawPart.type === "dynamic-tool") {
           const dp = rawPart as DynamicToolUIPart;
           if (dp.toolName) lastToolName = dp.toolName;
+        } else if (rawPart.type === "data-goal") {
+          const d = (rawPart as DataUIPart<Record<string, unknown>>)
+            .data as unknown as GoalData;
+          if (d?.goal?.id) goalId = d.goal.id;
         }
       }
     }
-    return { activeRunId, lastToolName, runState };
+    return { activeRunId, lastToolName, runState, goalId };
   }, [messages]);
 }
 
@@ -738,9 +844,23 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   const [draftReady, setDraftReady] = useState(false);
   const [providerProfiles, setProviderProfiles] = useState<ProviderProfile[]>([]);
   const [providerBusy, setProviderBusy] = useState(false);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  const scrollAreaRef = useRef<HTMLDivElement | null>(null);
-  const followTailRef = useRef(true);
+  const [mode, setMode] = useState<OperationMode>("standard");
+  const [goalDraft, setGoalDraft] = useState<GoalDraft>(EMPTY_GOAL_DRAFT);
+  const [attachedGoalId, setAttachedGoalId] = useState<string | null>(null);
+
+  // Persist the chosen mode per conversation so a refresh keeps the
+  // operation contract instead of silently falling back to Standard.
+  const modeKey = `munin.mode.${conversationId}`;
+  useEffect(() => {
+    const saved = window.localStorage.getItem(modeKey) as OperationMode | null;
+    if (saved === "standard" || saved === "yolo" || saved === "goal" || saved === "beast") {
+      setMode(saved);
+    }
+  }, [modeKey]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(modeKey, mode);
+  }, [modeKey, mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -806,25 +926,33 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     return () => window.clearTimeout(handle);
   }, [draftKey, draftReady, input]);
 
-  // Follow the live tail only while the operator is already near it. Calling
-  // scrollIntoView on every token steals the reading position.
-  useEffect(() => {
-    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-      "[data-radix-scroll-area-viewport]",
-    );
-    if (!viewport) return;
-    const onScroll = () => {
-      const distance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-      followTailRef.current = distance < 96;
-    };
-    viewport.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-    return () => viewport.removeEventListener("scroll", onScroll);
-  }, []);
+  // Auto-scroll: only follow the stream while the operator is reading near
+  // the bottom (within STICK_THRESHOLD px). If they scrolled up to inspect
+  // earlier content, an in-progress stream must not drag the view down.
+  // `pendingJump` forces a jump to the bottom right after sending a turn so
+  // the new response is visible even if the operator was scrolled up.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  const pendingJumpRef = useRef(false);
+  const STICK_THRESHOLD = 120;
+
+  function handleViewportScroll() {
+    const el = viewportRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD;
+  }
 
   useEffect(() => {
-    if (!followTailRef.current) return;
-    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+    const el = viewportRef.current;
+    if (!el) return;
+    if (pendingJumpRef.current) {
+      pendingJumpRef.current = false;
+      stickToBottomRef.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    } else if (stickToBottomRef.current) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+    }
   }, [messages]);
 
   const isStreaming = status === "streaming" || status === "submitted";
@@ -834,19 +962,60 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   );
   const elapsedSeconds = useElapsedSeconds(isStreaming);
 
+  // Once the stream reveals the durable goal id, keep it so later turns
+  // attach to the same goal instead of creating a duplicate.
+  useEffect(() => {
+    if (insight.goalId && insight.goalId !== attachedGoalId) {
+      setAttachedGoalId(insight.goalId);
+    }
+  }, [insight.goalId, attachedGoalId]);
+
+  function buildGoalPayload(): Record<string, unknown> | undefined {
+    const needsGoal = mode === "goal" || mode === "beast";
+    if (!needsGoal) return undefined;
+    const objective = goalDraft.objective.trim();
+    const payload: Record<string, unknown> = {};
+    if (attachedGoalId) payload.id = attachedGoalId;
+    if (objective) payload.objective = objective;
+    const criteria = goalDraft.successCriteria
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (criteria.length > 0) payload.success_criteria = criteria;
+    const scopeText = goalDraft.scopeJson.trim();
+    if (scopeText) {
+      try {
+        payload.scope = JSON.parse(scopeText) as Record<string, unknown>;
+      } catch {
+        // Invalid scope JSON is rejected server-side for BEAST; skip silently
+        // here so the turn still goes through Standard semantics if the
+        // operator toggled the mode off.
+      }
+    }
+    return Object.keys(payload).length > 0 ? payload : undefined;
+  }
+
   async function submitTurn(event?: FormEvent) {
     event?.preventDefault();
     const text = input.trim();
     if (!text) return;
+    if ((mode === "goal" || mode === "beast") && !goalDraft.objective.trim() && !attachedGoalId) {
+      toast.error(`${mode.toUpperCase()} mode requires a goal — open the Goal panel and set an objective`);
+      return;
+    }
+    pendingJumpRef.current = true;
     setInput("");
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(draftKey);
     }
+    const body: Record<string, unknown> = { mode };
+    const goal = buildGoalPayload();
+    if (goal) body.goal = goal;
     if (runIsActive) {
       await sendGuidance(text);
       return;
     }
-    await sendMessage({ text });
+    await sendMessage({ text }, { body });
   }
 
   async function sendGuidance(guidanceText = input.trim()) {
@@ -856,6 +1025,7 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       toast.error("No active run to guide");
       return;
     }
+    pendingJumpRef.current = true;
     setInput("");
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(draftKey);
@@ -967,7 +1137,11 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       )}
 
       {/* Message stream */}
-      <ScrollArea ref={scrollAreaRef} className="min-h-0 flex-1">
+      <ScrollArea
+        className="min-h-0 flex-1"
+        viewportRef={viewportRef}
+        onViewportScroll={handleViewportScroll}
+      >
         <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8">
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
@@ -1001,14 +1175,25 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               <span>Munin is working…</span>
             </div>
           )}
-
-          <div ref={bottomRef} aria-hidden />
         </div>
       </ScrollArea>
 
       {/* Composer */}
       <footer className="border-t border-border bg-surface px-4 py-4 md:px-8">
         <div className="mx-auto max-w-4xl space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <ModeSwitcher
+              mode={mode}
+              onChangeMode={setMode}
+              goal={goalDraft}
+              onChangeGoal={setGoalDraft}
+            />
+            {attachedGoalId && (
+              <span className="font-mono text-[0.6rem] text-muted" title="Durable goal attached to this conversation">
+                goal · {attachedGoalId.slice(0, 8)}…
+              </span>
+            )}
+          </div>
           <form
             onSubmit={(e) => void submitTurn(e)}
             className="flex items-end gap-2"

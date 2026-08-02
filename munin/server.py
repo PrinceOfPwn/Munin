@@ -278,6 +278,30 @@ def create_app() -> Starlette:
         with suppress(asyncio.CancelledError):
             await task
 
+    # Fase 3 (autonomous modes): durable server-side timers (GOAL wake-ups,
+    # progress evaluation, reminders).  The scheduler is the only timer
+    # consumer and goes through the same governed execution path as a turn.
+    timer_holder: dict[str, asyncio.Task[None]] = {}
+
+    async def _startup_timers() -> None:
+        try:
+            from .production.timers import start_timer_worker  # noqa: PLC0415
+
+            timer_holder["task"] = start_timer_worker(
+                store=production_store,
+                shared_state=shared_state,
+            )
+        except Exception as exc:  # noqa: BLE001 - serving remains available
+            log.warning("server: timer worker startup failed: %s", exc)
+
+    async def _shutdown_timers() -> None:
+        task = timer_holder.pop("task", None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
     # ── MCP session manager (issue #9 fix) ──────────────────────────
     # Starlette does not propagate the ``startup``/``shutdown`` lifespan
     # events to sub-apps mounted via ``Mount``.  FastMCP's
@@ -295,10 +319,12 @@ def create_app() -> Starlette:
         try:
             await _startup_checkpointer()
             await _startup_chat_recovery()
+            await _startup_timers()
             await _startup_discord()
             yield
         finally:
             await _shutdown_discord()
+            await _shutdown_timers()
             await _shutdown_chat_recovery()
             await _shutdown_checkpointer()
             await _shutdown_pools()

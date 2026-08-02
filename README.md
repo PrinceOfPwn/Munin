@@ -102,6 +102,20 @@ That distinction matters:
 | Research context, relationships, technique references and hypotheses | Conversation state, policy enforcement, tools, execution, evidence capture and human approval |
 | A reason to investigate further | The controlled path for deciding whether a target-specific action may run |
 
+## Operation modes
+
+Operators choose an autonomy contract per turn over the same supervised loop:
+**Standard** (per-action approvals), **YOLO** (proceed within authorized scope;
+admin/critical only), **GOAL** (persistent durable objective + TODO plan with
+refresh/restart-safe state), and **BEAST** (deep planning + delegation with
+explicit scope and raised anti-runaway budgets). The mode only changes which
+audit levels pause for approval — the hard boundaries (scope, preflight, audit,
+the `critical` approval floor) never widen. GOAL/BEAST carry a durable goal
+editable via `PATCH /api/goals/{id}`; server-side timers can wake a GOAL run for
+re-evaluation.
+
+## Capabilities and self-extension
+
 Skill content is selected deliberately; a folder of `SKILL.md` files is not
 automatically prompt context, a tool, evidence of a vulnerability or permission
 to act. Source material should be traced back to its Hugin identifier and
