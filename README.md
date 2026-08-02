@@ -431,4 +431,5 @@ Because commercial use is restricted, Munin is **source-available**, not open so
 
 ---
 
-<p align="center"><em>What was once seen is never forgotten.</em></p>
+<p align="center"><em>Знание переживает битву.</em></p>
+<p align="center"><sub>Knowledge outlives the battle.</sub></p>

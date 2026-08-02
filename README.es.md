@@ -288,4 +288,5 @@ Por restringir uso comercial, Munin es **source-available**, no open source seg�
 
 ---
 
-<p align="center"><em>Lo que una vez fue visto, nunca se olvida.</em></p>
+<p align="center"><em>Знание переживает битву.</em></p>
+<p align="center"><sub>El conocimiento sobrevive a la batalla.</sub></p>

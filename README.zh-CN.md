@@ -291,4 +291,5 @@ Munin 使用 [PolyForm Noncommercial License 1.0.0](LICENSE)。允许许可范�
 
 ---
 
-<p align="center"><em>凡所见者，永不遗忘。</em></p>
+<p align="center"><em>Знание переживает битву.</em></p>
+<p align="center"><sub>知识超越战场，历久弥存。</sub></p>
