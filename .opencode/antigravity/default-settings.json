@@ -45,10 +45,7 @@
       "command(chown)",
       "command(powershell Remove-Item)",
       "command(pwsh Remove-Item)",
-      "write_file(.git/)",
-      "write_file(~/.ssh)",
-      "write_file(~/.aws)",
-      "write_file(~/.config/gcloud)"
+      "write_file(.git/)"
     ],
     "ask": []
   }
