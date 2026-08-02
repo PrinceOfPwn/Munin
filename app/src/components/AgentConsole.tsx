@@ -35,6 +35,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "@/components/ui/sonner";
+import { Markdown } from "@/components/Markdown";
 
 import { OperationalTracePart } from "@/components/chat/blocks/parts/OperationalTracePart";
 import { ReasoningPart } from "@/components/chat/blocks/parts/ReasoningPart";
@@ -297,7 +298,11 @@ function PartRenderer({
             : "border border-border bg-surface text-body",
         )}
       >
-        <p className="whitespace-pre-wrap">{tp.text}</p>
+        {role === "user" ? (
+          <p className="whitespace-pre-wrap">{tp.text}</p>
+        ) : (
+          <Markdown text={tp.text} />
+        )}
       </div>
     );
   }
@@ -736,7 +741,6 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   const [mode, setMode] = useState<OperationMode>("standard");
   const [goalDraft, setGoalDraft] = useState<GoalDraft>(EMPTY_GOAL_DRAFT);
   const [attachedGoalId, setAttachedGoalId] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
 
   // Persist the chosen mode per conversation so a refresh keeps the
   // operation contract instead of silently falling back to Standard.
@@ -816,9 +820,33 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     return () => window.clearTimeout(handle);
   }, [draftKey, draftReady, input]);
 
-  // Auto-scroll to the bottom when new messages arrive.
+  // Auto-scroll: only follow the stream while the operator is reading near
+  // the bottom (within STICK_THRESHOLD px). If they scrolled up to inspect
+  // earlier content, an in-progress stream must not drag the view down.
+  // `pendingJump` forces a jump to the bottom right after sending a turn so
+  // the new response is visible even if the operator was scrolled up.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  const pendingJumpRef = useRef(false);
+  const STICK_THRESHOLD = 120;
+
+  function handleViewportScroll() {
+    const el = viewportRef.current;
+    if (!el) return;
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD;
+  }
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = viewportRef.current;
+    if (!el) return;
+    if (pendingJumpRef.current) {
+      pendingJumpRef.current = false;
+      stickToBottomRef.current = true;
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    } else if (stickToBottomRef.current) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+    }
   }, [messages]);
 
   const isStreaming = status === "streaming" || status === "submitted";
@@ -866,6 +894,7 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       toast.error(`${mode.toUpperCase()} mode requires a goal — open the Goal panel and set an objective`);
       return;
     }
+    pendingJumpRef.current = true;
     setInput("");
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(draftKey);
@@ -883,6 +912,7 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       toast.error("No active run to guide");
       return;
     }
+    pendingJumpRef.current = true;
     setInput("");
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(draftKey);
@@ -958,7 +988,11 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       )}
 
       {/* Message stream */}
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea
+        className="min-h-0 flex-1"
+        viewportRef={viewportRef}
+        onViewportScroll={handleViewportScroll}
+      >
         <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8">
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
@@ -992,8 +1026,6 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
               <span>Munin is working…</span>
             </div>
           )}
-
-          <div ref={bottomRef} aria-hidden />
         </div>
       </ScrollArea>
 

@@ -62,6 +62,13 @@ One execution path; the mode shapes policy, not scope:
   plan/timer/goal routes, timer `_dispatch_tick` determinism and loop cancel;
   `translator.test.ts` adds the new envelopes (30 total). ruff `--select F`
   clean; tsc + vitest green.
+- Frontend polish (same PR): assistant text parts now render Markdown
+  (`app/src/components/Markdown.tsx` — react-markdown + remark-gfm +
+  rehype-highlight, tokens from the design system, hljs-* syntax colors mapped
+  in `globals.css`; user bubbles stay plain). Auto-scroll no longer drags the
+  view down while the agent streams: the console only follows the stream when
+  the operator is within 120px of the bottom, and jumps only after sending a
+  turn (`viewportRef` + `onViewportScroll` on the Radix ScrollArea wrapper).
 
 Security invariant unchanged: the mode adjusts only which audit levels pause
 for operator approval; the hard boundaries (scope preflight, opsec, audit

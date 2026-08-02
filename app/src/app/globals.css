@@ -48,6 +48,59 @@ button:disabled {
   outline-offset: 2px;
 }
 
+/* Code highlighting — rehype-highlight emits hljs-* classes without styles;
+ * map the common tokens onto the Munin palette (dark surface). */
+.hljs {
+  color: theme(colors.body);
+}
+.hljs-comment,
+.hljs-quote {
+  color: theme(colors.muted);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-meta .hljs-keyword {
+  color: theme(colors.accent.hover);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: theme(colors.ice);
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-deletion {
+  color: theme(colors.amber);
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section,
+.hljs-name {
+  color: theme(colors.ice);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-built_in {
+  color: theme(colors.secondary);
+}
+.hljs-meta,
+.hljs-subst {
+  color: theme(colors.muted);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
 /* Custom scrollbars — subtle, dark, do not steal attention from content. */
 * {
   scrollbar-width: thin;
