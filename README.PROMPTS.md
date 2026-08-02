@@ -24,7 +24,7 @@ Much of Munin's internal control-language prompt surface is written in **Simplif
 
 Chinese can encode operational constraints with fewer characters and less visual repetition than an equivalent English paragraph. More importantly for this project, several model families used during development are produced by Chinese labs and are trained and evaluated extensively on Chinese as well as English. Native-language instructions can therefore provide more natural planning vocabulary and, on some models, more stable instruction following during long agentic runs.
 
-This is **not** a universal claim that Chinese always consumes fewer tokens or always produces better results. Tokenisation and task success are model-dependent. A 2026 SWE-bench study found that GLM-5 consumed fewer tokens with Chinese prompts, while other evaluated models did not; it also observed lower Chinese task success overall in its tested setup. Munin treats Chinese as an empirically selected control language for this prompt suite—not as a general cost-saving rule.
+This is **not** a universal claim that Chinese always consumes fewer tokens or always produces better results. Tokenisation and task success remain model- and tokenizer-dependent. Munin treats Chinese as an empirically selected control language for this prompt suite—not as a general cost-saving rule.
 
 The practical rationale is therefore:
 
@@ -51,14 +51,12 @@ This list records compatibility testing, not equivalent capability, safety or be
 
 ## References
 
-- [Chinese Language Is Not More Efficient Than English in Vibe Coding: A Preliminary Study on Token Cost and Problem-Solving Rate](https://arxiv.org/abs/2604.14210) — empirical evidence that token and success effects are model-dependent rather than universally favourable to Chinese.
-- [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437) — documents predominantly English-and-Chinese pretraining data and evaluation across English, Chinese and multilingual benchmarks.
-- [Chinese Tiny LLM](https://arxiv.org/abs/2404.04167) — demonstrates how Chinese-centric pretraining can materially improve Chinese-language task performance.
-- [Kimi model documentation](https://platform.kimi.ai/docs/models) — official documentation for Kimi's agentic and coding model family.
-- [DeepSeek API models and pricing](https://api-docs.deepseek.com/quick_start/pricing) — official V4 Pro and V4 Flash identifiers and current capabilities.
+- [Kimi model documentation](https://platform.kimi.ai/docs/models) — official documentation for Kimi's current agentic and coding model family.
+- [DeepSeek API models and pricing](https://api-docs.deepseek.com/quick_start/pricing) — official documentation for the current `deepseek-v4-pro` and `deepseek-v4-flash` models, including tool calling and long-context support.
 - [LongCat official repositories](https://github.com/meituan-longcat) — official LongCat models and technical-report implementations from Meituan.
-- [MiMo model releases](https://mimo.mi.com/docs/zh-CN/updates/model) — official MiMo V2.5 Pro release and agent-capability notes.
-- [NVIDIA Nemotron 3 Ultra](https://research.nvidia.com/labs/nemotron/Nemotron-3-Ultra/) — official model page and technical report for NVIDIA's agentic reasoning model.
+- [MiMo-V2.5 model releases](https://mimo.mi.com/docs/en-US/updates/model) — official MiMo V2.5 Pro release and agent-capability notes.
+- [MiMo-V2.5-Pro model page](https://mimo.mi.com/models/zh-CN/mimo-v2.5-pro) — current model specifications, tool-calling support and long-horizon agent positioning.
+- [NVIDIA Nemotron 3 Ultra](https://research.nvidia.com/labs/nemotron/Nemotron-3-Ultra/) — official 2026 model page and technical report for NVIDIA's agentic reasoning model.
 
 ## Operational interpretation
 
