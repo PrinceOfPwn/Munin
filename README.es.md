@@ -1,85 +1,145 @@
 <p align="center">
-  <img src="app/public/raven-mark.png" alt="Marca del cuervo de Munin" width="168" />
+  <img src="app/public/raven-mark.png" alt="Marca del cuervo de Munin" width="180" />
 </p>
 
 <h1 align="center">Munin</h1>
 
 <p align="center"><strong>Un runtime durable, gobernado por operadores, para operaciones autónomas de seguridad.</strong></p>
 
+<p align="center">Threat intelligence, red team autorizado, captura de evidencia, aprobación humana y ejecución prolongada de agentes en un único plano de control.</p>
+
 <p align="center">
-  <a href="README.md">English</a> ·
-  <strong>Español</strong> ·
+  <a href="README.md">English</a> · <strong>Español</strong> ·
   <a href="README.pt-BR.md">Português (BR)</a> ·
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-> **Solo para uso autorizado.** Munin está diseñado para investigación legítima de seguridad, inteligencia de amenazas y operaciones controladas de red team. El operador es responsable de obtener autorización, definir el alcance, proteger credenciales, revisar el impacto y cumplir la ley aplicable.
+<p align="center">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white">
+  <img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C">
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-1.x-6F42C1">
+  <img alt="Next.js 15" src="https://img.shields.io/badge/Next.js-15-black?logo=next.js">
+  <img alt="PolyForm Noncommercial" src="https://img.shields.io/badge/Licencia-PolyForm_No_Comercial-orange">
+</p>
 
-> **Configuración verificada para Munin v1.0.0:** interfaz gráfica web (**GUI**) ejecutada mediante **GitHub Actions**, usando **MiMo V2.5** como modelo. Otras combinaciones pueden funcionar, pero no forman parte de la configuración verificada de la versión 1.0.0.
+> [!WARNING]
+> **Solo para uso autorizado.** Munin está diseñado para investigación legítima de seguridad, inteligencia de amenazas y operaciones controladas de red team. El operador es responsable de obtener autorización, definir alcance, proteger credenciales, evaluar impacto y cumplir la legislación aplicable.
+
+## Configuración verificada de v1.0.0
+
+> [!IMPORTANT]
+> La configuración probada y verificada para **Munin v1.0.0** es la **GUI web ejecutada mediante GitHub Actions usando MiMo V2.5** como modelo.
+>
+> Otros proveedores, modelos, destinos de despliegue e interfaces pueden funcionar, pero no forman parte de la configuración verificada de v1.0.0 salvo que se documenten explícitamente.
+
+| Componente | Configuración verificada |
+| --- | --- |
+| Versión | **Munin v1.0.0** |
+| Interfaz | **GUI web** |
+| Entorno de ejecución | **GitHub Actions** |
+| Modelo | **MiMo V2.5** |
+
+```mermaid
+flowchart LR
+    Operador --> GUI[GUI web de Munin]
+    GUI --> Actions[Runner de GitHub Actions]
+    Actions --> Runtime[Munin v1.0.0]
+    Runtime --> Modelo[MiMo V2.5]
+    Runtime --> Evidencia[Eventos, reportes y evidencia durable]
+```
 
 ## Por qué existe Munin
 
-La mayoría de los agentes están construidos alrededor de una ventana de chat temporal. Las operaciones de seguridad no funcionan así: duran horas o días, atraviesan herramientas y modelos, requieren evidencia, aprobaciones, recuperación y trazabilidad.
+La mayoría de los agentes están construidos alrededor de una ventana de chat temporal. Las operaciones de seguridad no funcionan así: duran horas o días, cruzan herramientas y modelos, necesitan aprobaciones, evidencia, recuperación y una explicación confiable de lo que el agente hizo.
 
-**Munin convierte ese trabajo en una operación durable, no en una conversación descartable.**
+**Munin convierte una conversación con un agente en una operación durable, inspeccionable y recuperable.**
 
 | Agente descartable | Operación con Munin |
 | --- | --- |
 | El contexto desaparece al cerrar la sesión | Conversaciones estables, checkpoints y eventos reproducibles |
-| Las tool calls se reconstruyen desde logs | Intención, salida, artefactos y fallos son eventos de primera clase |
-| La aprobación es solo una instrucción en el prompt | Las acciones sensibles se detienen en interrupciones durables |
-| Las capacidades se copian a un prompt estático | El registro vivo compone tools y especialistas en runtime |
-| Reconectar puede duplicar ejecuciones | Leases renovables y estado persistido protegen la continuidad |
+| Las tool calls se reconstruyen desde logs sueltos | Intención, salida, artefactos y fallos son eventos de primera clase |
+| La aprobación es una frase dentro del prompt | Las acciones sensibles se detienen en fronteras durables |
+| Las capacidades viven en contexto estático | Un registro vivo compone tools y especialistas en runtime |
+| Reconectar puede duplicar ejecuciones | Estado persistido y leases protegen continuidad |
+| El trabajo largo se vuelve opaco | El operador sigue el progreso desde GUI, MCP o Discord |
 
 ```mermaid
 flowchart LR
-    Objetivo[Objetivo autorizado] --> Run[Run durable]
-    Run --> Eventos[Timeline reproducible]
-    Run --> Aprobacion[Frontera de aprobación humana]
+    Chat[Chat descartable] --> Temporal[Contexto temporal]
+    Temporal --> Opaco[Tool calls opacas]
+    Opaco --> Respuesta[Respuesta final]
+    Respuesta -. termina la sesión .-> Perdido[Estado y evidencia perdidos]
+
+    Objetivo[Objetivo en Munin] --> Run[Run durable]
+    Run --> Timeline[Timeline reproducible]
+    Run --> Aprobacion[Fróntera humana]
     Run --> Checkpoint[Checkpoint ejecutable]
-    Eventos --> Evidencia[Evidencia y artefactos]
+    Timeline --> Evidencia[Evidencia y artefactos]
     Checkpoint --> Reanudar[Recuperar y reanudar]
     Aprobacion --> Reanudar
 ```
 
+## Qué es Munin — y qué no es
+
+| Munin es | Munin no es |
+| --- | --- |
+| Un runtime gobernado por operadores | Un hacker autónomo sin permisos |
+| Una capa durable de orquestación y evidencia | Solo otra interfaz de chat |
+| Un sistema de delegación acotada | Una garantía de que todo modelo actuará bien |
+| Una frontera de política y aprobación | Un reemplazo de la autorización escrita |
+| Un registro vivo de capacidades | Una carpeta donde todo archivo se vuelve ejecutable |
+| Un proyecto source-available | Open source sin restricciones comerciales |
+
 ## Capacidades principales
 
-- **Operaciones durables:** LangGraph conserva el estado ejecutable y una timeline separada registra mensajes, herramientas, resultados, aprobaciones y artefactos.
-- **Control humano real:** las acciones sensibles se pausan con la capacidad y argumentos exactos antes de ejecutarse.
-- **Un runtime, múltiples interfaces:** GUI web, MCP y Discord comparten política, identidad, estado y aprobaciones.
-- **Registro vivo de capacidades:** herramientas nativas, skills revisadas, subagentes y capacidades generadas `gen__*` se componen en runtime.
-- **Observabilidad basada en evidencia:** razonamiento emitido por el proveedor, tool lifecycle, delegaciones y artefactos permanecen separados y auditables.
+### Operaciones autónomas durables
+
+LangGraph conserva estado ejecutable mientras una timeline separada registra mensajes, herramientas, resultados, aprobaciones, artefactos y decisiones del operador. Reconectar vuelve a la misma operación.
+
+### Control humano real
+
+Las acciones sensibles se pausan mostrando la capacidad y los argumentos exactos. Aprobar reanuda esa acción; rechazar o dejar expirar no puede transformarla silenciosamente en otra cosa.
+
+### Un runtime, varias interfaces
+
+GUI web, MCP y Discord comparten identidad, política, estado y aprobaciones del lado del servidor. Son ventanas de una misma operación, no ejecutores separados.
+
+### Composición viva de capacidades
+
+Munin compone tools nativas, skills revisadas, capacidades generadas y especialistas acotados. Las tools generadas usan el namespace `gen__*` y atraviesan validación, registro, política y aprobación.
+
+### Observabilidad basada en evidencia
+
+Mensajes, razonamiento emitido por el proveedor, ciclo de vida de tools, output en streaming, delegaciones, artefactos y solicitudes humanas permanecen como eventos separados y auditables.
 
 ## Arquitectura
 
 ```mermaid
 flowchart TB
     subgraph Interfaces[Interfaces de control]
-        Web[Consola web]
+        Web[GUI web]
         Discord[Discord]
         MCPClient[Cliente MCP]
     end
-
-    subgraph Control[Plano de control de Munin]
+    subgraph Control[Plano de control]
         API[FastAPI /api]
         MCP[MCP /mcp]
         Server[Servidor Munin]
         Policy[Identidad, política y aprobaciones]
     end
-
-    subgraph Runtime[Runtime agentico]
+    subgraph Runtime[Runtime agéntico]
         Graph[Deep Agents + LangGraph]
-        Registry[Registro vivo de capacidades]
+        Registry[Registro vivo]
         Specialists[Especialistas acotados]
-        Generated[Capacidades gen__ generadas]
+        Generated[Capacidades gen__]
     end
-
     subgraph State[Estado durable]
         Timeline[Runs y eventos]
-        Checkpoints[Checkpoints LangGraph]
+        Checkpoints[Checkpoints]
         Artifacts[Reportes y evidencia]
+        Archive[Archivo opcional libSQL / Turso]
     end
-
     Web --> API --> Server
     Discord --> Server
     MCPClient --> MCP --> Server
@@ -90,48 +150,78 @@ flowchart TB
     Graph --> Timeline
     Graph --> Checkpoints
     Timeline --> Artifacts
+    Timeline --> Archive
 ```
 
-## Ciclo de una operación
+| Capa | Responsabilidad |
+| --- | --- |
+| **Conocimiento** | Contexto, relaciones, referencias e hipótesis |
+| **Autoridad** | Alcance, identidad, aprobación y política |
+| **Ejecución** | Tools, delegación, capacidades y estado agéntico |
+| **Evidencia** | Eventos, outputs, artefactos, decisiones y recuperación |
+
+## Casos de uso
+
+### Investigación de threat intelligence
+
+Partí de un IOC, CVE, campaña u organización. Munin puede coordinar enriquecimiento, mantener hipótesis, delegar investigación acotada, preservar fuentes y producir un reporte sin perder la historia de la investigación.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Creada: objetivo + alcance autorizado
-    Creada --> Ejecutando: cargar hilo, evidencia y registro
-    Ejecutando --> Delegando: tarea especializada
-    Delegando --> Ejecutando: resultado
-    Ejecutando --> ToolCall: capacidad permitida
-    ToolCall --> EsperandoAprobacion: acción sensible
-    ToolCall --> Ejecucion: aprobación no requerida
-    EsperandoAprobacion --> Ejecucion: aprobada
-    EsperandoAprobacion --> Cancelada: rechazada o expirada
-    Ejecucion --> Ejecutando: persistir resultado
-    Ejecutando --> Completada: resultado respaldado por evidencia
-    Ejecutando --> Fallida: error no recuperable
-    Fallida --> Recuperando: checkpoint válido
-    Recuperando --> Ejecutando
-    Completada --> [*]
-    Cancelada --> [*]
+flowchart LR
+    Trigger[IOC / CVE / campaña] --> Enrich[Enriquecimiento Valravn]
+    Enrich --> Contexto[Contexto Hugin]
+    Contexto --> Hipotesis[Hipótesis y pivotes]
+    Hipotesis --> Evidencia[Evidencia validada]
+    Evidencia --> Reporte[Reporte + timeline durable]
 ```
+
+### Operación de red team autorizada
+
+Definí alcance, objetivos y requisitos de aprobación. Munin puede planificar, delegar especialistas, ejecutar capacidades permitidas y detenerse antes de acciones sensibles.
+
+### Objetivos autónomos de larga duración
+
+GOAL y BEAST permiten trabajo que debe sobrevivir refresh, transición de runners o reinicio del proceso, conservando TODOs, checkpoints y contexto operativo.
+
+### Investigación centrada en evidencia
+
+Capturá intención, output, screenshots, artefactos, observaciones del modelo y decisiones humanas como eventos independientes.
+
+### Prototipado de capacidades
+
+Creá tools pequeñas y específicas, validalas, registralas con procedencia visible y exponelas bajo los mismos controles que una tool nativa.
+
+## Ecosistema Munin
+
+```mermaid
+flowchart LR
+    Hugin[Hugin
+Grafo de conocimiento] -->|investigación con fuentes| Munin[Munin
+Autoridad + orquestación]
+    Munin -->|consulta acotada| Hugin
+    Munin -->|observación autorizada| Valravn[Valravn
+Malla de reconocimiento]
+    Valravn -->|IOC, CVE, activos y web| Munin
+    Alcance[Alcance del operador] --> Munin
+    Aprobacion[Aprobación humana] --> Munin
+    Munin --> Timeline[Timeline durable]
+    Munin --> Reportes[Reportes y evidencia]
+```
+
+- **Hugin** aporta conocimiento pasivo y trazable.
+- **Valravn** aporta observaciones externas y reconocimiento.
+- **Munin** controla orquestación, estado, política, aprobación y continuidad.
 
 ## Modos operativos
 
-| Modo | Uso principal | Aprobaciones |
+| Modo | Mejor para | Aprobaciones |
 | --- | --- | --- |
 | **Standard** | Operaciones interactivas cuidadosas | Aprobación por acción |
 | **YOLO** | Trabajo rápido en un entorno confiable y acotado | Omite aprobaciones rutinarias; protege acciones críticas |
-| **GOAL** | Objetivos persistentes que sobreviven refresh y reinicios | Objetivo y TODO durables, con reevaluación |
+| **GOAL** | Objetivos persistentes | Objetivo y TODO durables con reevaluación |
 | **BEAST** | Planificación profunda y delegación | Más presupuesto con alcance explícito y controles anti-runaway |
 
-Los invariantes duros —preflight, aprobación crítica, auditoría y redacción de tokens— se mantienen en todos los modos.
-
-## Hugin y Valravn
-
-[Hugin](https://github.com/PrinceOfPwn/Hugin) es el componente de conocimiento: un grafo pasivo de investigación de seguridad con fuentes y relaciones.
-
-[Valravn](munin/valravn/) es la malla de reconocimiento externo: enriquecimiento IOC/CVE, búsqueda de activos, pivotes históricos, RPKI, dark web y captura de evidencia mediante herramientas `valravn_*`.
-
-Ni el conocimiento ni una herramienta disponible conceden autorización. El alcance y la aprobación siguen siendo controles independientes.
+Los invariantes duros —preflight, aprobación crítica, auditoría y redacción de tokens— permanecen en todos los modos.
 
 ## Inicio rápido
 
@@ -149,7 +239,17 @@ npm ci
 npm run dev
 ```
 
-Abrí `http://localhost:3000`. Los clientes MCP se conectan a `http://127.0.0.1:8787/mcp/` con el bearer token configurado.
+Abrí `http://localhost:3000`. Los clientes MCP se conectan a `http://127.0.0.1:8787/mcp/` usando el bearer token configurado.
+
+## Antes de una operación
+
+- Confirmá `/health` y acceso autenticado a la GUI.
+- Verificá una ronda completa de tool calling con el modelo elegido.
+- Inspeccioná las capacidades vivas.
+- Confirmá autorización escrita y alcance.
+- Definí quién puede aprobar, rechazar y cancelar.
+- Persistí tanto el almacenamiento activo como los checkpoints.
+- Revisá capacidad y argumentos antes de ejecuciones sensibles.
 
 ## Validación
 
@@ -158,13 +258,33 @@ poetry run pytest
 cd app && npm run build
 ```
 
+## Preguntas frecuentes
+
+### ¿Munin es completamente autónomo?
+
+Puede ejecutar objetivos prolongados y delegar trabajo, pero la autoridad sigue limitada por alcance, política y aprobaciones.
+
+### ¿Es open source?
+
+El código es público, pero la licencia PolyForm Noncommercial restringe uso comercial. Es source-available.
+
+### ¿Una empresa puede usarlo internamente?
+
+No bajo la licencia no comercial cuando existe una aplicación comercial. Requiere licencia separada.
+
+### ¿Una skill obtiene tools automáticamente?
+
+No. Una skill aporta contexto e instrucciones. Tool access, alcance y aprobación son controles separados.
+
+### ¿Puedo usar otro modelo?
+
+Posiblemente, pero la configuración verificada de v1.0.0 es GUI + GitHub Actions + MiMo V2.5.
+
 ## Licencia
 
-Munin se distribuye bajo la [PolyForm Noncommercial License 1.0.0](LICENSE).
+Munin se distribuye bajo la [PolyForm Noncommercial License 1.0.0](LICENSE). Se permiten usos no comerciales admitidos; cualquier uso comercial requiere una licencia separada del titular.
 
-Se permite inspeccionar, estudiar, investigar, experimentar y modificar el código para los usos no comerciales admitidos. El uso comercial —incluyendo productos o servicios pagos, consultoría, operaciones internas comerciales o aplicaciones con expectativa comercial— requiere una licencia separada del titular.
-
-Por restringir el uso comercial, Munin es **source-available**, no open source según la definición de la Open Source Initiative.
+Por restringir uso comercial, Munin es **source-available**, no open source según la Open Source Initiative.
 
 ---
 
