@@ -1,3 +1,4 @@
+# tags: [mcp-server, runtime, core, supervisor, orchestrator, web-ui, mcp, uvicorn, FastMCP, create_app, _bind_guidance, streamable-http, single-port-asgi, health-endpoint, server-lifespan]
 """Unified Munin ASGI server (Fase 3 of issue #9 migration).
 
 Historically Munin ran as **two** processes on **two** ports:

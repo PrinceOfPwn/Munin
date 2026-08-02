@@ -1,3 +1,4 @@
+# tags: [core, subagent, capabilities, orchestrator, runtime, BundledSkillLibrary, DeepAgentSkillBinding, SKILL.md, frontmatter-parser, read-only-skills, agent_skills, SkillsMiddleware, FilesystemBackend, package-discovery, executable-guidance]
 """Curated, read-only skills for native Deep Agents runtimes.
 
 This module intentionally does *not* scan arbitrary prompt folders.  Skills

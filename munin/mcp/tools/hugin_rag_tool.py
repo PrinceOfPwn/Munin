@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, intel, shared-intel, memory, hugin_rag, hugin_rag_search, hugin_plan_for, hugin_node_detail, graph_aware_retrieval, evidence_scoring, candidate_planning, knowledge_graph_query, hugin_snapshot, linked_evidence]
 """MCP tools for graph-aware retrieval over the persisted Hugin snapshot."""
 
 from __future__ import annotations

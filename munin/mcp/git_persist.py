@@ -1,3 +1,4 @@
+# tags: [mcp, persistence, cicd, actions, workflow, MUNIN_AUTO_COMMIT, MUNIN_GIT_USER, MUNIN_GIT_BRANCH, queue_commit, commit_forged_tool, commit_forged_graph, flush, _push, _process_batch, rebase-and-retry]
 """Auto-commit forged artifacts back to the repo.
 
 When Munin runs on a GitHub Actions runner it's ephemeral: everything Munin

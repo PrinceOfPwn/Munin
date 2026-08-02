@@ -1,3 +1,4 @@
+# tags: [core, runtime, orchestrator, langgraph, mcp-tool, ProgressEmitMiddleware, ACTIVE_PROGRESS_SINK, _render_tool_result, _deep_redact, ACTIVE_RUN_ID, tool_intent, tool_result, _tool_request_parts, AgentMiddleware, secret-redaction]
 """
 Progress emission middleware — real LangChain 1.x ``AgentMiddleware``.
 

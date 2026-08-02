@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, ldap, activedirectory, kerberoasting, asrep-roasting, escape_filter_chars, _detect_flavor, _search_tolerant, ldap_who_am_i, get_current_user_info, get_user_groups, find_domain_admins, dump_domain_structure, schema_tolerant_queries]
 """LDAP tools for Munin — schema-tolerant (AD + OpenLDAP) with escape_filter_chars everywhere.
 
 Compatibility strategy

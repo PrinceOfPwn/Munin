@@ -1,3 +1,4 @@
+# tags: [subagent, runtime, core, orchestrator, langgraph, SubagentFactory, create_subagent, invoke_subagent, _make_deep_agent, _make_compiled_langgraph, _make_persisted_subagent_dict, BundledSkillLibrary, SubagentSpec, runtime-routing, dynamic-materialization]
 """
 Subagent Factory — materializes generated specialists on the lightest correct
 runtime (issue #9 §4).  No stub runtimes: every maker returns an invocable

@@ -1,3 +1,4 @@
+# tags: [core, orchestrator, persistence, sqlite, langgraph, GoalMiddleware, render_goal_block, GOAL_STATE, ACTIVE_GOAL, operator-objective, system-prompt-injection, goals-table, new_goal_id, AgentMiddleware, success_criteria]
 """
 Persistent Goal — operator-owned objective with durable state.
 

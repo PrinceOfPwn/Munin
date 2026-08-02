@@ -1,3 +1,4 @@
+# tags: [hitl-approval, core, orchestrator, langgraph, store, OperatorGuidanceMiddleware, ACTIVE_RUN_ID, consume_pending_guidance, HumanMessage, AgentMiddleware, before_model, abefore_model, operator-guidance, guidance-injection, audit-record]
 """
 Operator guidance middleware — real LangChain 1.x ``AgentMiddleware``.
 

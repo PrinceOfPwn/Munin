@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, osint, dns, scanning, shodan, censys, leakix, ValravnGateway, EvidencePlan, NativeIntelClient, CloakObserver, evidence-collection, threat-intelligence]
 """Cost-aware, evidence-preserving reconnaissance gateway."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, osint, shodan, censys, leakix, dns, scanning, NativeIntelClient, NativeAPIError, PolicyDenied, http-adapters, rate-limiting, requests-session]
 """Direct HTTP adapters for Valravn reconnaissance providers."""
 
 from __future__ import annotations

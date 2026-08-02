@@ -1,3 +1,4 @@
+# tags: [capabilities, registry, recon, intel, shared-intel, memory, core, SkillMetadata, sync_strix_metadata, rank_skills, STRIX_REPOSITORY, STRIX_SKILLS_PATH, ACCEPT_LICENSES, github-tree-sync, lexical-retrieval]
 """Metadata-first Hugin/Strix catalog synchronization.
 
 External skill text is untrusted.  We only index a pinned Git revision after

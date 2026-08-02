@@ -1,3 +1,4 @@
+# tags: [core, mcp, supervisor, runtime, click-cli, munin-runner, command-line-interface, repl, dotenv, shared-state, llm-client, supervisor-runner, mcp-server, database-reset, ldap-seed]
 """Munin CLI — `munin run`, `munin mcp`, `munin reset`, `munin subagent`, `munin ldap-seed`."""
 
 from __future__ import annotations

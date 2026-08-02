@@ -1,3 +1,4 @@
+# tags: [subagent, runtime, core, supervisor, orchestrator, workflow, scripts, discover_runner_pids, stop_detached_runners, _pid_alive, _signal_runner, process-lifecycle, proc-cmdline, sigterm-sigkill, process-group]
 """Process lifecycle helpers for detached Munin subagent runners."""
 
 from __future__ import annotations

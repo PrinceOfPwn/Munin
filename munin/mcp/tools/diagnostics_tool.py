@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, capabilities, runtime, supervisor, munin_diagnostics, health_check, e2e_probe, subsystem_diagnostics, probe_db, probe_ldap, probe_hugin, probe_forge, probe_e2e_wake, paranoid_mode]
 """munin_diagnostics — deep, actionable health check across every subsystem.
 
 Answer the question Munin (and its operator) needs answered before shipping:

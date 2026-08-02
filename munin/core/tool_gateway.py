@@ -1,3 +1,4 @@
+# tags: [mcp-tool, capabilities, registry, core, runtime, get_langchain_tools, catalog_names, StructuredTool, _STATE_BOUND_TOOL_NAMES, FastMCP, _registered_mcp_tools, _active_generated_names, _HIDDEN_PARAMS, ToolManager, gen__-tool-wrapping]
 """
 Tool Gateway — exposes every *registered* Munin MCP tool, state-bound domain
 tool, and generated ``gen__*`` tool as LangChain ``StructuredTool`` instances

@@ -1,3 +1,4 @@
+# tags: [web-ui, subagent, hitl-approval, runtime, core, component, orchestrator, PageAction, validate_page_action, ALLOWED_ACTIONS, SENSITIVE_ACTIONS, action-planning, ui-allowlist, role-permissions, form-preparation]
 """Allowlisted, audited Page Agent action planning.
 
 The browser implementation may assist navigation, but it receives a typed plan

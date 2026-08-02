@@ -1,3 +1,4 @@
+# tags: [mcp, registry, mcp-tool, tool-forge, runtime, GENERATED_PREFIX, ToolRegistryError, _CALLABLE_CACHE, resolve_script_path, _load_callable, wrap_generated_callable, register, sync_runtime, rehydrate, signature_to_json_schema]
 """Dynamic MCP tool registry — hot-loads tools produced by `tool_forge`.
 
 When `tool_forge` finishes generating and validating a Python script, we import the

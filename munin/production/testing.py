@@ -1,3 +1,4 @@
+# tags: [smoke-test, database, sqlite, persistence, actions, turso, scripts, cleanup_test_run, janitor_expired_test_runs, create_fixture_conversation, new_test_run_id, e2e-fixtures, test-run-isolation, selective-table-delete, scope-tagging]
 """Strictly scoped Turso fixture helpers.
 
 Every destructive cleanup path receives one validated `e2e_<run>_<suffix>`

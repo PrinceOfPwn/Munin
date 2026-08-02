@@ -1,3 +1,4 @@
+# tags: [workflow, registry, persistence, sqlite, core, WorkflowRegistry, workflow_registry_table, register_workflow, rebuild_workflow, workflow_id, WorkflowSpec, turso, definition_json, version-history, list_registered_workflows]
 """Workflow Registry — persistent versioned workflow definitions (issue #9 §6).
 
 Same storage discipline as ``AgentRegistry``: lives in Munin's shared domain

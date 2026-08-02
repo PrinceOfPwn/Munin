@@ -1,3 +1,4 @@
+# tags: [runtime, supervisor, orchestrator, core, langgraph, supervisor_runner, _split_think_tags, UNLIMITED_RECURSION_LIMIT, astream_events, _history_to_messages, _trailing_tag_prefix, DEFAULT_RECURSION_LIMIT, progress-envelopes, checkpoint-config, thread_id]
 """
 Runtime adapter — the single execution path into the Deep Agents supervisor.
 

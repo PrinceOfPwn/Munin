@@ -1,3 +1,4 @@
+# tags: [coordination, supervisor, runtime, core, presence, DiscordConfig, get_discord_config, _positive_int, MUNIN_DISCORD_TOKEN, MUNIN_DISCORD_CHANNEL_ID, MUNIN_DISCORD_GUILD_ID, MUNIN_DISCORD_ALLOWED_USER_IDS, MUNIN_DISCORD_PREFIX, MUNIN_DISCORD_MAX_ITERATIONS, outbound_enabled]
 """Strict, environment-only configuration for the optional Discord bridge."""
 
 from __future__ import annotations

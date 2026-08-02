@@ -1,3 +1,4 @@
+# tags: [core, orchestrator, persistence, langgraph, store, PlanningMiddleware, todo_update, TodoItem, TodoOp, hypothesis, todo_events, ACTIVE_PLAN_SNAPSHOT, plan-reminders, hypothesis-validation, append-only-log]
 """
 Durable plan (TODO) middleware — real LangChain 1.x ``AgentMiddleware``.
 

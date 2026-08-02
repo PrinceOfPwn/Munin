@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, osint, active-recon, web-ui, runtime, CloakObserver, BrowserCapture, BrowserUnavailable, cloakbrowser, CLOAKBROWSER_LICENSE_KEY, onion-routing, screenshot-capture, route-blocking]
 """Ephemeral browser evidence capture built on CloakBrowser."""
 
 from __future__ import annotations

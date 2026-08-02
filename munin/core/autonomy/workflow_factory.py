@@ -1,3 +1,4 @@
+# tags: [workflow, langgraph, subagent, core, runtime, WorkflowFactory, WorkflowSpec, deterministic_node, StateGraph, MessagesState, compile_workflow, _make_state_schema, send-edges, conditional-edges, agent_node]
 """
 Workflow Factory — compiles a declarative ``WorkflowSpec`` into a real
 LangGraph runnable (issue #9 §6).  No stub nodes:

@@ -1,3 +1,4 @@
+# tags: [timers, core, runtime, orchestrator, coordination, subagent, hitl-approval, TimerScheduler, _emit_tick, TIMER_POLL_SECONDS, TIMER_WAKEUP_ENABLED, fencing-epoch, goal-evaluation, timer-ticks, lease-fencing]
 """
 Durable server-side timers (autonomous modes, issue #14).
 

@@ -1,3 +1,4 @@
+# tags: [ldap, activedirectory, kerberos, kerberoasting, asrep-roasting, subagent, workflow, recon, active-recon, LDAPSubagent, ldap_search, find_kerberoastable_users, find_asrep_roastable_users, find_domain_admins, dump_domain_structure]
 """LDAP subagent — full ReAct specialist for Active Directory / OpenLDAP enumeration.
 
 Inherits the complete ReAct loop from ReActSubagentBase. Declares which tools it

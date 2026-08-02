@@ -1,3 +1,4 @@
+# tags: [mcp, intel, osint, recon, active-recon, VulnIntelService, cve_lookup, package_vuln_lookup, cve_search, exploit_search, searchsploit, NVD, OSV, EPSS, CISA-KEV]
 from __future__ import annotations
 
 import json

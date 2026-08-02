@@ -1,3 +1,4 @@
+# tags: [core, runtime, orchestrator, subagent, contextvars, ACTIVE_STORE, autonomy-context, ACTIVE_MODE, ACTIVE_GOAL, ACTIVE_PLAN_SNAPSHOT, ACTIVE_EMITTER, supervisor-runner, middleware-context, per-invocation, thread-local-state]
 """
 Autonomy per-invocation context (contextvars).
 

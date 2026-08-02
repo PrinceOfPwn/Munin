@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, osint, core, runtime, orchestrator, Candidate, select_candidates, Tier, provider-selection, fan-out-budget, tier-limits, candidate-ranking, economic-tiering]
 """Provider selection for bounded, cost-aware intelligence fan-out."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, coordination, presence, hitl-approval, discord_bridge, redact_secrets, send_discord_message, discord_status, get_discord_config, post_to_discord, outbound_notifications, operator_alerts, async_messaging, secret_filtering]
 """MCP surface for safe asynchronous Discord notifications."""
 
 from __future__ import annotations

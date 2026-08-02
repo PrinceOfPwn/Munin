@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-server, core, supervisor, runtime, FastMCP, audited_tool, _redact_args, health_check, execute_command, nmap_scan, httpx_probe, netexec_scan, feroxbuster_scan, ffuf_scan]
 from __future__ import annotations
 
 import argparse

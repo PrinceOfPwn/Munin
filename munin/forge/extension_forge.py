@@ -1,3 +1,4 @@
+# tags: [tool-forge, workflow, hitl-approval, orchestrator, subagent, ExtensionForge, ExtensionManifest, ExtensionResult, git-worktree, py_compile, gh-pr-create, git-apply, MUNIN_PR_BASE_BRANCH, MUNIN_GIT_USER, list_manifests]
 """Human-governed self-extension proposals and explicit PR publication."""
 
 from __future__ import annotations

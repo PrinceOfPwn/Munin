@@ -1,3 +1,4 @@
+# tags: [core, runtime, shared-intel, coordination, memory, web-ui, persistence, redact_text, redact_payload, MUNIN_REDACTION_MODE, _VALUE_PATTERNS, _KEY_NAME, credential-redaction, bearer-tokens, api-key-filtering]
 """Shared, conservative redaction before durable storage or rendering."""
 
 from __future__ import annotations

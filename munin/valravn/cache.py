@@ -1,3 +1,4 @@
+# tags: [valravn, recon, intel, database, persistence, memory, core, TTLCache, _MISS, thread-safety, ttl-expiration, lock-synchronization, in-memory-cache, monotonic-clock, stale-cleanup]
 """Small thread-safe TTL cache for Action-lifetime reuse."""
 
 from __future__ import annotations

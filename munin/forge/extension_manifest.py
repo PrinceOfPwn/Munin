@@ -1,3 +1,4 @@
+# tags: [tool-forge, capabilities, orchestrator, workflow, supervisor, ExtensionManifest, ALLOWED_ROOTS, ALLOWED_KINDS, ALLOWED_STATUSES, _FORBIDDEN_PATHS, is_allowed_target, normalise_path, list_manifests, unified-diff-validation, slug-validation]
 """Durable, reviewable proposals for changes to Munin itself."""
 
 from __future__ import annotations

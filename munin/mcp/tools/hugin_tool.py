@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, intel, persistence, sqlite, PrinceOfPwn_Hugin, hugin_search, hugin_neighbors, hugin_refresh, _decode_payload, escape_inner_quotes, normalise_payload, graph_traversal, ssrf_guard, hugin_cache_fallback]
 """Passive bridge to the PrinceOfPwn/Hugin knowledge graph.
 
 Hugin publishes ``hugin/graph.json`` with ``nodes``, ``edges`` and a ``contents``

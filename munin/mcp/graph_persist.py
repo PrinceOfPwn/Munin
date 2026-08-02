@@ -1,3 +1,4 @@
+# tags: [mcp, persistence, workflow, orchestrator, store, persist_graph_manifest, rehydrate_graph_manifests, purge_resettable_graph_manifests, SharedStateStore, generated_graphs_dir, json-manifest, execution_contract, reset_policy, tool_whitelist, git_persist]
 """Versioned JSON manifests for self-forged Munin agent graphs."""
 
 from __future__ import annotations

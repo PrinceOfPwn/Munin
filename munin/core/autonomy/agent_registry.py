@@ -1,3 +1,4 @@
+# tags: [subagent, registry, persistence, sqlite, core, agent_registry, SubagentSpec, agent_id, versioning, definition_json, turso, rebuild_agent, slugify, dependencies_json, exec_history]
 """Agent Registry — persistent, versioned generated agents (issue #9 §5).
 
 Stores definitions in the SAME database as the rest of Munin's domain state

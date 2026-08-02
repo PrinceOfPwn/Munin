@@ -1,3 +1,4 @@
+# tags: [mcp, mcp-tool, capabilities, registry, tool-forge, runtime, orchestrator, capabilities_catalog, audited_tool, munin_capabilities, include_generated_tool_context, get_settings, cross_domain_catalog, passive_audit, capability_profile]
 """MCP discovery endpoint for Munin's cross-domain capability catalog."""
 
 from __future__ import annotations

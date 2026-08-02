@@ -1,3 +1,4 @@
+# tags: [core, runtime, supervisor, orchestrator, langgraph, LLMClient, LLMConfigError, _validate_base_url, make_langchain, _TimeoutState, openai-compatible, adaptive-timeout, live-streaming, _BLOCKED_HOSTS, _merge_tool_delta]
 """OpenAI-compatible LLM client with adaptive timeout and live streaming.
 
 Accepts any provider that exposes an OpenAI-compatible ``/v1/chat/completions``
