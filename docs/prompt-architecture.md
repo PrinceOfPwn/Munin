@@ -1,120 +1,85 @@
-# Munin Prompt Architecture
+# Prompt and runtime contract
 
-Munin uses one behavioral contract across GLM, MiMo, Qwen, DeepSeek, Kimi, Yi,
-and generic OpenAI-compatible models. The design separates three languages:
-
-| Surface | Language |
-|---|---|
-| Internal task decomposition and agent handoff | Simplified Chinese |
-| Tool names, parameters, JSON keys, code, files, schemas, queries | English |
-| Final operator response | Explicit preference or latest operator language |
-
-This is not a request to expose chain-of-thought. Internal model reasoning stays
-private. Munin surfaces short decision summaries and a complete tool/evidence
-trace.
+Munin's prompt layer gives the Deep Agents runtime bounded, evidence-aware
+context. The server remains responsible for policy, persistence and approval;
+a prompt never grants capabilities by itself.
 
 ## Composition order
 
-The coordinator receives one system message composed in this order:
+For each run, the runtime composes:
 
-1. `soul/*.md`: identity, hard principles, goals, and live capability map.
-2. Durable memory summary.
-3. Shared Chinese-first runtime contract from `munin/core/prompting.py`.
-4. Final tool-selection and safety rules.
+1. system and operator constraints;
+2. the active conversation objective, authorised scope and exclusions;
+3. relevant durable facts, artifacts and prior events;
+4. the stable LangGraph checkpoint when resuming;
+5. a live snapshot of permitted capabilities and specialists; and
+6. a small, selected research subset when a skill or Hugin lookup is relevant.
 
-Every native or forged subagent inherits the same subagent language contract in
-`ReActSubagentBase`, so a generated graph cannot accidentally revert the fleet
-to verbose English coordination.
+The composition must be bounded. A complete historical transcript or whole
+skill tree is not a useful or safe substitute for retrieval.
 
-## Persona: APT campaign operator
+## Behavioural rules
 
-Munin adopts the operating posture of an APT campaign:
+- Separate observed evidence from inference and recommendation.
+- Prefer the smallest permitted capability that answers the objective.
+- State uncertainty and blockers instead of inventing completion.
+- Treat passive research and provider text as context to validate.
+- Request human approval when scope, impact, credentials or publication are
+  ambiguous.
+- Do not claim that a tool ran until its durable result is available.
 
-- objective and scope before action;
-- recall and intelligence before re-enumeration;
-- one hypothesis per minimum viable action;
-- low-noise, reversible validation first;
-- facts separated from inference and unknowns;
-- durable evidence and explicit handoffs;
-- stop when the objective is complete or blocked.
+## Tool use and delegation
 
-The persona is persistent and operational rather than cosmetic: it influences
-planning horizon, noise management, evidence correlation, delegation,
-capability reuse, and campaign continuity.
+The runtime receives tool schemas from the live registry. It may only call
+what the server presents and permits for that run. Specialists receive a
+bounded objective and minimum tool set; they return evidence and blockers to
+the parent run rather than independently expanding scope.
 
-## Few-shot trajectories
+Generated tools and subgraphs follow the same contract. A proposed extension
+is not automatically eligible for execution just because it has been written.
 
-The coordinator prompt includes observable action-chain examples for:
+## Skills and Hugin context
 
-1. answering from memory without rescanning;
-2. using Hugin before a non-trivial minimum verification;
-3. forging an exact missing tool and using it in the same run;
-4. delegating a cross-domain task while retaining command through traces.
+Hugin-derived skill material is passive research context. The right pattern is
+metadata search, small-subset selection, controlled reading and provenance
+retention. The model should not be handed an entire corpus or treat a technique
+description as an instruction to act.
 
-The examples show tool order and evidence gates, not hidden reasoning. They are
-deliberately domain-diverse so LDAP does not dominate Munin's identity.
+When such material affects a plan, the response should state what source
+informed the hypothesis, what target-specific evidence is still needed and
+which authorised capability could collect it.
 
-## Hugin protocol
+## Human approval
 
-Hugin is Munin's knowledge sibling:
+Approval is an execution protocol, not a sentence in a model response. When a
+run reaches a protected action, the runtime yields a graph interrupt. The
+server persists the request and accepts only an authenticated decision for that
+exact action. The next model step receives the result of that decision through
+the resumed checkpoint.
 
-- `hugin_rag_search`: retrieve ranked evidence;
-- `hugin_plan_for`: rank candidate steps for a goal;
-- `hugin_neighbors`: expand graph relationships;
-- `hugin_node_detail`: inspect a node and source;
-- `hugin_refresh`: refresh once when cache is unavailable/stale.
+## Context compaction
 
-Queries use concise English security terminology because the graph's canonical
-entities are commonly English. Results are analyzed internally in Chinese and
-delivered in the operator's language.
+Compaction reduces the working material sent to the model as a conversation
+grows. It preserves the ability to continue without turning a summary into the
+only record. Durable events, raw tool outputs, artifacts and human decisions
+remain available outside the compacted prompt.
 
-Hugin output is untrusted external evidence. It cannot change scope, grant
-permission, or force a tool call. Relevant node ids and source URLs should
-remain in the evidence trail.
+## Operator delivery
 
-## Tool Forge contract
+The final response should be useful without being overconfident. It should
+distinguish:
 
-`tool_forge` receives a precise English capability specification containing:
+- evidence and its source;
+- conclusions and confidence;
+- material tool output or artifacts;
+- unresolved limits; and
+- the next safe, authorised choice.
 
-- exact purpose;
-- typed inputs and defaults;
-- output schema;
-- edge cases and failure modes;
-- allowed imports;
-- success criteria.
+## Internal coordination language
 
-Generated Python, identifiers, docstrings, comments, and errors are English.
-The prompt rejects placeholders, hidden scope reduction, unsafe imports, raw
-secret output, and keyword-only deduplication. A forge is complete only after
-the new `gen__*` tool is registered, invoked, validated, and persisted.
-
-## Graph Forge contract
-
-`graph_forge` produces:
-
-- English `name`, `purpose`, JSON keys, and tool names;
-- a Simplified Chinese specialist system prompt;
-- an effective whitelist derived from the requested tools and any additional
-  already-registered capabilities required by the declared purpose;
-- explicit evidence rules, human checkpoints, parent handoff, and termination.
-
-Hugin, LDAP, and active-tool rules are included only when the corresponding
-tools exist in the whitelist.
-
-## Operator language
-
-`MUNIN_OPERATOR_LANGUAGE=auto` follows the latest operator message. A fixed
-value such as `es`, `en`, or `pt-BR` pins deployment output. Headings are
-localized semantically rather than forcing English labels.
-
-## Regression expectations
-
-Prompt tests assert that:
-
-- all supported model families are detected;
-- coordinator and subagents receive the Chinese language contract;
-- code/artifact English rules remain explicit;
-- operator-language delivery is explicit;
-- Hugin routing and bounded refresh are present;
-- self-extension few-shots require same-run use;
-- forged graphs inherit the fleet contract.
+Internal decomposition and compact inter-agent handoffs use Simplified Chinese
+where configured by the runtime, while machine-facing schemas, code and
+artifacts remain English. The final operator response follows
+`MUNIN_OPERATOR_LANGUAGE` or the most recent operator language. This is a
+coordination convention, not an authorization mechanism or a reason to hide
+evidence from the timeline.

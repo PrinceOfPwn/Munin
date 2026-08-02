@@ -6,9 +6,10 @@ All fields must be JSON-serializable so the spec can be stored in
 agent_registry.definition_json.
 """
 from __future__ import annotations
-from typing import Any, Literal
-from pydantic import BaseModel, Field
 
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 RuntimeType = Literal[
     "persisted_subagent_dict",
@@ -30,7 +31,10 @@ class SubagentSpec(BaseModel):
 
     # Capabilities
     tools: list[str] = Field(default_factory=list, description="Tool names this agent can use")
-    skills: list[str] = Field(default_factory=list, description="Skill names (from registry)")
+    skills: list[str] = Field(
+        default_factory=list,
+        description="Explicit reviewed Deep Agents skill names (for example hugin-research)",
+    )
     memory: dict[str, Any] = Field(default_factory=dict, description="Initial memory state")
     filesystem: dict[str, str] = Field(default_factory=dict, description="Virtual FS mounts")
 
@@ -88,5 +92,5 @@ class SubagentSpec(BaseModel):
         return self.model_dump_json()
 
     @classmethod
-    def from_json(cls, data: str) -> "SubagentSpec":
+    def from_json(cls, data: str) -> SubagentSpec:
         return cls.model_validate_json(data)

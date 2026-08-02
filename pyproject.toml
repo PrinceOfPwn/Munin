@@ -5,6 +5,7 @@ description = "Agente ReAct de offensive-security con memoria persistente, soul 
 license = "Proprietary"
 readme = "README.md"
 packages = [{ include = "munin" }]
+include = [{ path = "munin/agent_skills/**", format = ["sdist", "wheel"] }]
 
 [tool.poetry.dependencies]
 python = "^3.11"

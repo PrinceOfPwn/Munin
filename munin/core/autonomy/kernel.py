@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .agent_registry import AgentRegistry
 from .spec import SubagentSpec
@@ -85,7 +86,7 @@ class AutonomyKernel:
             if spec is None:
                 raise KeyError(
                     f"Agent {agent_id_or_name!r} not found in registry or ephemeral run set"
-                )
+                ) from None
             agent = factory.create_subagent(spec)
             record = {"agent_id": agent_id_or_name, "version": None, "ephemeral": True}
 
@@ -260,6 +261,7 @@ class AutonomyKernel:
             purpose: str,
             system_prompt: str = "",
             tools: list[str] | None = None,
+            skills: list[str] | None = None,
             runtime_type: str = "compiled_langgraph",
             persist: bool = False,
         ) -> str:
@@ -268,6 +270,7 @@ class AutonomyKernel:
                 purpose=purpose,
                 system_prompt=system_prompt,
                 tools=tools or [],
+                skills=skills or [],
                 runtime_type=runtime_type,  # type: ignore[arg-type]
             )
             # Validate buildability immediately — a broken definition is an error now.

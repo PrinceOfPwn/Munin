@@ -100,7 +100,7 @@ def _gen_fingerprint(state: Any) -> frozenset[tuple[str, str, str]]:
 
 
 def _soul_hash(prompt: str) -> str:
-    return hashlib.sha1(prompt.encode("utf-8", "replace")).hexdigest() if prompt else ""
+    return hashlib.sha256(prompt.encode("utf-8", "replace")).hexdigest() if prompt else ""
 
 
 def _supervisor_fingerprint(
@@ -146,7 +146,9 @@ You can create and use new capabilities at runtime:
   in the SAME run. Persistent tools are discoverable via `list_registered_tools`.
 - `create_subagent` + `invoke_registered_agent`: invent a specialist for an
   isolated task, run it, and (persist=true) keep it in the Agent Registry for
-  future runs. Generated agents may themselves use these factory tools.
+  future runs. Pass an explicit reviewed skill such as `hugin-research` only
+  when its research workflow is relevant; custom subagents do not inherit
+  skills implicitly. Generated agents may themselves use these factory tools.
 - `create_workflow` + `invoke_registered_workflow`: compile multi-node
   LangGraph workflows (deterministic, agent and tool nodes; static,
   conditional and Send fan-out edges) and run them as compiled subagents.
@@ -210,7 +212,10 @@ def build_supervisor(
     """
     from deepagents import create_deep_agent  # noqa: PLC0415
 
+    from .autonomy.skill_library import bundled_skill_library  # noqa: PLC0415
+
     prompt = system_prompt.strip() or compose_munin_prompt()
+    skill_binding = bundled_skill_library().bind_all()
 
     return create_deep_agent(
         name="munin",
@@ -219,6 +224,9 @@ def build_supervisor(
         system_prompt=prompt,
         middleware=list(middleware or ()),
         subagents=subagents or None,
+        skills=skill_binding.sources,
+        backend=skill_binding.backend,
+        permissions=skill_binding.permissions,
         interrupt_on=interrupt_on or None,
         checkpointer=checkpointer if checkpointer is not None else make_checkpointer(),
     )
@@ -258,8 +266,10 @@ def build_munin_supervisor(
         OperatorGuidanceMiddleware,
         ProgressEmitMiddleware,
     )
-    from .tool_gateway import gateway_tools  # noqa: PLC0415
-    from .tool_gateway import approval_policy_for_tools  # noqa: PLC0415
+    from .tool_gateway import (
+        approval_policy_for_tools,  # noqa: PLC0415
+        gateway_tools,  # noqa: PLC0415
+    )
 
     soul_prompt = ""
     try:

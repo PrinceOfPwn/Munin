@@ -1,82 +1,70 @@
-# Tools reference
+# Capability and skill reference
 
-Complete inventory of tools exposed by the Munin MCP server. Grouped by category.
+Munin exposes a live capability surface. This document explains how to reason
+about it; the server or MCP discovery response is the authoritative list for a
+particular deployment.
 
-## Legend
+## Discover the current surface
 
-- `active` = touches remote targets; subject to OPSEC preflight per policy.
-- `passive` = read-only or local; usually exempt from preflight in `active_only` policy.
-- `documentation` = writes to workspace or shared state.
-- `admin` = server introspection/control.
+Use the web capability view or authenticated MCP discovery to inspect enabled
+tools, schemas and specialist profiles. A tool may exist in source control yet
+be disabled, unregistered, unavailable in the current deployment or prohibited
+for the current operation.
 
----
+## Capability groups
 
-## Admin
+| Group | Typical role | Operator question |
+| --- | --- | --- |
+| Diagnostics and administration | Service health, environment checks and controlled local work | Is this required and within the host boundary? |
+| Passive knowledge | CVE/package research, documentation, Hugin retrieval and evidence lookup | Is the source current and traceable? |
+| Directory services | Authorised LDAP/identity review | Are credentials and directory scope approved? |
+| Active assessment | Scoped discovery and validation tools | Is the exact target and impact approved? |
+| Evidence and coordination | Artifacts, memory, delegation and reporting | Does the result preserve provenance? |
+| Generated capabilities | Registered `gen__*` tools and subgraphs | Has this extension been validated and enabled? |
 
-| Tool                    | Level | Notes                                      |
-| ----------------------- | ----- | ------------------------------------------ |
-| `health_check`          | admin | Egress, VPN, binary availability           |
-| `vpn_status`            | admin | Same as health_check but preflight-only    |
-| `execute_command`       | admin | Arbitrary shell — respects preflight_policy|
-| `job_status`, `job_cancel` | admin | Async job control                        |
+## Call lifecycle
 
-## Active offensive
+The timeline records the lifecycle rather than reducing it to a single chat
+message:
 
-`nmap_scan`, `nmap_advanced_scan`, `httpx_probe`, `netexec_scan`, `feroxbuster_scan`,
-`ffuf_scan`, `katana_crawl`, `hydra_attack`, `sqlmap_scan`, `smbmap_scan`,
-`nuclei_scan`, `web_evidence_screenshotter`.
+1. **Intent** — what tool is proposed or started.
+2. **Output** — streamed command or tool output when available.
+3. **Result or failure** — the terminal returned evidence or error.
+4. **Interpretation** — the agent's conclusion, which remains distinct from
+   the raw result.
 
-All accept `additional_args`; that argument is tokenized with `shlex.split`, then joined
-with the portable `shell_join`. So `additional_args="-Pn --top-ports 100"` becomes 3
-separate flags (fix for PR#1).
+Always inspect the result before treating an assistant statement as established
+fact. A tool intent without terminal result is not a completed call.
 
-## Passive intel
+## Generated capabilities and subgraphs
 
-- `cve_lookup`, `cve_search`, `cve_enrich`, `exploit_search`, `package_vuln_lookup`.
-- `tavily_search` — passive web search. Requires `TAVILY_API_KEY`. Uses
-  `Authorization: Bearer` header on a dedicated session (no leak).
-- `hugin_search`, `hugin_refresh` — bridge to project sibling
-  <https://princeofpwn.github.io/Hugin/data/entities.json>. Local cache with
-  `HUGIN_TTL_SECONDS` TTL. Case-insensitive by default; supports `substring`, `regex`,
-  or `exact` match_mode.
+A generated extension is governed like any other capability. The safe path is
+to define a narrow contract, validate it in its intended sandbox, register it
+with explicit metadata and check policy at each invocation. The `gen__*`
+namespace makes generated origin visible; it does not make an extension safe or
+automatically authorised.
 
-## LDAP (Munin extension)
+## Skills and Hugin research
 
-| Tool                            | Purpose                                  |
-| ------------------------------- | ---------------------------------------- |
-| `ldap_who_am_i`                 | Test bind + whoami extended op           |
-| `get_current_user_info`         | Info about env-configured bind DN        |
-| `get_user_groups`               | Groups of a given username               |
-| `ldap_search`                   | Parametric search — filter template + params, escaped |
-| `find_kerberoastable_users`     | SPN-having users                         |
-| `find_asrep_roastable_users`    | UAC bit 0x400000 users                   |
-| `find_domain_admins`            | Members of a privileged group            |
-| `dump_domain_structure`         | OU/CN tree dump                          |
+Skills are instruction and research documents, not server-side tool schemas.
+The Hugin-derived material has source identifiers and graph cross-references so
+an agent or operator can trace a technique back to its evidence context.
 
-All parameters are `escape_filter_chars`-safed before hitting the filter.
+Use this retrieval model:
 
-## Multi-agent bus (OFFX legacy)
+1. search metadata for the bounded task;
+2. select a small relevant subset;
+3. inspect the content through the controlled reader;
+4. retain its source/provenance with notes; and
+5. validate the resulting hypothesis with authorised target-specific evidence.
 
-`shared_state_overview`, `publish_shared_intel`, `query_shared_intel`,
-`claim_shared_task`, `heartbeat_shared_task`, `complete_shared_task`,
-`list_shared_tasks`, `upsert_agent_presence`, `list_agent_presence`,
-`post_agent_message`, `fetch_agent_messages`, `ack_agent_message`.
+Do not inject an entire skill tree into a run, treat a skill as proof of a
+vulnerability, or invoke actions from a skill without the normal capability and
+approval path.
 
-## Munin-specific (memory, soul, orchestration, forge, registry)
+## Support and diagnosis
 
-- `soul_list`, `soul_read`, `soul_propose_edit`
-- `memory_remember`, `memory_recall`, `memory_list`, `episodic_query`
-- `munin_wake`, `munin_wake_claim`, `munin_wake_list`
-- `tool_forge`, `graph_forge`
-- `list_generated_tools`, `describe_generated_tool`, `run_generated_tool`,
-  `deactivate_generated_tool`
-- `list_generated_graphs`, `describe_generated_graph`, `drop_generated_graph`
-
-## Autogenerated tools
-
-Anything produced by `tool_forge` is exposed as `gen__<slug>` and rehydrated on
-server startup from the `procedural` table. Current registry rows persist both
-metadata and source code, so a fresh Turso-backed runner can restore a missing
-generated file before importing it. Legacy rows that only stored a file path
-must be regenerated if that ephemeral file is gone. Enumerate with
-`list_generated_tools`.
+When a capability behaves unexpectedly, record the run ID, tool name,
+arguments, timeline events and any artifact reference. Then check live registry
+state, deployment configuration and server logs. This makes a missing tool,
+policy rejection and execution failure distinguishable.
