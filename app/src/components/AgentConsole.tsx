@@ -1099,20 +1099,17 @@ function NoConversationState() {
  *
  * Mounts `useMuninChat` against the active conversation and renders every
  * message part through the corresponding part-renderer component. This is the
- * visible UI surface wired to the BFF route at `/api/chat` (Fase 1a) and the
- * translator in `lib/chat/translator.ts`.
+ * visible UI surface wired to the durable chat stream and its event translator.
  *
- * Fase 1b extensions:
- *   - Header shows the conversation title + status + Archive button (stub).
+ * The console provides:
+ *   - Header shows the conversation title + status + Archive button.
  *   - Inline run status: elapsed timer, current run state, last tool call —
  *     derived from `useChat.status` and stream parts (no polling).
  *   - Draft auto-save per conversation id in localStorage.
  *   - Send-as-guidance button — uses the dedicated guidance mutation and
  *     reconnects the durable stream after a stopped browser reader.
  *
- * The legacy `ConversationView` (driven by `useRunEvents`) is kept alive in
- * parallel during the parity window; the entrypoint switch and deletion
- * happen in Fase 1c and Fase 2.
+ * Legacy event rendering remains isolated from this durable stream surface.
  */
 export default function AgentConsole({ conversationId }: AgentConsoleProps) {
   if (!conversationId) {
