@@ -16,7 +16,8 @@ UI-message-stream adapter.
 from __future__ import annotations
 
 import os
-from typing import Any, AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
+from typing import Any
 
 # LangGraph requires an integer ``recursion_limit`` even when the application
 # deliberately does not impose a graph-step budget.  Use the largest practical
@@ -327,15 +328,29 @@ async def supervisor_runner(
     human_request_store: Any | None = None,
     resume_decisions: list[dict[str, Any]] | None = None,
     resume_from_checkpoint: bool = False,
+    mode: Any = None,
+    goal: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict]:
     """Run one Munin turn through the Deep Agents supervisor.
 
     Yields translated Munin progress envelopes.  ``tools``/``system_prompt``
     are accepted for backwards compatibility but the authoritative catalog and
     prompt are assembled inside ``build_munin_supervisor`` (gateway + soul).
+
+    ``mode`` selects the operation contract (approval levels, budgets,
+    planning middleware).  ``goal`` is the persistent-goal snapshot injected
+    by ``GoalMiddleware``; when present a ``plan`` snapshot envelope is
+    emitted up front so clients hydrate the goal + TODO panel immediately.
     """
     from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
+    from .autonomy.context import (  # noqa: PLC0415
+        ACTIVE_EMITTER,
+        ACTIVE_GOAL,
+        ACTIVE_MODE,
+        ACTIVE_PLAN_SNAPSHOT,
+        ACTIVE_STORE,
+    )
     from .middleware.operator_guidance import ACTIVE_RUN_ID as _OG_RUN_ID
     from .middleware.progress_emit import (
         ACTIVE_PROGRESS_SINK as _PE_SINK,
@@ -359,6 +374,7 @@ async def supervisor_runner(
         model=model,
         run_id=run_id,
         progress_sink=wrapped_progress_sink,
+        mode=mode,
     )
 
     config = {
@@ -380,7 +396,28 @@ async def supervisor_runner(
     tok_og_rid = _OG_RUN_ID.set(run_id)
     tok_pe_rid = _PE_RUN_ID.set(run_id)
     tok_pe_sink = _PE_SINK.set(wrapped_progress_sink)
+    tok_st = ACTIVE_STORE.set(store)
+    tok_mode = ACTIVE_MODE.set(str(mode or "standard").lower())
+    tok_goal = ACTIVE_GOAL.set(goal)
+    tok_emit = ACTIVE_EMITTER.set(wrapped_progress_sink)
+    plan_snapshot: dict[str, Any] | None = None
     try:
+        plan_snapshot_provider = getattr(store, "plan_snapshot", None)
+        if callable(plan_snapshot_provider):
+            try:
+                plan_snapshot = plan_snapshot_provider(conversation_id=conversation_id)
+            except Exception:  # noqa: BLE001 - hydration must never sink a run
+                plan_snapshot = None
+        tok_plan = ACTIVE_PLAN_SNAPSHOT.set(plan_snapshot)
+        if plan_snapshot and (plan_snapshot.get("items") or plan_snapshot.get("goal")):
+            yield {
+                "kind": "plan",
+                "run_id": run_id,
+                "goal": plan_snapshot.get("goal"),
+                "items": plan_snapshot.get("items") or [],
+                "updated_at_ms": plan_snapshot.get("updated_at_ms") or 0,
+            }
+
         input_value: Any = None
         if resume_decisions is not None:
             from langgraph.types import Command  # noqa: PLC0415
@@ -431,6 +468,11 @@ async def supervisor_runner(
             (_PE_SINK, tok_pe_sink),
             (_PE_RUN_ID, tok_pe_rid),
             (_OG_RUN_ID, tok_og_rid),
+            (ACTIVE_STORE, tok_st),
+            (ACTIVE_MODE, tok_mode),
+            (ACTIVE_GOAL, tok_goal),
+            (ACTIVE_EMITTER, tok_emit),
+            (ACTIVE_PLAN_SNAPSHOT, tok_plan),
         ):
             try:
                 variable.reset(token)

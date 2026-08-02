@@ -55,6 +55,16 @@ def _json(value: Any) -> str:
     return json.dumps(redact_payload(value), ensure_ascii=True, separators=(",", ":"), default=str)
 
 
+def _loads(value: Any) -> Any:
+    """Best-effort JSON decode of a stored JSON column."""
+    if value is None or value == "":
+        return None
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+
+
 def _row(row: Any) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
@@ -240,6 +250,80 @@ _FASE2_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# Fase 3 (autonomous modes, issue #14) idempotent additions
+# ---------------------------------------------------------------------------
+#
+# Operator-owned persistent Goal + durable plan (TODO) + server-side timers.
+# Everything is idempotent (``IF NOT EXISTS`` / PRAGMA-guarded ADD COLUMN) so
+# re-running ``migrate()`` is a no-op.  ``todo_events`` is append-only: it is
+# the replayable source of truth for the plan; ``timers`` rows are fenced by
+# the same lease/fencing-epoch discipline as ``agent_runs``.
+_FASE3_DDL: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS goals (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'goal',
+        objective TEXT NOT NULL,
+        success_criteria_json TEXT NOT NULL DEFAULT '[]',
+        scope_json TEXT NOT NULL DEFAULT '{}',
+        budget_json TEXT NOT NULL DEFAULT '{}',
+        deadline_ms INTEGER,
+        state TEXT NOT NULL DEFAULT 'active',
+        last_tick_ms INTEGER,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+        FOREIGN KEY(actor_id) REFERENCES users(id)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_goals_conversation
+        ON goals(conversation_id, state)""",
+    """CREATE TABLE IF NOT EXISTS todo_events (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        goal_id TEXT NOT NULL DEFAULT '',
+        item_id TEXT NOT NULL DEFAULT '',
+        op TEXT NOT NULL,
+        item_json TEXT NOT NULL DEFAULT '{}',
+        reason TEXT NOT NULL DEFAULT '',
+        actor TEXT NOT NULL DEFAULT 'agent',
+        sequence INTEGER NOT NULL,
+        created_at_ms INTEGER NOT NULL
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_todo_events_conversation
+        ON todo_events(conversation_id, sequence)""",
+    """CREATE TABLE IF NOT EXISTS timers (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT,
+        run_id TEXT,
+        conversation_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'active',
+        due_at_ms INTEGER NOT NULL,
+        cadence_ms INTEGER NOT NULL,
+        last_tick_at_ms INTEGER,
+        tick_count INTEGER NOT NULL DEFAULT 0,
+        lease_token TEXT,
+        lease_expires_at_ms INTEGER,
+        fencing_epoch INTEGER NOT NULL DEFAULT 0,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL,
+        FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_timers_due
+        ON timers(state, due_at_ms, lease_expires_at_ms)""",
+)
+
+# Optional column adds for Fase 3; guarded via PRAGMA at boot.
+_FASE3_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("agent_runs", "mode", "TEXT"),
+    ("agent_runs", "goal_id", "TEXT"),
+)
+
+# ---------------------------------------------------------------------------
 # Local-first delta sync (conversation durability)
 # ---------------------------------------------------------------------------
 #
@@ -282,6 +366,9 @@ _SYNC_TABLES: tuple[str, ...] = (
     "conversation_artifacts",
     "conversation_summaries",
     "conversation_broadcasts",
+    "goals",
+    "todo_events",
+    "timers",
     "audit_events",
 )
 # FK dependency order for hydration (durable → hot) and flush (hot → durable).
@@ -347,6 +434,9 @@ _PRODUCTION_TABLE_NAMES = (
     "conversation_artifacts",
     "conversation_summaries",
     "provider_profiles",
+    "goals",
+    "todo_events",
+    "timers",
     "audit_events",
     "operation_snapshots",
     "operation_branches",
@@ -577,6 +667,18 @@ class ProductionStore:
         # Fase 2 idempotent additions live outside the checksum-locked block
         # so they can evolve without breaking every existing deployment.
         self._install_fase2_essentials()
+        self._install_fase3_essentials()
+
+    def _install_fase3_essentials(self) -> None:
+        """Idempotently install the Fase 3 (autonomous modes) schema."""
+        with self._transaction() as conn:
+            for ddl in _FASE3_DDL:
+                conn.execute(ddl)
+            for table, column, coltype in _FASE3_OPTIONAL_COLUMNS:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                names = {str(r["name"] if hasattr(r, "keys") else r[1]) for r in rows}
+                if column not in names:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
     def _install_fase2_essentials(self) -> None:
         """Idempotently install the ex-``store_v3_1`` schema + column additions."""
@@ -890,7 +992,7 @@ class ProductionStore:
         )
         return event
 
-    def create_turn(self, *, actor_id: str, conversation_id: str, content: str, idempotency_key: str) -> dict[str, Any]:
+    def create_turn(self, *, actor_id: str, conversation_id: str, content: str, idempotency_key: str, mode: str | None = None, goal_id: str | None = None) -> dict[str, Any]:
         if not content.strip() or not idempotency_key.strip():
             raise ValueError("content and idempotency key are required")
         if len(content) > 1_000_000:
@@ -921,9 +1023,9 @@ class ProductionStore:
                 (assistant_message_id, conversation_id, user_sequence + 1, None, run_id, "assistant_placeholder", "queued", "", hashlib.sha256(b"").hexdigest(), now, now),
             )
             conn.execute(
-                """INSERT INTO agent_runs (id,conversation_id,actor_id,user_message_id,assistant_message_id,root_run_id,attempt,state,idempotency_key,request_hash,created_at_ms,updated_at_ms)
-                VALUES (?,?,?,?,?,?,1,'queued',?,?,?,?)""",
-                (run_id, conversation_id, actor_id, user_message_id, assistant_message_id, run_id, idempotency_key, request_hash, now, now),
+                """INSERT INTO agent_runs (id,conversation_id,actor_id,user_message_id,assistant_message_id,root_run_id,attempt,state,idempotency_key,request_hash,mode,goal_id,created_at_ms,updated_at_ms)
+                VALUES (?,?,?,?,?,?,1,'queued',?,?,?,?,?,?)""",
+                (run_id, conversation_id, actor_id, user_message_id, assistant_message_id, run_id, idempotency_key, request_hash, mode, goal_id, now, now),
             )
             event = self._append_event(conn, run_id=run_id, kind="run.queued", payload={"message_id": user_message_id, "assistant_message_id": assistant_message_id}, actor_id=actor_id)
             conn.execute("UPDATE conversations SET last_activity_at_ms=?,updated_at_ms=?,version=version+1 WHERE id=?", (now, now, conversation_id))
@@ -1052,6 +1154,8 @@ class ProductionStore:
                 "conversation_id": run["conversation_id"],
                 "message": prompt["content"] if prompt else "",
                 "history": [{"role": "assistant" if row["kind"] == "assistant" else "user", "content": row["content"]} for row in reversed(rows)],
+                "mode": str(run["mode"]) if "mode" in run.keys() and run["mode"] else None,
+                "goal_id": str(run["goal_id"]) if "goal_id" in run.keys() and run["goal_id"] else None,
             }
 
     def force_run_lease_expiry(self, run_id: str, when: Any) -> None:
@@ -1945,7 +2049,7 @@ class ProductionStore:
                 "WHERE conversation_id = ?",
                 (conversation_id,),
             ).fetchone()
-            seq = int((row["seq"] if row and row["seq"] is not None else 0)) + 1
+            seq = int(row["seq"] if row and row["seq"] is not None else 0) + 1
             conn.execute(
                 """INSERT INTO conversation_broadcasts
                     (id, conversation_id, kind, payload_json, sequence, created_at_ms)
@@ -1967,6 +2071,391 @@ class ProductionStore:
             "sequence": seq,
             "created_at_ms": now,
         }
+
+    # ------------------------------------------------------------------
+    # Fase 3 (autonomous modes, issue #14) — goals, durable plan, timers
+    # ------------------------------------------------------------------
+    #
+    # ``goals`` holds the operator-owned persistent objective; ``todo_events``
+    # is the append-only, replayable source of truth for the plan; ``timers``
+    # are server-side durable alarms fenced with the same lease/epoch
+    # discipline as ``agent_runs``.  Every Fase 3 write also lands a
+    # ``run_events`` row so the idempotent-replay SSE stream re-emits the
+    # corresponding envelopes at full fidelity.
+
+    # -- goals ------------------------------------------------------------
+
+    def create_goal(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        objective: str,
+        success_criteria: list[str] | None = None,
+        scope: dict | None = None,
+        budget: dict | None = None,
+        deadline_ms: int | None = None,
+        mode: str = "goal",
+    ) -> dict[str, Any]:
+        trimmed = objective.strip()
+        if not trimmed or len(trimmed) > 4_000:
+            raise ValueError("objective is required (max 4000 chars)")
+        now = _now_ms()
+        goal = {
+            "id": _id("goal"),
+            "conversation_id": conversation_id,
+            "actor_id": actor_id,
+            "mode": str(mode).lower(),
+            "objective": trimmed,
+            "success_criteria": list(success_criteria or []),
+            "scope": scope or {},
+            "budget": budget or {},
+            "deadline_ms": deadline_ms,
+            "state": "active",
+            "last_tick_ms": None,
+            "created_at_ms": now,
+            "updated_at_ms": now,
+        }
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO goals (id,conversation_id,actor_id,mode,objective,
+                   success_criteria_json,scope_json,budget_json,deadline_ms,state,
+                   last_tick_ms,created_at_ms,updated_at_ms)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    goal["id"], conversation_id, actor_id, goal["mode"], trimmed,
+                    _json(goal["success_criteria"]), _json(goal["scope"]),
+                    _json(goal["budget"]), deadline_ms, goal["state"],
+                    goal["last_tick_ms"], now, now,
+                ),
+            )
+            self._audit(conn, actor_id=actor_id, action="goal.created", resource_type="goal", resource_id=goal["id"], outcome="success", metadata={"conversation_id": conversation_id})
+        return goal
+
+    @staticmethod
+    def _goal_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "conversation_id": row["conversation_id"],
+            "actor_id": row["actor_id"],
+            "mode": row["mode"],
+            "objective": row["objective"],
+            "success_criteria": _loads(row["success_criteria_json"]) if row["success_criteria_json"] else [],
+            "scope": _loads(row["scope_json"]) if row["scope_json"] else {},
+            "budget": _loads(row["budget_json"]) if row["budget_json"] else {},
+            "deadline_ms": row["deadline_ms"],
+            "state": row["state"],
+            "last_tick_ms": row["last_tick_ms"],
+            "created_at_ms": row["created_at_ms"],
+            "updated_at_ms": row["updated_at_ms"],
+        }
+
+    def get_goal_for_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        with self._read_only() as conn:
+            row = conn.execute(
+                "SELECT * FROM goals WHERE conversation_id=? ORDER BY created_at_ms DESC LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            return self._goal_dict(row) if row else None
+
+    def list_goals_for_actor(self, actor_id: str, state: str | None = None) -> list[dict[str, Any]]:
+        with self._read_only() as conn:
+            if state:
+                rows = conn.execute(
+                    "SELECT * FROM goals WHERE actor_id=? AND state=? ORDER BY created_at_ms DESC",
+                    (actor_id, state),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM goals WHERE actor_id=? ORDER BY created_at_ms DESC",
+                    (actor_id,),
+                ).fetchall()
+            return [self._goal_dict(row) for row in rows]
+
+    _GOAL_MUTABLE_FIELDS = frozenset(
+        {"state", "objective", "success_criteria", "scope", "budget", "deadline_ms", "last_tick_ms"}
+    )
+
+    def update_goal(self, *, actor_id: str, goal_id: str, **fields: Any) -> dict[str, Any]:
+        unknown = set(fields) - self._GOAL_MUTABLE_FIELDS
+        if unknown:
+            raise ValueError(f"invalid goal fields: {sorted(unknown)}")
+        now = _now_ms()
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
+            if not row:
+                raise KeyError(goal_id)
+            conn.execute(
+                "UPDATE goals SET objective=?, success_criteria_json=?, scope_json=?, budget_json=?, deadline_ms=?, state=?, last_tick_ms=?, updated_at_ms=? WHERE id=?",
+                (
+                    str(fields.get("objective", row["objective"])),
+                    _json(fields.get("success_criteria", _loads(row["success_criteria_json"]) if row["success_criteria_json"] else [])),
+                    _json(fields.get("scope", _loads(row["scope_json"]) if row["scope_json"] else {})),
+                    _json(fields.get("budget", _loads(row["budget_json"]) if row["budget_json"] else {})),
+                    fields.get("deadline_ms", row["deadline_ms"]),
+                    str(fields.get("state", row["state"])),
+                    fields.get("last_tick_ms", row["last_tick_ms"]),
+                    now,
+                    goal_id,
+                ),
+            )
+            self._audit(conn, actor_id=actor_id, action="goal.updated", resource_type="goal", resource_id=goal_id, outcome="success", metadata={"fields": sorted(set(fields))})
+            updated = conn.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
+            return self._goal_dict(updated)
+
+    # -- durable plan (TODO) ---------------------------------------------
+
+    def append_todo_event(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str,
+        goal_id: str = "",
+        item_id: str = "",
+        op: str,
+        item_json: str = "{}",
+        reason: str = "",
+        actor: str = "agent",
+    ) -> dict[str, Any]:
+        """Append one durable plan event (authoritative, replayable log)."""
+        now = _now_ms()
+        entry: dict[str, Any] = {"id": _id("todo"), "run_id": run_id, "op": op, "item_id": item_id, "item": item_json}
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence),0)+1 AS seq FROM todo_events WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchone()
+            sequence = int(row["seq"])
+            conn.execute(
+                """INSERT INTO todo_events (id,run_id,conversation_id,goal_id,item_id,op,item_json,reason,actor,sequence,created_at_ms)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (entry["id"], run_id, conversation_id, goal_id, item_id, op, item_json, reason[:500], actor, sequence, now),
+            )
+        return {"id": entry["id"], "op": op, "item_id": item_id, "sequence": sequence, "created_at_ms": now}
+
+    def plan_items(self, *, conversation_id: str) -> list[dict[str, Any]]:
+        """Reconstruct the current plan items from the event log.
+
+        The log is append-only; the latest event per item carries the full
+        item dict.  ``replan`` events reset the recorded status of every
+        referenced non-done item to ``pending``.
+        """
+        with self._read_only() as conn:
+            rows = conn.execute(
+                "SELECT op,item_id,item_json FROM todo_events WHERE conversation_id=? AND op!='hypothesis' ORDER BY sequence",
+                (conversation_id,),
+            ).fetchall()
+        by_id: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            op = str(row["op"])
+            item_id = str(row["item_id"])
+            if op == "replan":
+                payload = _loads(row["item_json"]) if row["item_json"] else {}
+                for reset_id in payload.get("reset_ids", []):
+                    item = by_id.get(str(reset_id))
+                    if item and item.get("status") not in {"done", "discarded"}:
+                        item["status"] = "pending"
+                continue
+            if not item_id:
+                continue
+            item = _loads(row["item_json"]) if row["item_json"] else {}
+            if isinstance(item, dict) and item.get("id"):
+                by_id[item_id] = item
+        return list(by_id.values())
+
+    def plan_snapshot(self, *, conversation_id: str) -> dict[str, Any]:
+        """Goal + current plan items for one conversation (UI/run-start hydration)."""
+        goal = self.get_goal_for_conversation(conversation_id)
+        items = self.plan_items(conversation_id=conversation_id)
+        updated_at_ms = max((int(i.get("updated_at_ms") or 0) for i in items), default=0)
+        if goal:
+            updated_at_ms = max(updated_at_ms, int(goal.get("updated_at_ms") or 0))
+        return {"conversation_id": conversation_id, "goal": goal, "items": items, "updated_at_ms": updated_at_ms}
+
+    # -- timers ------------------------------------------------------------
+
+    def create_timer(
+        self,
+        *,
+        conversation_id: str,
+        actor_id: str,
+        kind: str,
+        due_at_ms: int,
+        cadence_ms: int,
+        payload: dict | None = None,
+        goal_id: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not kind.strip() or not kind.isidentifier():
+            raise ValueError("timer kind must be a non-empty identifier")
+        if cadence_ms < 5_000:
+            raise ValueError("timer cadence must be at least 5000ms")
+        now = _now_ms()
+        timer = {
+            "id": _id("timer"),
+            "goal_id": goal_id,
+            "run_id": run_id,
+            "conversation_id": conversation_id,
+            "actor_id": actor_id,
+            "kind": kind.strip(),
+            "state": "active",
+            "due_at_ms": max(int(due_at_ms or now), now),
+            "cadence_ms": int(cadence_ms),
+            "last_tick_at_ms": None,
+            "tick_count": 0,
+            "lease_token": None,
+            "lease_expires_at_ms": None,
+            "fencing_epoch": 0,
+            "payload": payload or {},
+            "created_at_ms": now,
+            "updated_at_ms": now,
+        }
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO timers (id,goal_id,run_id,conversation_id,actor_id,kind,state,
+                   due_at_ms,cadence_ms,last_tick_at_ms,tick_count,lease_token,lease_expires_at_ms,
+                   fencing_epoch,payload_json,created_at_ms,updated_at_ms)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    timer["id"], goal_id, run_id, conversation_id, timer["actor_id"], timer["kind"], "active",
+                    timer["due_at_ms"], timer["cadence_ms"], None, 0, None, None, 0,
+                    _json(timer["payload"]), now, now,
+                ),
+            )
+            self._audit(conn, actor_id=actor_id, action="timer.created", resource_type="timer", resource_id=timer["id"], outcome="success", metadata={"kind": timer["kind"], "conversation_id": conversation_id})
+        return timer
+
+    @staticmethod
+    def _timer_dict(row: Any) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "goal_id": row["goal_id"],
+            "run_id": row["run_id"],
+            "conversation_id": row["conversation_id"],
+            "actor_id": row["actor_id"],
+            "kind": row["kind"],
+            "state": row["state"],
+            "due_at_ms": int(row["due_at_ms"]),
+            "cadence_ms": int(row["cadence_ms"]),
+            "last_tick_at_ms": int(row["last_tick_at_ms"]) if row["last_tick_at_ms"] else None,
+            "tick_count": int(row["tick_count"]),
+            "lease_token": row["lease_token"],
+            "lease_expires_at_ms": int(row["lease_expires_at_ms"]) if row["lease_expires_at_ms"] else None,
+            "fencing_epoch": int(row["fencing_epoch"]),
+            "payload": _loads(row["payload_json"]) if row["payload_json"] else {},
+            "created_at_ms": int(row["created_at_ms"]),
+            "updated_at_ms": int(row["updated_at_ms"]),
+        }
+
+    def get_timer(self, timer_id: str) -> dict[str, Any] | None:
+        with self._read_only() as conn:
+            row = conn.execute("SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
+            return self._timer_dict(row) if row else None
+
+    def list_timers(self, *, conversation_id: str | None = None, state: str | None = None) -> list[dict[str, Any]]:
+        with self._read_only() as conn:
+            if conversation_id and state:
+                rows = conn.execute(
+                    "SELECT * FROM timers WHERE conversation_id=? AND state=? ORDER BY due_at_ms",
+                    (conversation_id, state),
+                ).fetchall()
+            elif conversation_id:
+                rows = conn.execute(
+                    "SELECT * FROM timers WHERE conversation_id=? ORDER BY due_at_ms",
+                    (conversation_id,),
+                ).fetchall()
+            elif state:
+                rows = conn.execute(
+                    "SELECT * FROM timers WHERE state=? ORDER BY due_at_ms",
+                    (state,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM timers ORDER BY due_at_ms").fetchall()
+            return [self._timer_dict(row) for row in rows]
+
+    def claim_due_timers(
+        self,
+        *,
+        worker_id: str,
+        lease_ms: int,
+        now_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Atomically lease all due timers to this worker (fencing-guarded).
+
+        Each claim bumps ``fencing_epoch`` and stamps a fresh ``lease_token``;
+        ``complete_timer_tick`` only succeeds for the current fenced owner, so
+        a crashed/duplicated worker can never double-tick.
+        """
+        now = now_ms or _now_ms()
+        lease_token = _id("lease")
+        claimed: list[dict[str, Any]] = []
+        with self._transaction() as conn:
+            rows = conn.execute(
+                """SELECT * FROM timers
+                   WHERE state='active' AND due_at_ms<=? AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms<?)
+                   ORDER BY due_at_ms LIMIT ?""",
+                (now, now, max(1, int(limit))),
+            ).fetchall()
+            for row in rows:
+                changed = conn.execute(
+                    """UPDATE timers SET lease_token=?, lease_expires_at_ms=?, fencing_epoch=fencing_epoch+1,
+                       updated_at_ms=? WHERE id=? AND state='active' AND fencing_epoch=? AND due_at_ms<=? AND
+                       (lease_expires_at_ms IS NULL OR lease_expires_at_ms<?)""",
+                    (lease_token, now + max(1, int(lease_ms)), now, row["id"], row["fencing_epoch"], now, now),
+                )
+                if int(changed.rowcount) == 1:
+                    timer = self._timer_dict(row)
+                    timer["lease_token"] = lease_token
+                    timer["lease_expires_at_ms"] = now + max(1, int(lease_ms))
+                    timer["fencing_epoch"] = int(row["fencing_epoch"]) + 1
+                    timer["_worker_id"] = worker_id
+                    claimed.append(timer)
+        return claimed
+
+    def complete_timer_tick(
+        self,
+        *,
+        timer_id: str,
+        fencing_epoch: int,
+        last_tick_at_ms: int,
+        next_due_at_ms: int,
+        tick_count: int,
+    ) -> bool:
+        """Record a completed tick for the current fenced owner."""
+        with self._transaction() as conn:
+            changed = conn.execute(
+                """UPDATE timers SET lease_token=NULL, lease_expires_at_ms=NULL, due_at_ms=?,
+                   last_tick_at_ms=?, tick_count=?, updated_at_ms=? WHERE id=? AND fencing_epoch=? AND state='active'""",
+                (next_due_at_ms, last_tick_at_ms, tick_count, _now_ms(), timer_id, fencing_epoch),
+            )
+            return int(changed.rowcount) == 1
+
+    def pause_timer(self, *, actor_id: str, timer_id: str) -> dict[str, Any]:
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
+            if not row or row["state"] != "active":
+                raise KeyError(timer_id)
+            conn.execute(
+                "UPDATE timers SET state='paused', updated_at_ms=? WHERE id=? AND state='active'",
+                (_now_ms(), timer_id),
+            )
+            self._audit(conn, actor_id=actor_id, action="timer.paused", resource_type="timer", resource_id=timer_id, outcome="success")
+            updated = conn.execute("SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
+            return self._timer_dict(updated)
+
+    def cancel_timer(self, *, actor_id: str, timer_id: str) -> dict[str, Any]:
+        with self._transaction() as conn:
+            row = conn.execute("SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
+            if not row or row["state"] not in {"active", "paused"}:
+                raise KeyError(timer_id)
+            conn.execute(
+                "UPDATE timers SET state='cancelled', updated_at_ms=? WHERE id=? AND state IN ('active','paused')",
+                (_now_ms(), timer_id),
+            )
+            self._audit(conn, actor_id=actor_id, action="timer.cancelled", resource_type="timer", resource_id=timer_id, outcome="success")
+            updated = conn.execute("SELECT * FROM timers WHERE id=?", (timer_id,)).fetchone()
+            return self._timer_dict(updated)
 
 
 # =====================================================================
@@ -2445,6 +2934,54 @@ class MuninStore:
         return self._hot.list_run_guidance(**kwargs)
 
     # ------------------------------------------------------------------
+    # Fase 3 (autonomous modes) — goals / plan / timers (durable)
+    # ------------------------------------------------------------------
+    # These are long-lived, conversation-scoped, replayable state; they route
+    # to the durable backend like conversations and broadcasts.
+
+    def create_goal(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.create_goal(**kwargs)
+
+    def get_goal_for_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        return self._durable.get_goal_for_conversation(conversation_id)
+
+    def list_goals_for_actor(self, actor_id: str, state: str | None = None) -> list[dict[str, Any]]:
+        return self._durable.list_goals_for_actor(actor_id=actor_id, state=state)
+
+    def update_goal(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.update_goal(**kwargs)
+
+    def append_todo_event(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.append_todo_event(**kwargs)
+
+    def plan_items(self, *, conversation_id: str) -> list[dict[str, Any]]:
+        return self._durable.plan_items(conversation_id=conversation_id)
+
+    def plan_snapshot(self, *, conversation_id: str) -> dict[str, Any]:
+        return self._durable.plan_snapshot(conversation_id=conversation_id)
+
+    def create_timer(self, **kwargs: Any) -> dict[str, Any]:
+        return self._durable.create_timer(**kwargs)
+
+    def get_timer(self, timer_id: str) -> dict[str, Any] | None:
+        return self._durable.get_timer(timer_id)
+
+    def list_timers(self, *, conversation_id: str | None = None, state: str | None = None) -> list[dict[str, Any]]:
+        return self._durable.list_timers(conversation_id=conversation_id, state=state)
+
+    def claim_due_timers(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._durable.claim_due_timers(**kwargs)
+
+    def complete_timer_tick(self, **kwargs: Any) -> bool:
+        return self._durable.complete_timer_tick(**kwargs)
+
+    def pause_timer(self, *, actor_id: str, timer_id: str) -> dict[str, Any]:
+        return self._durable.pause_timer(actor_id=actor_id, timer_id=timer_id)
+
+    def cancel_timer(self, *, actor_id: str, timer_id: str) -> dict[str, Any]:
+        return self._durable.cancel_timer(actor_id=actor_id, timer_id=timer_id)
+
+    # ------------------------------------------------------------------
     # Conversations (durable) — mirror participants to hot on write.
     # ------------------------------------------------------------------
 
@@ -2457,7 +2994,7 @@ class MuninStore:
     # Turns / runs (durable stub message + hot run)
     # ------------------------------------------------------------------
 
-    def create_turn(self, *, actor_id: str, conversation_id: str, content: str, idempotency_key: str) -> dict[str, Any]:
+    def create_turn(self, *, actor_id: str, conversation_id: str, content: str, idempotency_key: str, mode: str | None = None, goal_id: str | None = None) -> dict[str, Any]:
         """Split the turn creation across the two backends.
 
         * Durable: participant check, user message row, assistant
@@ -2469,6 +3006,10 @@ class MuninStore:
           and falls back to durable (finalised runs migrated by
           :meth:`complete_run`) so retries with the same key correctly
           replay across both backends.
+
+        ``mode``/``goal_id`` are persisted on the run row so recovery
+        (``recover_persisted_chat_runs``) resumes with the same operation
+        contract and persistent goal.
         """
         if not content.strip() or not idempotency_key.strip():
             raise ValueError("content and idempotency key are required")
@@ -2536,9 +3077,9 @@ class MuninStore:
         self._mirror_participant(conversation_id=conversation_id, user_id=actor_id, role="owner")
         with self._hot._transaction() as conn:  # noqa: SLF001
             conn.execute(
-                """INSERT INTO agent_runs (id,conversation_id,actor_id,user_message_id,assistant_message_id,root_run_id,attempt,state,idempotency_key,request_hash,created_at_ms,updated_at_ms)
-                VALUES (?,?,?,?,?,?,1,'queued',?,?,?,?)""",
-                (run_id, conversation_id, actor_id, user_message_id, assistant_message_id, run_id, idempotency_key, request_hash, now, now),
+                """INSERT INTO agent_runs (id,conversation_id,actor_id,user_message_id,assistant_message_id,root_run_id,attempt,state,idempotency_key,request_hash,mode,goal_id,created_at_ms,updated_at_ms)
+                VALUES (?,?,?,?,?,?,1,'queued',?,?,?,?,?,?)""",
+                (run_id, conversation_id, actor_id, user_message_id, assistant_message_id, run_id, idempotency_key, request_hash, mode, goal_id, now, now),
             )
             ProductionStore._append_event(  # noqa: SLF001
                 self._hot,
@@ -2583,6 +3124,8 @@ class MuninStore:
                 {"role": "assistant" if row["kind"] == "assistant" else "user", "content": row["content"]}
                 for row in reversed(rows)
             ],
+            "mode": str(run_row["mode"]) if "mode" in run_row.keys() and run_row["mode"] else None,
+            "goal_id": str(run_row["goal_id"]) if "goal_id" in run_row.keys() and run_row["goal_id"] else None,
         }
 
     def claim_run_direct(self, *, run_id: str) -> tuple[str, str]:

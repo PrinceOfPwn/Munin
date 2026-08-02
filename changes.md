@@ -4,6 +4,69 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-01 — Autonomous modes (Standard / YOLO / GOAL / BEAST)
+
+Operator-chosen autonomy contracts over the single Deep Agents supervisor loop.
+One execution path; the mode shapes policy, not scope:
+
+- `munin/core/autonomy/modes.py` — `OperationMode` (StrEnum), `ModePolicy`,
+  `policy_for` / `parse_mode_policy` / `mode_contract`. Per-mode approval levels
+  (the `critical` floor is immutable in every mode), `requires_goal` /
+  `requires_scope` gates, planning on/off, delegation, anti-runaway
+  `model_call_limit` / `tool_call_limit` (BEAST; env-observable via
+  `MUNIN_BEAST_MODEL_CALL_LIMIT` / `MUNIN_BEAST_TOOL_CALL_LIMIT`), and a
+  `plan_reminder_every_steps` cadence (`MUNIN_PLAN_REMINDER_EVERY_STEPS`).
+- `munin/core/autonomy/planning.py` — durable TODO plan as real LangChain 1.x
+  middleware (`TodoPlanMiddleware`) + `todo_update` / `hypothesis` tools
+  (InjectedToolCallId). Plan is authoritative in the store
+  (`todo_events` append-only log), never in graph state; re-injected per model
+  call from `ACTIVE_PLAN_SNAPSHOT`. `_apply_ops` validates create/edit/
+  set_state/set_priority/link_hypothesis/attach_evidence/discard/replan.
+- `munin/core/autonomy/goals.py` — `GoalMiddleware` + `render_goal_block` /
+  `new_goal_id`; persistent operator-owned objective injected each model call
+  from `ACTIVE_GOAL`.
+- `munin/core/autonomy/context.py` — `ACTIVE_STORE` / `ACTIVE_MODE` /
+  `ACTIVE_GOAL` / `ACTIVE_PLAN_SNAPSHOT` / `ACTIVE_EMITTER` contextvars set
+  per invocation by `runtime_adapter.supervisor_runner` (cached-graph-safe).
+- Store Fase 3 (`production/store.py`): `goals`, `todo_events`, `timers` tables
+  (+ `agent_runs.mode` / `agent_runs.goal_id`); methods `create_goal` /
+  `get_goal_for_conversation` / `list_goals_for_actor` / `update_goal` /
+  `append_todo_event` / `plan_items` (replan-aware) / `plan_snapshot` /
+  `create_timer` / `claim_due_timers` (lease + fencing epoch) /
+  `complete_timer_tick` / `pause_timer` / `cancel_timer`; `create_turn` and
+  `run_execution_context` carry `mode` / `goal_id`. `MuninStore` forwards the
+  durable ones.
+- `munin/production/timers.py` — durable scheduler (`timer_tick_loop`) with
+  lease/fencing; `_dispatch_tick` launches a GOAL wake-up as a governed turn
+  through the same `create_turn` + `_launch_chat_run` path (idempotency
+  `timer:{id}:{tick}`), only when the goal is active, no run is non-terminal,
+  and `MUNIN_TIMER_WAKEUP_ENABLED` is set. Lifecycle envs:
+  `MUNIN_TIMER_POLL_SECONDS`, `MUNIN_TIMER_LEASE_SECONDS`.
+- `munin/core/supervisor.py` / `runtime_adapter.py` — builder takes `mode`,
+  schedules `TodoPlanMiddleware` + `GoalMiddleware`, composes the mode contract
+  into the prompt, raises per-mode budgets, emits the initial `plan` envelope;
+  the runner sets/resets the autonomy contextvars and passes the goal through.
+- Chat API (`production/chat.py`): `POST /api/chat` reads `mode` / `goal`,
+  applies the GOAL (requires persistent goal) / BEAST (requires explicit
+  scope) gates, persists `mode`/`goal_id` on the run. New routes:
+  `GET /api/chat/{conversation_id}/plan`, `POST .../timers` and per-timer
+  `pause` / `cancel`, `PATCH /api/goals/{goal_id}`.
+- Frontend: translator emits `data-plan` / `data-todo` / `data-hypothesis` /
+  `data-goal` / `data-timer-tick`; new parts `PlanPart` / `GoalPart` /
+  `TimerTickPart`; `ModeSwitcher` (Standard/YOLO/GOAL/BEAST) + goal editor in
+  the composer, sent through `sendMessage(..., { body: { mode, goal } })`; the
+  durable goal id is latched from the stream and re-attached to avoid duplicate
+  goals.
+- Tests: `tests/test_autonomous_modes.py` (28) covers policy, store
+  goals/plan/timers + fencing, middleware composition + tools, chat gates +
+  plan/timer/goal routes, timer `_dispatch_tick` determinism and loop cancel;
+  `translator.test.ts` adds the new envelopes (30 total). ruff `--select F`
+  clean; tsc + vitest green.
+
+Security invariant unchanged: the mode adjusts only which audit levels pause
+for operator approval; the hard boundaries (scope preflight, opsec, audit
+redaction, critical floor) never widen.
+
 ## 2026-07-31 18:26 ART — CI gates, canonical MCP endpoints, and provider reasoning replay
 
 This follow-up closes the remaining CI failures without adding a second

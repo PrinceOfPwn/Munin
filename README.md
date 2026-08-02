@@ -124,6 +124,18 @@ tool/action before resuming the LangGraph interrupt. Rejection is terminal for
 that request. The same rules apply to web and Discord; neither is an alternate
 bypass for server policy.
 
+## Operation modes
+
+Operators choose an autonomy contract per turn over the same supervised loop:
+**Standard** (per-action approvals), **YOLO** (proceed within authorized scope;
+admin/critical only), **GOAL** (persistent durable objective + TODO plan with
+refresh/restart-safe state), and **BEAST** (deep planning + delegation with
+explicit scope and raised anti-runaway budgets). The mode only changes which
+audit levels pause for approval — the hard boundaries (scope, preflight, audit,
+the `critical` approval floor) never widen. GOAL/BEAST carry a durable goal
+editable via `PATCH /api/goals/{id}`; server-side timers can wake a GOAL run for
+re-evaluation.
+
 ## Capabilities and self-extension
 
 > 🧩 **Extension rule:** a generated tool or subgraph becomes useful only after

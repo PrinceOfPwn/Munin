@@ -109,6 +109,7 @@ def _supervisor_fingerprint(
     state: Any,
     soul_prompt: str,
     include_generated: bool,
+    mode: Any = None,
 ) -> str:
     """Build the cache key for the compiled supervisor graph."""
     parts = [
@@ -118,6 +119,7 @@ def _supervisor_fingerprint(
         f"gen={_gen_fingerprint(state) if include_generated else frozenset()}",
         f"soul={_soul_hash(soul_prompt)}",
         f"incgen={int(bool(include_generated))}",
+        f"mode={str(mode or 'standard').lower()}",
         f"model_limit={getattr(getattr(state, 'settings', None), 'agent_model_call_limit', 24)}",
         f"tool_limit={getattr(getattr(state, 'settings', None), 'agent_tool_call_limit', 64)}",
     ]
@@ -231,35 +233,46 @@ def build_munin_supervisor(
     run_id: str = "",
     progress_sink: Any = None,
     include_generated: bool = True,
+    mode: Any = None,
 ) -> Any:
     """Full production assembly: gateway + kernel + middleware + soul.
 
     This is the one authoritative builder used by the runtime adapter, the
     CLI and ``munin_chat`` — no second runtime path exists.
 
+    ``mode`` (``OperationMode``/str/None) changes the *product* guardrails
+    only: approval levels (the ``critical`` floor is immutable), the
+    anti-runaway call budgets, and the planning/goal middleware presence.
     The compiled graph is **cached per process** keyed by a fingerprint of
     (model identity, active ``gen__*`` tool set + signatures, soul prompt,
-    SharedStateStore identity). Per-run state (``run_id``, ``progress_sink``)
-    is delivered at invoke time via the ``ACTIVE_*`` contextvars in
-    ``munin.core.middleware.progress_emit`` / ``operator_guidance``, so the
-    cached graph is reused across turns / ``run_id`` changes. The ASGI
-    lifespan supplies a durable saver keyed by ``thread_id`` for HITL/resume.
-    The ``run_id``/``progress_sink`` arguments here are
-    construction-time fallbacks (used by the single-build langgraph dev-server
-    path where contextvars are never set).
+    SharedStateStore identity, mode). Per-run state (``run_id``,
+    ``progress_sink``, the live goal + plan snapshot) is delivered at invoke
+    time via the ``ACTIVE_*`` contextvars, so one cached graph per mode
+    serves every conversation. The ASGI lifespan supplies a durable saver
+    keyed by ``thread_id`` for HITL/resume. The ``run_id``/``progress_sink``
+    arguments here are construction-time fallbacks (used by the single-build
+    langgraph dev-server path where contextvars are never set).
     """
     from langchain.agents.middleware import (  # noqa: PLC0415
         ModelCallLimitMiddleware,
         ToolCallLimitMiddleware,
     )
 
+    from .autonomy.goals import GoalMiddleware  # noqa: PLC0415
     from .autonomy.kernel import AutonomyKernel  # noqa: PLC0415
+    from .autonomy.modes import OperationMode, parse_mode_policy  # noqa: PLC0415
+    from .autonomy.planning import TodoPlanMiddleware  # noqa: PLC0415
     from .middleware import (  # noqa: PLC0415
         OperatorGuidanceMiddleware,
         ProgressEmitMiddleware,
     )
-    from .tool_gateway import gateway_tools  # noqa: PLC0415
-    from .tool_gateway import approval_policy_for_tools  # noqa: PLC0415
+    from .tool_gateway import (
+        approval_policy_for_tools,  # noqa: PLC0415
+        gateway_tools,  # noqa: PLC0415
+    )
+
+    policy = parse_mode_policy(mode)
+    mode_enum: OperationMode = policy.mode
 
     soul_prompt = ""
     try:
@@ -276,6 +289,7 @@ def build_munin_supervisor(
         state=state,
         soul_prompt=soul_prompt,
         include_generated=include_generated,
+        mode=mode_enum,
     )
     with _CACHE_LOCK:
         cached = _GRAPH_CACHE.get(fingerprint)
@@ -295,12 +309,18 @@ def build_munin_supervisor(
             run_id=run_id,
         ),
     ]
+    if policy.planning_enabled:
+        middleware.append(TodoPlanMiddleware(store=state, mode=mode_enum.value))
+    middleware.append(GoalMiddleware(goal=None))
     # Deep Agents composes standard LangChain middleware at graph-build time.
     # These caps count actual model/tool executions, unlike the retired
     # content-only repetition guard which treated distinct tool calls with
-    # empty assistant text as a loop.
-    model_limit = max(0, int(getattr(state.settings, "agent_model_call_limit", 24)))
-    tool_limit = max(0, int(getattr(state.settings, "agent_tool_call_limit", 64)))
+    # empty assistant text as a loop.  Modes may raise the anti-runaway nets
+    # within env-configurable bounds (never below the server defaults).
+    settings_model_limit = max(0, int(getattr(state.settings, "agent_model_call_limit", 24)))
+    settings_tool_limit = max(0, int(getattr(state.settings, "agent_tool_call_limit", 64)))
+    model_limit = policy.model_call_limit if policy.model_call_limit is not None else settings_model_limit
+    tool_limit = policy.tool_call_limit if policy.tool_call_limit is not None else settings_tool_limit
     if model_limit:
         middleware.insert(1, ModelCallLimitMiddleware(run_limit=model_limit, exit_behavior="end"))
     if tool_limit:
@@ -326,13 +346,18 @@ def build_munin_supervisor(
     )
     kernel_ref["kernel"] = kernel
 
+    from .autonomy.modes import mode_contract  # noqa: PLC0415
+
     graph = build_supervisor(
         tools=tools,
         model=model,
-        system_prompt=compose_munin_prompt(soul_prompt=soul_prompt),
+        system_prompt=compose_munin_prompt(
+            soul_prompt=soul_prompt,
+            extra=mode_contract(mode_enum),
+        ),
         middleware=middleware,
         meta_tools=kernel.meta_tools(),
-        interrupt_on=approval_policy_for_tools(tools),
+        interrupt_on=approval_policy_for_tools(tools, mode=mode_enum),
         checkpointer=durable_checkpointer,
     )
     with _CACHE_LOCK:

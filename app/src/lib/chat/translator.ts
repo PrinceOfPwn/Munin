@@ -22,7 +22,27 @@ export type BackendEnvelopeKind =
   | "run_state"
   | "heartbeat"
   | "note"
-  | "guidance";
+  | "guidance"
+  | "plan"
+  | "todo"
+  | "replan"
+  | "hypothesis"
+  | "goal"
+  | "timer_tick";
+
+// Fase 3 (autonomous modes): a durable plan item as rendered by the backend.
+export interface PlanItemEnvelope {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "blocked" | "done" | "discarded";
+  priority?: "low" | "normal" | "high" | "critical";
+  dependencies?: string[];
+  hypothesis?: string;
+  evidence?: string;
+  owner?: "agent" | "operator";
+  change_reason?: string;
+  updated_at_ms?: number;
+}
 
 export interface BackendEnvelope {
   kind: BackendEnvelopeKind;
@@ -50,6 +70,31 @@ export interface BackendEnvelope {
   elapsed_seconds?: number;
   provider?: string;
   step?: number;
+  // Fase 3 (autonomous modes)
+  goal?: {
+    id?: string;
+    objective?: string;
+    state?: string;
+    success_criteria?: string[];
+    deadline_ms?: number | null;
+    scope?: Record<string, unknown>;
+    budget?: Record<string, unknown>;
+  } | null;
+  items?: PlanItemEnvelope[];
+  updated_at_ms?: number;
+  op?: string;
+  item?: PlanItemEnvelope;
+  reason?: string;
+  reset_ids?: string[];
+  statement?: string;
+  status?: string;
+  evidence?: string;
+  timer_id?: string;
+  timer_kind?: string;
+  goal_id?: string;
+  tick_count?: number;
+  due_at_ms?: number;
+  last_tick_at_ms?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +284,66 @@ export function createTranslator(runId: string): {
 
       case "guidance":
         return envelope.text ? [{ type: "data-guidance", data: { text: envelope.text } }] : [];
+
+      // Fase 3 (autonomous modes): durable plan / goal / timer visibility.
+      case "plan":
+        return [{
+          type: "data-plan",
+          id: `plan-${runId}-${envelope.sequence ?? "snapshot"}`,
+          data: {
+            goal: envelope.goal ?? null,
+            items: envelope.items ?? [],
+            updatedAtMs: envelope.updated_at_ms ?? 0,
+          },
+        }];
+
+      case "todo":
+        if (!envelope.item) return [];
+        return [{
+          type: "data-todo",
+          id: `todo-${envelope.item.id}-${envelope.op ?? "update"}`,
+          data: { op: envelope.op ?? "update", item: envelope.item, reason: envelope.reason ?? "" },
+        }];
+
+      case "replan":
+        return [{
+          type: "data-todo",
+          id: `replan-${envelope.sequence ?? Date.now()}`,
+          data: { op: "replan", reason: envelope.reason ?? "", resetIds: envelope.reset_ids ?? [] },
+        }];
+
+      case "hypothesis":
+        if (!envelope.statement) return [];
+        return [{
+          type: "data-hypothesis",
+          id: `hypothesis-${envelope.statement.slice(0, 48)}-${envelope.sequence ?? Date.now()}`,
+          data: {
+            statement: envelope.statement,
+            status: envelope.status ?? "proposed",
+            evidence: envelope.evidence ?? "",
+          },
+        }];
+
+      case "goal":
+        return [{
+          type: "data-goal",
+          id: `goal-${envelope.goal?.id ?? "current"}`,
+          data: { goal: envelope.goal ?? null, state: envelope.goal?.state ?? envelope.state ?? "unknown" },
+        }];
+
+      case "timer_tick":
+        return [{
+          type: "data-timer-tick",
+          id: `timer-${envelope.timer_id ?? "unknown"}-${envelope.tick_count ?? 0}`,
+          data: {
+            timerId: envelope.timer_id ?? "",
+            timerKind: envelope.timer_kind ?? "",
+            goalId: envelope.goal_id ?? "",
+            tickCount: envelope.tick_count ?? 0,
+            dueAtMs: envelope.due_at_ms ?? 0,
+            lastTickAtMs: envelope.last_tick_at_ms ?? 0,
+          },
+        }];
 
       default:
         return [];

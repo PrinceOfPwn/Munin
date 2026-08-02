@@ -290,3 +290,166 @@ describe("createTranslator - data-* parts", () => {
     expect(translate(makeEnvelope({ kind: "note", text: "" }))).toEqual([]);
   });
 });
+
+describe("createTranslator - autonomous modes (plan / goal / timers)", () => {
+  it("plan maps to a data-plan snapshot with goal + items", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({
+        kind: "plan",
+        sequence: 3,
+        goal: { id: "g-1", objective: "Map the target", state: "active" },
+        items: [
+          {
+            id: "p-1",
+            title: "Enumerate hosts",
+            status: "in_progress",
+            priority: "high",
+          },
+        ],
+        updated_at_ms: 1_700_000_000_000,
+      }),
+    );
+    expect(chunks).toEqual([
+      {
+        type: "data-plan",
+        id: "plan-run-x-3",
+        data: {
+          goal: { id: "g-1", objective: "Map the target", state: "active" },
+          items: [{ id: "p-1", title: "Enumerate hosts", status: "in_progress", priority: "high" }],
+          updatedAtMs: 1_700_000_000_000,
+        },
+      },
+    ]);
+  });
+
+  it("todo maps to a data-todo mutation with op + item + reason", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({
+        kind: "todo",
+        sequence: 4,
+        op: "complete",
+        item: { id: "p-1", title: "Enumerate hosts", status: "done" },
+        reason: "nmap finished",
+      }),
+    );
+    expect(chunks).toEqual([
+      {
+        type: "data-todo",
+        id: "todo-p-1-complete",
+        data: {
+          op: "complete",
+          item: { id: "p-1", title: "Enumerate hosts", status: "done" },
+          reason: "nmap finished",
+        },
+      },
+    ]);
+  });
+
+  it("todo without an item produces no chunks", () => {
+    const { translate } = createTranslator("run-x");
+    expect(translate(makeEnvelope({ kind: "todo", op: "add" }))).toEqual([]);
+  });
+
+  it("replan maps to a data-todo reset with reason + reset ids", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({ kind: "replan", sequence: 7, reason: "scope changed", reset_ids: ["p-1", "p-2"] }),
+    );
+    expect(chunks).toEqual([
+      {
+        type: "data-todo",
+        id: "replan-7",
+        data: { op: "replan", reason: "scope changed", resetIds: ["p-1", "p-2"] },
+      },
+    ]);
+  });
+
+  it("hypothesis maps to data-hypothesis with status + evidence", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({
+        kind: "hypothesis",
+        sequence: 5,
+        statement: "Host A runs Apache 2.4.49",
+        status: "confirmed",
+        evidence: "banner grab",
+      }),
+    );
+    expect(chunks).toEqual([
+      {
+        type: "data-hypothesis",
+        id: "hypothesis-Host A runs Apache 2.4.49-5",
+        data: {
+          statement: "Host A runs Apache 2.4.49",
+          status: "confirmed",
+          evidence: "banner grab",
+        },
+      },
+    ]);
+  });
+
+  it("hypothesis without a statement produces no chunks", () => {
+    const { translate } = createTranslator("run-x");
+    expect(translate(makeEnvelope({ kind: "hypothesis", status: "proposed" }))).toEqual([]);
+  });
+
+  it("goal maps to data-goal with the goal + state", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({
+        kind: "goal",
+        goal: { id: "g-1", objective: "Map the target", state: "active" },
+      }),
+    );
+    expect(chunks).toEqual([
+      {
+        type: "data-goal",
+        id: "goal-g-1",
+        data: {
+          goal: { id: "g-1", objective: "Map the target", state: "active" },
+          state: "active",
+        },
+      },
+    ]);
+  });
+
+  it("goal without a goal object still emits a data-goal with state fallback", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(makeEnvelope({ kind: "goal", state: "done" }));
+    expect(chunks[0]).toMatchObject({
+      type: "data-goal",
+      data: { goal: null, state: "done" },
+    });
+  });
+
+  it("timer_tick maps to data-timer-tick with scheduling fields", () => {
+    const { translate } = createTranslator("run-x");
+    const chunks = translate(
+      makeEnvelope({
+        kind: "timer_tick",
+        timer_id: "t-1",
+        timer_kind: "goal_eval",
+        goal_id: "g-1",
+        tick_count: 2,
+        due_at_ms: 1_700_000_000_000,
+        last_tick_at_ms: 1_699_999_000_000,
+      }),
+    );
+    expect(chunks).toEqual([
+      {
+        type: "data-timer-tick",
+        id: "timer-t-1-2",
+        data: {
+          timerId: "t-1",
+          timerKind: "goal_eval",
+          goalId: "g-1",
+          tickCount: 2,
+          dueAtMs: 1_700_000_000_000,
+          lastTickAtMs: 1_699_999_000_000,
+        },
+      },
+    ]);
+  });
+});
