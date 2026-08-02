@@ -276,7 +276,17 @@ def audited_tool(
             started_at = utc_now_iso()
             mode = mode_resolver(*args, **kwargs) if mode_resolver else str(kwargs.get("mode", "sync"))
             target = str(
-                kwargs.get("target") or kwargs.get("url") or kwargs.get("targets") or kwargs.get("cve_id") or ""
+                kwargs.get("target")
+                or kwargs.get("url")
+                or kwargs.get("targets")
+                or kwargs.get("cve_id")
+                or kwargs.get("indicator")
+                or kwargs.get("organization")
+                or kwargs.get("query")
+                or kwargs.get("resource")
+                or kwargs.get("domain")
+                or kwargs.get("cve_or_product")
+                or ""
             )
             source_context = "munin-mcp"
             trace_id = uuid.uuid4().hex[:8]
