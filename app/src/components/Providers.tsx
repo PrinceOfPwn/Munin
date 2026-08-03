@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, tanstack-query, react-query, client-component, use-effect, use-state, providers]
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";

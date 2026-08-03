@@ -1,3 +1,4 @@
+// tags: [utility-library, ai-sdk-v5, stream-hydration, use-chat, ai-sdk, vercel-ai, indexeddb, use-ref, use-browser-cache, use-memo, use-effect, use-munin-chat]
 ﻿import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "ai";
 import { DefaultChatTransport } from "ai";

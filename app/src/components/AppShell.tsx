@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, client-component, use-conversation-events, use-send-turn, use-effect, use-run-events, use-collab, use-state, app-shell]
 "use client";
 
 import { useEffect, useState } from "react";

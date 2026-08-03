@@ -1,3 +1,4 @@
+// tags: [utility-library, indexeddb, browser-cache, persistence, client-component, use-browser-cache, use-memo, use-effect, use-callback, use-context, use-state, t-e-r-m-i-n-a-l--m-a-r-k-e-r--s-t-a-t-e-s, browser-cache-provider, browser-cache-context]
 "use client";
 
 // -----------------------------------------------------------------------------

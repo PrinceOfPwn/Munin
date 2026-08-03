@@ -1,3 +1,4 @@
+// tags: [api-route, bff-proxy, server-side, ai-sdk, vercel-ai, use-chat, b-a-c-k-e-n-d, g-e-t, d-o-t-t-e-d--k-i-n-d--m-a-p, p-o-s-t]
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { UIMessageChunk } from "ai";
 import { NextRequest, NextResponse } from "next/server";

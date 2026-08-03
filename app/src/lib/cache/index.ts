@@ -1,3 +1,4 @@
+// tags: [utility-library, indexeddb, browser-cache, persistence, use-browser-cache]
 // -----------------------------------------------------------------------------
 // cache — browser-side cache layer for the GUI conversation experience.
 //

@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, goal-part]
 import { Target } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";

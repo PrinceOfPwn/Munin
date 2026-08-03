@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, lucide-icons, client-component, dialog, dialog-close, dialog-trigger, dialog-description, dialog-footer, dialog-content, dialog-header, dialog-overlay, dialog-title, dialog-portal]
 "use client";
 
 import * as React from "react";

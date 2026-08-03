@@ -1,3 +1,4 @@
+// tags: [utility-library]
 /**
  * Tests for the v5 UIMessageStream translator (pure function over backend
  * envelopes - emitted by /api/runs/:runId/events - to AI SDK v5 chunk shapes).

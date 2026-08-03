@@ -1,3 +1,4 @@
+// tags: [utility-library, tanstack-query, react-query, indexeddb, client-component, d-b--v-e-r-s-i-o-n, s-n-a-p-s-h-o-t--i-d, s-t-o-r-e--n-a-m-e, p-e-r-s-i-s-t-a-b-l-e--r-o-o-t-s, m-a-x--a-g-e--m-s, a-c-t-o-r--m-a-r-k-e-r, d-b--n-a-m-e]
 "use client";
 
 import {

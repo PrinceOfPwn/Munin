@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, lucide-icons, client-component, use-callback, use-effect, use-ref, use-state, f-l-o-a-t-i-n-g--b-a-s-e, f-l-o-a-t-i-n-g--c-e-i-l-i-n-g, floating-window, d-e-f-a-u-l-t--m-a-x, d-e-f-a-u-l-t--m-i-n]
 "use client";
 
 /**

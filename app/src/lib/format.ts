@@ -1,3 +1,4 @@
+// tags: [utility-library]
 export function relativeTime(ts: number | string | Date | null | undefined): string {
   if (ts == null) return "—";
   const date =

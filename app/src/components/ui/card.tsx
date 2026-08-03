@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, card-header, card-description, card-content, card-footer, card-title, card]
 import * as React from "react";
 import { cn } from "@/lib/utils";
 

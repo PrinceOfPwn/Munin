@@ -9,7 +9,7 @@ To facilitate context loading and searchability for AI agents and developers, th
 
 ## 1. Tagging Convention
 
-Every core source file in `munin/` must start with a tag header on the very first line of the file.
+Every core source file in `munin/` and `app/` must start with a tag header on the very first line of the file.
 
 ### Format by File Type
 
@@ -19,7 +19,11 @@ Every core source file in `munin/` must start with a tag header on the very firs
   ```
 - **JavaScript / TypeScript (`.js`, `.ts`, `.tsx`)**:
   ```typescript
-  // tags: [nextjs, component, ui, logs]
+  // tags: [layer:ui-component, ai-sdk-v5, tanstack-query, client-component, agent-console]
+  ```
+- **CSS (`.css`)**:
+  ```css
+  /* tags: [global-styles, tailwind-css] */
   ```
 - **Markdown (`.md`, `.mdx`)**:
   Add a `tags` array or comma-separated list in the YAML frontmatter:
@@ -43,7 +47,9 @@ When tagging files, select tags from the following standard categories to ensure
 | **Active Reconnaissance** | `active-recon`, `nmap`, `httpx`, `nuclei`, `sqlmap`, `hydra`, `smbmap` | Active network scanning, web crawling, service enumeration, vuln assessment. |
 | **Active Directory & LDAP** | `ldap`, `activedirectory`, `kerberos`, `kerberoasting`, `asrep-roasting` | LDAP schema-tolerant queries, domain topology dumping, ticket roasting attacks. |
 | **Offensive Tradecraft** | `payload`, `shellcode`, `injection`, `evasion`, `c2`, `persistence-tactic`, `privesc` | Malware mechanics, ROP obfuscation, process injection, userland EDR evasion. |
-| **Frontend & UI Console** | `web-ui`, `nextjs`, `react`, `component`, `theme`, `radix-ui`, `tailwind` | Next.js console, React components, state, tailwind tokens, Lucide icons. |
+| **Frontend Architecture** | `layer:bff-proxy`, `layer:ui-component`, `layer:ui-primitive`, `layer:react-hook`, `layer:cache-indexeddb`, `layer:data-part` | Capas estructurales de la aplicación Web GUI Next.js 15. |
+| **Frontend Tech & Libraries** | `app-router`, `nextjs-15`, `ai-sdk-v5`, `tanstack-query`, `indexeddb`, `browser-cache`, `zod-validation`, `lucide-icons`, `radix-ui`, `shadcn-ui` | Frameworks y dependencias clave del cliente React 18. |
+| **Frontend UI Surfaces** | `agent-console`, `app-shell`, `sidebar-nav`, `hitl-request-part`, `plan-part`, `chat-stream-part` | Vistas principales, consolas del operador y renderizadores de partes de chat. |
 | **CI/CD & Deployment** | `cicd`, `actions`, `scripts`, `smoke-test`, `tunnel` | GitHub Actions workflows, proxy configurations, local tunnel managers. |
 | **Memory & Coordination** | `memory`, `episodic-memory`, `shared-intel`, `presence`, `coordination` | Agent short-term memory, shared indicators, coordination messages. |
 | **Autonomy & Workers** | `subagent`, `workflow`, `worker-fanout`, `beast-mode`, `hitl-approval` | Subagent creation, multi-step workflows, parallel fan-out, human-in-the-loop gates. |
@@ -58,6 +64,12 @@ git grep -l "tags:.*ldap"
 
 # Find all MCP tools
 git grep -l "tags:.*mcp-tool"
+
+# Find all frontend AI SDK v5 hooks and components
+git grep -l "tags:.*ai-sdk" app/
+
+# Find all browser cache / IndexedDB modules
+git grep -l "tags:.*indexeddb" app/
 
 # Find all database and state persistence files
 git grep -l "tags:.*persistence"

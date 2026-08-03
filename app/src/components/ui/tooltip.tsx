@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, client-component, tooltip, tooltip-content, tooltip-provider, tooltip-trigger]
 "use client";
 
 import * as React from "react";

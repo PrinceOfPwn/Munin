@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, client-component, tool-heartbeat-part]
 "use client";
 
 import { LoaderCircle } from "lucide-react";

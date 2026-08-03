@@ -1,3 +1,4 @@
+// tags: [generative-ui, renderer-registry, client-component]
 "use client";
 
 import dynamic from "next/dynamic";

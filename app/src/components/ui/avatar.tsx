@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, client-component, s-i-z-e, r-i-n-g, avatar]
 "use client";
 
 // Minimal Avatar primitive matching shadcn shape.  Uses first-initial fallback

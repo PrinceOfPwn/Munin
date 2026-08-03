@@ -1,3 +1,4 @@
+// tags: [typescript-types, domain-schema]
 export interface McpTool {
   name: string;
   description?: string;

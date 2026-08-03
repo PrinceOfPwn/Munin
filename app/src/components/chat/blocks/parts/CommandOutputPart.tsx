@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, client-component, command-output-part]
 "use client";
 
 import { Terminal, AlertTriangle, CheckCircle2 } from "lucide-react";
