@@ -70,6 +70,12 @@ jobs:
           path: ${{ runner.temp }}/hf-cache
           key: qwen3-5-4b-q4-k-m-ba06320255db
 
+      - name: Cache native llama-cpp-python wheel
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/llama-wheelhouse
+          key: llama-cpp-python-0.3.34-${{ runner.os }}-${{ runner.arch }}-py311-openblas-v1
+
       - name: Restore successful baseline marker
         id: baseline
         uses: actions/cache/restore@v4
@@ -78,6 +84,8 @@ jobs:
           key: munin-documentation-baseline-v2-agentic
 
       - name: Install agent graph and native CPU inference runtime
+        env:
+          LLAMA_WHEELHOUSE: ${{ runner.temp }}/llama-wheelhouse
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -86,12 +94,19 @@ jobs:
           python -m pip install \
             "huggingface-hub>=0.34,<2" \
             "langgraph>=1.2.10,<2"
-          CMAKE_ARGS="-DGGML_NATIVE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
-          CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
-            python -m pip install \
-              --no-cache-dir \
-              --no-binary=llama-cpp-python \
-              "llama-cpp-python==0.3.34"
+
+          mkdir -p "$LLAMA_WHEELHOUSE"
+          if ! compgen -G "$LLAMA_WHEELHOUSE/llama_cpp_python-0.3.34-*.whl" > /dev/null; then
+            CMAKE_ARGS="-DGGML_NATIVE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
+            CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
+              python -m pip wheel \
+                --no-deps \
+                --no-binary=llama-cpp-python \
+                --wheel-dir "$LLAMA_WHEELHOUSE" \
+                "llama-cpp-python==0.3.34"
+          fi
+          python -m pip install "$LLAMA_WHEELHOUSE"/llama_cpp_python-0.3.34-*.whl
+
           python - <<'PY'
           import huggingface_hub
           import langgraph
@@ -218,3 +233,4 @@ jobs:
           path: ${{ github.workspace }}/.audit-output/
           retention-days: 90
           if-no-files-found: warn
+          include-hidden-files: true
