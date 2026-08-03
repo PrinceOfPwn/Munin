@@ -1,4 +1,4 @@
-# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance, plan18-indexes]
+# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance, plan18-indexes, cancel-fence, request_cancel_fence, reject_human_requests_for_run, run.cancelling]
 """Durable production aggregate for conversations, operations, and identity.
 
 The existing ``SharedStateStore`` remains compatible with legacy MCP tools.
@@ -1062,6 +1062,7 @@ class ProductionStore:
         return {
             "id": row["id"], "conversation_id": row["conversation_id"], "state": row["state"], "attempt": int(row["attempt"]),
             "fencing_epoch": int(row["fencing_epoch"]), "assistant_message_id": row["assistant_message_id"], "updated_at_ms": int(row["updated_at_ms"]),
+            "cancel_requested_at_ms": row["cancel_requested_at_ms"],
         }
 
     # ``claim_next_run`` was removed in Fase 2 (issue #9). The lease-based
@@ -1801,6 +1802,110 @@ class ProductionStore:
             self._append_event(conn, run_id=run_id, kind="run.cancelled", payload={"reason": "operator_request"}, actor_id=actor_id)
             self._audit(conn, actor_id=actor_id, action="run.cancelled", resource_type="run", resource_id=run_id, outcome="success")
             return {**self._run_dict(run), "state": "cancelled", "updated_at_ms": now}
+
+    def reject_human_requests_for_run(self, conn: Any, *, run_id: str, reason: str = "run_cancelling") -> int:
+        """Atomically reject every pending HITL request for one run.
+
+        Used by :meth:`request_cancel_fence` to close out standing
+        ``waiting_for_human`` requests when an operator requests durable
+        cancellation.  HITL rows are transitioned ``waiting`` → ``rejected``
+        with a durable ``human_request.resolved`` event so reconnecting
+        viewers see the rejection in replay.  Intended to be called inside
+        the caller's transaction; never opens its own.
+
+        Returns the number of requests that were rejected.
+        """
+        now = _now_ms()
+        pending = conn.execute(
+            "SELECT * FROM human_requests WHERE run_id=? AND state='waiting'",
+            (run_id,),
+        ).fetchall()
+        rejected = 0
+        for row in pending:
+            request_id = str(row["id"])
+            response = {"choice": "cancel", "guidance": reason, "actor_id": None}
+            conn.execute(
+                "UPDATE human_requests SET state='rejected',response_json=?,resolved_at_ms=? "
+                "WHERE id=? AND state='waiting'",
+                (_json(response), now, request_id),
+            )
+            scope = json.loads(row["scope_json"] or "{}") if isinstance(row["scope_json"], (str, bytes)) else {}
+            actions = scope.get("actions") if isinstance(scope, dict) else []
+            if not isinstance(actions, list):
+                actions = []
+            action_rows = [action for action in actions if isinstance(action, dict)]
+            action_names = [str(action.get("name") or "unknown") for action in action_rows]
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="human_request.resolved",
+                payload={
+                    "human_request_id": request_id,
+                    "request_id": request_id,
+                    "choice": "cancel",
+                    "resolution": "rejected",
+                    "tool_name": action_names[0] if len(action_names) == 1 else "multiple_tools",
+                    "args": {"actions": action_rows},
+                    "guidance": reason,
+                },
+            )
+            rejected += 1
+        return rejected
+
+    def request_cancel_fence(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        """Set the ``cancel_requested_at_ms`` fence marker without a terminal transition.
+
+        Plan PR-2A durable cancellation contract: the operator-or-API request
+        records a fence timestamp on the ``agent_runs`` row and atomically
+        rejects any pending HITL requests for the run, but the run STAYS in its
+        current non-terminal state.  The detached executor observes the fence
+        at its next step boundary and performs the terminal ``run.cancelled``
+        transition itself (PR-2B), which keeps the durable event log as the
+        single source of truth and avoids racing the live supervisor loop.
+
+        Returns the run row with ``cancel_requested_at_ms`` populated.  For a
+        run already in a terminal state the row is returned unchanged and no
+        fence marker is written (``POST /api/chat/{run_id}/cancel`` maps that
+        case to a 200 response).
+        """
+        with self._transaction() as conn:
+            run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+            if str(run["state"]) in FINAL_RUN_STATES:
+                # Already terminal — return the snapshot WITHOUT touching the
+                # fence marker so a reconnecting client sees the real state.
+                return {**self._run_dict(run), "cancel_requested_at_ms": run["cancel_requested_at_ms"]}
+            now = _now_ms()
+            conn.execute(
+                "UPDATE agent_runs SET cancel_requested_at_ms=?,state_version=state_version+1,updated_at_ms=? "
+                "WHERE id=? AND state NOT IN ('completed','failed','interrupted','cancelled')",
+                (now, now, run_id),
+            )
+            self.reject_human_requests_for_run(conn, run_id=run_id, reason="run_cancelling")
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="run.cancelling",
+                payload={"reason": "operator_request", "requested_at_ms": now},
+                actor_id=actor_id,
+            )
+            self._audit(
+                conn,
+                actor_id=actor_id,
+                action="run.cancel_requested",
+                resource_type="run",
+                resource_id=run_id,
+                outcome="success",
+                metadata={"cancel_requested_at_ms": now},
+            )
+            return {
+                **self._run_dict(run),
+                "state": "cancelling",
+                "cancel_requested_at_ms": now,
+                "updated_at_ms": now,
+            }
 
     def retry_run(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         """Create a new attempt without mutating the original run or its events."""
@@ -3374,6 +3479,25 @@ class MuninStore:
             return self._hot.request_run_cancellation(**kwargs)
         # Already migrated — return the durable snapshot.
         return self._durable.request_run_cancellation(**kwargs)
+
+    def request_cancel_fence(self, **kwargs: Any) -> dict[str, Any]:
+        """Fence-route a durable cancel request to the backend that owns the run.
+
+        Active (non-terminal) runs live in the hot backend; runs already
+        migrated to durable are returned unchanged (PR-2A returns 200 for an
+        already-terminal run without writing the fence marker).  Participant
+        hydration mirrors the legacy :meth:`request_run_cancellation` path so
+        the underlying auth check succeeds against the hot mirror.
+        """
+        actor_id = kwargs.get("actor_id")
+        run_id = kwargs.get("run_id")
+        with self._hot._read_only() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT conversation_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if row and actor_id:
+                self._hydrate_hot_participant(actor_id=actor_id, conversation_id=str(row["conversation_id"]))
+        if row:
+            return self._hot.request_cancel_fence(**kwargs)
+        return self._durable.request_cancel_fence(**kwargs)
 
     def retry_run(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         # Look up the source run in either backend; migrated runs live in

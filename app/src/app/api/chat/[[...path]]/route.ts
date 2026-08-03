@@ -1,4 +1,4 @@
-// tags: [api-route, bff-proxy, server-side, ai-sdk, vercel-ai, use-chat, b-a-c-k-e-n-d, g-e-t, d-o-t-t-e-d--k-i-n-d--m-a-p, p-o-s-t]
+// tags: [api-route, bff-proxy, server-side, ai-sdk, vercel-ai, use-chat, b-a-c-k-e-n-d, g-e-t, d-o-t-t-e-d--k-i-n-d--m-a-p, p-o-s-t, cancel-proxy, PR-2C]
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { UIMessageChunk } from "ai";
 import { NextRequest, NextResponse } from "next/server";
@@ -286,6 +286,71 @@ async function forwardOperatorGuidance(
  */
 export async function POST(request: NextRequest) {
   const pathname = new URL(request.url).pathname;
+
+  // PR-2C: durable run cancellation.  Forwarded to the Python
+  // ``/api/chat/{run_id}/cancel`` endpoint; the response is a small JSON
+  // object (202 cancelling / 200 terminal / 404 / 403), never an SSE stream,
+  // so it bypasses the translator path.  Always forwards auth + CSRF so the
+  // server-side participant/CSRF check stays authoritative.
+  const cancelMatch = pathname.match(/\/api\/chat\/([^/]+)\/cancel$/);
+  if (cancelMatch) {
+    let cancelBody: Record<string, unknown> = {};
+    // The client sends an empty body; tolerate non-JSON / parse failure.
+    try {
+      cancelBody = (await request.json()) as Record<string, unknown>;
+    } catch {
+      // Empty body is valid — Python handler reads no JSON.  Log the
+      // malformed-but-acceptable case so a regression is never silent.
+      console.error({
+        context: "cancel.body",
+        error: new Error("malformed cancel JSON body (ignored)"),
+        meta: { runId: decodeURIComponent(cancelMatch[1]) },
+        ts: new Date().toISOString(),
+      });
+    }
+    try {
+      const res = await fetch(
+        `${BACKEND}/api/chat/${encodeURIComponent(decodeURIComponent(cancelMatch[1]))}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...Object.fromEntries(forwardAuthHeaders(request)),
+          },
+          body: JSON.stringify(cancelBody),
+          cache: "no-store",
+        },
+      );
+      let parsed: Record<string, unknown> = {};
+      const raw = await res.text();
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        // Non-JSON 5xx body — surface the raw text so the operator sees it.
+        parsed = { error: { message: raw || `cancel failed (${res.status})` } };
+      }
+      if (!res.ok) {
+        const message =
+          (typeof parsed?.error === "object" && parsed?.error && "message" in (parsed.error as Record<string, unknown>)
+            ? String((parsed.error as { message?: unknown }).message ?? "")
+            : "") || `cancel failed (${res.status})`;
+        return NextResponse.json({ error: message }, { status: res.status });
+      }
+      return NextResponse.json(parsed, { status: res.status });
+    } catch (err) {
+      console.error({
+        context: "cancel.proxy",
+        error: err,
+        meta: { runId: decodeURIComponent(cancelMatch[1]) },
+        ts: new Date().toISOString(),
+      });
+      return NextResponse.json(
+        { error: `backend unreachable: ${String(err)}` },
+        { status: 502 },
+      );
+    }
+  }
+
   const guidanceMatch = pathname.match(/\/api\/chat\/([^/]+)\/guidance$/);
   if (guidanceMatch) {
     let guidanceBody: { body?: unknown; guidance?: unknown; target_agent_id?: unknown };

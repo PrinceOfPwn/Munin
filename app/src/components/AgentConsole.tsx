@@ -1,4 +1,4 @@
-// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon]
+// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui]
 "use client";
 
 import {
@@ -18,9 +18,10 @@ import {
   Pencil,
   Send,
   Sparkles,
-  Square,
   TerminalSquare,
+  Unplug,
   WifiOff,
+  XCircle,
   Zap,
 } from "lucide-react";
 import type {
@@ -76,7 +77,8 @@ import {
   useMuninChat,
 } from "@/lib/aiChat";
 import { useConversations } from "@/lib/queries";
-import { productionApi, type ProviderProfile } from "@/lib/production-api";
+import { cancelRun, productionApi, type ProviderProfile } from "@/lib/production-api";
+import { logError } from "@/lib/logError";
 import { cn, formatDuration, isTerminalRun } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -654,6 +656,68 @@ function useElapsedSeconds(active: boolean): number {
 }
 
 // ---------------------------------------------------------------------------
+// Cancel durable run button (distinct from Detach)
+// ---------------------------------------------------------------------------
+//
+// PR-2C contract:
+//   * Shown whenever a run is active (queued/running/waiting_for_human/
+//     cancelling).  A terminal run hides it.
+//   * ``idle`` → "Cancel", enabled.  Posts ``/api/chat/{run_id}/cancel``;
+//     on 202 ACK the parent flips ``cancelState`` to ``canceling``.
+//   * ``canceling`` → "Canceling…" with a spinner, disabled.  This is the
+//     truthful "we asked the server to cancel; the executor is observing
+//     the fence" state.  We do NOT pretend the run is cancelled until the
+//     durable SSE emits ``state: 'cancelled'``.
+//   * ``canceled`` → "Canceled" with a check, disabled.  Reached only when
+//     the SSE ``run.cancelled`` event arrives.
+//   * ``error`` → "Cancel" re-enabled so the operator can retry after a
+//     4xx/5xx (logged via ``logError`` upstream).
+function CancelButton({
+  state,
+  runActive,
+  onClick,
+}: {
+  state: "idle" | "requested" | "canceling" | "canceled" | "error";
+  runActive: boolean;
+  onClick: () => void;
+}) {
+  if (!runActive && state === "idle") return null;
+
+  const canceling = state === "canceling" || state === "requested";
+  const canceled = state === "canceled";
+
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      disabled={canceling || canceled}
+      title={
+        canceled
+          ? "Run cancelled"
+          : canceling
+            ? "Canceling the durable run; waiting for the executor to observe the fence"
+            : "Cancel the durable run (the operator reader detaches, the server stops the run)"
+      }
+      className={cn(
+        "shrink-0",
+        canceled ? "border-success/40 text-success" : "border-danger/50 text-danger hover:bg-danger/10",
+      )}
+    >
+      {canceling ? (
+        <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+      ) : canceled ? (
+        <CheckCircle className="h-3.5 w-3.5" />
+      ) : (
+        <XCircle className="h-3.5 w-3.5" />
+      )}
+      {canceling ? "Canceling…" : canceled ? "Canceled" : "Cancel"}
+    </Button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Console header (title + status + archive + inline run insight)
 // ---------------------------------------------------------------------------
 
@@ -667,6 +731,8 @@ function ConsoleHeader({
   lastToolName,
   isStreaming,
   onStop,
+  onCancel,
+  cancelState,
   providerProfiles,
   providerBusy,
   onActivateProvider,
@@ -684,6 +750,9 @@ function ConsoleHeader({
   lastToolName: string | null;
   isStreaming: boolean;
   onStop: () => void;
+  onCancel: () => void;
+  /** idle | requested | canceling | canceled | error */
+  cancelState: "idle" | "requested" | "canceling" | "canceled" | "error";
   providerProfiles: ProviderProfile[];
   providerBusy: boolean;
   onActivateProvider: (profileId: string) => Promise<void>;
@@ -793,11 +862,16 @@ function ConsoleHeader({
             variant="outline"
             size="sm"
             onClick={onStop}
-            title="Stop streaming and leave the durable run recoverable"
+            title="Detach the local reader; the durable run keeps running in the background"
           >
-            <Square className="h-3.5 w-3.5" /> Stop
+            <Unplug className="h-3.5 w-3.5" /> Detach
           </Button>
         )}
+        <CancelButton
+          state={cancelState}
+          runActive={isStreaming && runState !== null && !isTerminalRun(runState ?? "")}
+          onClick={onCancel}
+        />
         <ProviderSwitcher
           profiles={providerProfiles}
           busy={providerBusy}
@@ -963,6 +1037,68 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   );
   const elapsedSeconds = useElapsedSeconds(isStreaming);
 
+  // PR-2C durable cancel UI state.  The SSE ``data-run-state`` part is the
+  // source of truth for the terminal transition; we only render "Canceled"
+  // once the server has actually finalised the run (not on the 202 ACK).
+  const [cancelState, setCancelState] = useState<
+    "idle" | "requested" | "canceling" | "canceled" | "error"
+  >("idle");
+
+  // Reset cancel UI when the active run id changes (new turn → fresh button).
+  useEffect(() => {
+    setCancelState("idle");
+  }, [insight.activeRunId]);
+
+  // Flip to ``canceled`` ONLY when the durable SSE emits state: cancelled.
+  // ``cancelling`` (the fence marker ACK) is shown through ``canceling``.
+  useEffect(() => {
+    if (insight.runState === "cancelled") {
+      setCancelState("canceled");
+    } else if (insight.runState === "cancelling" && cancelState === "idle") {
+      // A reconnect arrived mid-cancel (server replayed run.cancelling).
+      setCancelState("canceling");
+    }
+    // Reset the button back to idle if the run terminates a different way
+    // (completed/failed/interrupted) — we never showed "Canceled" anyway.
+    if (
+      insight.runState &&
+      insight.runState !== "cancelled" &&
+      insight.runState !== "cancelling" &&
+      isTerminalRun(insight.runState) &&
+      cancelState !== "idle" &&
+      cancelState !== "canceled"
+    ) {
+      setCancelState("idle");
+    }
+  }, [insight.runState, cancelState]);
+
+  async function handleCancelRun() {
+    const runId = insight.activeRunId;
+    if (!runId) return;
+    setCancelState("requested");
+    try {
+      const result = await cancelRun(runId);
+      if (result.status === "cancelling") {
+        // 202 ACK — the executor is observing the fence; switch to the
+        // truthful ``canceling`` state until the SSE ``cancelled`` lands.
+        setCancelState("canceling");
+        toast.success("Cancel requested; the durable run will stop at the next step");
+      } else {
+        // 200 — the run was already terminal. The SSE already rendered the
+        // terminal state; keep the button truthful.
+        setCancelState(result.status === "cancelled" ? "canceled" : "idle");
+      }
+    } catch (error) {
+      logError({
+        context: "cancel",
+        error,
+        meta: { runId },
+      });
+      setCancelState("error");
+      toast.error(error instanceof Error ? error.message : "Could not cancel the durable run");
+    }
+  }
+
   // Once the stream reveals the durable goal id, keep it so later turns
   // attach to the same goal instead of creating a duplicate.
   useEffect(() => {
@@ -1105,6 +1241,8 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         lastToolName={insight.lastToolName}
         isStreaming={isStreaming}
         onStop={stop}
+        onCancel={handleCancelRun}
+        cancelState={cancelState}
         providerProfiles={providerProfiles}
         providerBusy={providerBusy}
         onActivateProvider={activateProvider}
