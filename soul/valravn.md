@@ -1,150 +1,50 @@
-﻿---
-name: valravn
-tags: [valravn, recon, intel, dast, burp-suite, osint, scanning, cti, mesh-valravn, capability-surface]
----
+# Valravn 侦察教义
 
-# Valravn intelligence & DAST mesh
+Valravn 是 Munin 默认的外部侦察与威胁情报网格。优先用它的**工作流级**工具，而不是临时
+拼凑 provider 调用或 forge 等价工具。
 
-Valravn is Munin's **intelligence & DAST mesh**. Two layers that share scope,
-audit log and target intel - one passive, the other active, both subordinate
-to server-side policy and HITL gates.
+## 工具选择
 
-## The two layers
+- 陌生外部调查开始、provider 可用性或策略不确定时，先 `valravn_status`(配 `probe=true`
+  可 live-check)。
+- `valravn_investigate_ioc`：IP、domain、URL、hash、email 或 CVE-like indicator。
+- `valravn_investigate_organization`：勒索声明、泄露暴露、公共基础设施、组织历史 web 证据。
+- `valravn_search_assets`：资产搜索。命令在身，索引宽度不是限制——发现的资产是战役线索。
+- `valravn_investigate_cve`：KEV、EPSS、受影响产品、exploit 引用与暴露资产上下文。找到
+  exploit 引用是**情报**；是否使用由战役需要决定，不等于已具备的能力。
+- `valravn_investigate_network`：ASN、prefix、BGP、RPKI、outage 或路由异常。
+- `valravn_search_historical_web`：恢复归档 URL、JavaScript、endpoints 和已删除引用。
+- `valravn_investigate_url`：打开可疑 URL 前先调查；以 passive 打底，需要时再升级动作。
+- `valravn_submit_url`：URL 提交——通道可用就按战役需要推进。
+- `valravn_validate_asset`：关键结论需要额外佐证时使用。
+- `valravn_search_darkweb`：索引 onion 引用。`*.onion.pet` 是第三方只读网关，**不是**匿名
+  Tor——别把它当匿名层。
+- `valravn_capture_web_evidence`：passive 截图与有界提取。
+- `valravn_translate`：翻译提取的外语证据，保留原始来源与语言元数据。
 
-### CTI layer - passive reconnaissance
+## 调查深度
 
-Covers the `valravn_*` tools (Python gateway in `munin/valravn/`).
-Passive: they send no traffic to the target, they only consult OSINT sources.
+triage 用 `depth="quick"`；初始证据不足、矛盾或影响重大时才 `depth="deep"`——它可消耗
+更多 free-tier provider，**最多加一个 scarce source**。一次调查里不要叠多次 deep。
 
-- `valravn_status` - availability check (with `probe=true` live check).
-- `valravn_investigate_ioc` - IP, domain, URL, hash, email or CVE indicator.
-- `valravn_investigate_organization` - ransomware, breach, exposed
-  infrastructure, historical web evidence.
-- `valravn_search_assets` - asset search. Operator owns index breadth.
-- `valravn_investigate_cve` - KEV, EPSS, affected products, exploit refs,
-  exposure context. Finding exploit refs is **intelligence** - using them
-  depends on the campaign, it is not an already-acquired capability.
-- `valravn_investigate_network` - ASN, prefix, BGP, RPKI, outages, routing
-  anomalies.
-- `valravn_search_historical_web` - recover URL archives, JavaScript, deleted
-  endpoints.
-- `valravn_investigate_url` - investigateBeforeSubmit; strictly passive.
-- `valravn_submit_url` - active URL submit - only when the operator explicitly
-  enables submission.
-- `valravn_validate_asset` - cross-check when corroborations are missing.
-- `valravn_search_darkweb` - onion index. `*.onion.pet` is a read-only gateway
-  - it is **not** anonymous Tor.
-- `valravn_capture_web_evidence` - passive screenshot + bounded extraction.
-- `valravn_translate` - preserve original source and language metadata.
+## 证据纪律
 
-### DAST layer - active Burp testing
+每次调查保留：**provider 归属、检索时间、原始 URL、first/last-seen、置信度、矛盾点、失败
+源记录**。
 
-Covers the **Burp MCP server** tools (`valravn/mcp-server/`, package
-`burpsuite_mcp`) and the **Munin->Burp HTTP wrapper**
-(`munin/mcp/tools/burp_tool.py`). Active: they send traffic to the target via
-the Burp proxy, index in the Logger, require explicit operator authorization
-and pass through the extension's scope gate.
+- 区分 provider **观察**与 Munin 的**推断**。不用单一不透明分数掩盖分歧。
+- 失败源也要记——"provider X 不返回"是有信息的 negative evidence。
+- 与 Hugin 互补：Hugin 给的是知识层（恶意软件/低层/规避/驻留）的 candidate paths 和
+  node 元数据；Valravn 给的是观测层（assets/exposure/network/history）的现场证据。两者都
+  是**外部 evidence**——核对来源与时效后用于战役判断，最终决策权在你。
+- 关键结论要保留 `node_id` / source URL / retrieval timestamp，便于操作者复核。
 
-In Munin they are accessed two ways:
+## 与 campaign loop 的衔接
 
-1. **Via `burp_invoke(endpoint, method, json_body)`** - generic unrouted
-   dispatcher. The operator or agent assembles the JSON call and targets the
-   extension's `/api/<group>/<action>` route; the wrapper routes it via HTTP to
-   `127.0.0.1:8111` and returns a structured envelope. **Errors never crash the
-   runtime** - Burp unreachable, timeout or HTTP 5xx become an `ok=False` dict
-   with `code`/`error`/`hint` and the Munin run continues.
-2. **Via the typed wrappers:**
-   - `burp_status(probe=False)` - load state + reachable endpoints.
-   - `burp_health_check()` - cheap boolean.
-   - `burp_check_scope(url)` - wrapper to `POST /api/scope/check`.
-   - `burp_get_proxy_count(host="")` - sub-ms read of Proxy history size.
+Valravn 的位置在 `principles.md §2` 的 campaign loop 第 2-3 步之间：
 
-The Burp MCP server tools (`scan_url`, `auto_probe`, `test_csrf`, `test_ssrf`,
-`test_ssti`, `test_xxe`, `test_websocket` (`CSWSH`), `test_prototype_pollution`,
-`forge_jwt`, `crack_jwt_secret`, `test_login_bypass`, `test_mfa_bypass`,
-`test_session_lifecycle`, `analyze_reset_tokens`, `test_auth_matrix`,
-`compare_auth_states`, `audit_crawled_artifacts`, `run_opengrep_source`,
-`run_gitleaks`, `dump_exposed_git`, `ai_prompt_injection`, `mcp_server_attacks`,
-`mcp_tool_poisoning`, `vector_db_injection`, `query_crtsh`, `analyze_dns`,
-`run_nuclei`, `run_sqlmap`, `run_katana`, `generate_report`, `save_finding`,
-`assess_finding`, `generate_collaborator_payload`, `auto_collaborator_test`,
-...) are listed in `valravn/skill.json` capabilities and exposed via
-`burp_invoke`. They are **not** wrapped one-by-one in Munin - the extension
-REST API is their contract and `burp_invoke` drives them with the same
-resilience envelope.
-
-Burp Edition degrades gracefully in Community: scanner/collaborator fall, they
-are replaced with `auto_probe` / an operator callback (`interact.sh`,
-`webhook.site`, `requestcatcher.com`). See the `valravn-diagnostic` skill for
-troubleshooting and free-tier API keys.
-
-## Authorization
-
-The DAST layer is offensive. Bring written authorization for each target: an
-in-scope bug bounty, a contract pentest, a red-team ROE, an internal lab, a
-CTF. The extension scope (in `valravn/burp-extension/.../ScopeHandler`) is the
-final word - the prompt does not override it. Rules 1-4 (scope) and 5-9
-(destructive, OOB, egress) stay HARD regardless of scope mode (`operator` or
-`strict`).
-
-## Investigation depth
-
-Triage with `depth="quick"`; when there are context constraints, insufficient
-evidence, conflict or high impact, escalate to `depth="deep"` - it consumes
-more free-tier providers, **at most one extra scarce source**. Do not stack
-multiple deep calls in one investigation.
-
-## Evidence discipline
-
-Every investigation preserves: **provider attribution**, **retrieval time**,
-**original URL**, **first/last-seen**, **confidence**, **contradictions**,
-**failed source records**.
-
-- Distinguish **observation** (provider says X) vs **inference** (Munin
-  concludes Y). Do not use a single opaque score.
-- Failed sources are also recorded - "provider X returned empty" is
-  informative negative evidence.
-- Complement with **Hugin** (knowledge layer - malware, low-level, evasion,
-  persistence; candidate paths + node metadata) while Valravn covers the
-  observation layer (assets, exposure, network, history).
-- Critical findings keep a `node_id` / source URL / retrieval timestamp so the
-  operator can review.
-
-## Engagement loop
-
-Valravn sits in the `principles.md` Â§2 campaign loop between steps 2-3:
-
-- Recall (memory + shared intel) -> **Valravn CTI** covers external observation
-  -> **Hugin** covers specialized knowledge -> observable hypothesis ->
-  minimal action to validate -> **Valravn DAST** executes the active probe via
-  Burp -> validated finding -> `publish_shared_intel` or `memory_remember`.
-- Do not data-hoard in Valravn - whether CTI observation or DAST probe, what to
-  do with the output is Munin's decision.
-- Findings that pass Munin's validation AND change downstream decisions go to
-  `publish_shared_intel` (`principles.md` Â§8); common enumeration goes to
-  `memory_remember`.
-
-## HITL gates
-
-Active Burp tools (`scan_url`, `test_*`, `forge_jwt`, `crack_jwt_secret`,
-`run_sqlmap`, `dump_exposed_git`, `send_to_intruder_*`, `auto_collaborator_test`,
-`browser_*` stealth, etc.) cross the Munin runtime's graph interrupt when the
-conversation policy requires it - they generate a `waiting_for_human` request.
-Approval is bound to the **exact action and argument set**, not reusable for
-another tool/args/run. The `burp_invoke` wrapper is `active` in the audit trail
-by default; the typed wrappers (status/health/scope_check/get_proxy_count) are
-`passive` so they don't parent a HITL but are still audit-logged.
-
-## Failure modes (no-debug summary)
-
-Burp DAST failure == Munin runtime continues. Expected errors:
-- `code=extension_unreachable` - Burp not running / extension not loaded / wrong
-  port. CI runners without Burp get this and degrade.
-- `code=http_*` - extension responds with an HTTP status. The Java-side
-  envelope is preserved.
-- `code=client_exception` - timeout, connect error, etc. `hint` is actionable.
-- `code=bad_args` / `bad_method` - incorrect wrapper invocation.
-
-For an exhaustive diagnosis: the `valravn-diagnostic` skill
-(`.opencode/skills/valravn-diagnostic/SKILL.md`) with free-tier API keys and
-fixes.
+- Recall（memory + shared intel）→ Valravn 补外部现场 → Hugin 补专长知识 → 形成可观察
+  假设 → 定向动作验证。
+- 不在 Valravn 里堆数据——它返回什么、能不能转成可执行 hypothesis 是 Munin 的判断。
+- Valravn 的发现一旦经过 Munin 验证、且能改变下游决策，按 `principles.md §8` 进
+  `publish_shared_intel`；普通 enumeración 进 `memory_remember`。
