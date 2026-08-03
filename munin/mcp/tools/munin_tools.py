@@ -795,15 +795,15 @@ def munin_self_diagnose(run_id: str = "") -> dict[str, Any]:
 @MCP.tool()
 @audited_tool("munin_wake", "admin", lambda *a, **k: "sync")
 def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: str = "") -> dict[str, Any]:
-    """Wake a subagent to handle a task: enqueues the task AND spawns the runner subprocess.
+    """Wake a subagent to handle a task: enqueues it and updates presence.
 
     Previously this only inserted a row into ``agent_wake_queue`` — the corresponding
     ``python -m munin.subagents.runner`` process was never started, so the wake item
-    lived forever unclaimed. Now the call goes through :class:`Orchestrator.wake`
-    which enqueues the task, spawns a detached runner subprocess, and updates the
-    presence table. The runner picks the task up via ``claim_wake_item`` and
-    executes it. Result is delivered back via ``agent_messages`` (poll with
-    ``fetch_agent_messages``).
+    lived forever unclaimed. In v1.0.0 the runner subprocess does not ship, so the
+    call goes through :class:`Orchestrator.wake` which enqueues the task and updates
+    the presence table (``supervisor_v2`` path); it never spawns a child process.
+    A connected supervisor observes the queue and claims the item. Result is
+    delivered back via ``agent_messages`` (poll with ``fetch_agent_messages``).
 
     Accepts either a native subagent (``ldap_agent``, ``tool_forge``, ``graph_forge``)
     or the name of a forged graph in ``generated_graphs``.
@@ -849,7 +849,8 @@ def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: 
             },
         }
 
-    # Delegate to Orchestrator so enqueue + subprocess spawn happen together.
+    # Delegate to Orchestrator: enqueue + presence update (supervisor_v2 path; no
+    # subprocess in v1.0.0 — ``munin.subagents.runner`` does not ship).
     try:
         from ...core.orchestrator import Orchestrator  # noqa: PLC0415
         orch = Orchestrator(STATE)
@@ -860,15 +861,17 @@ def munin_wake(subagent: str, task_json: str = "{}", priority: int = 0, run_id: 
             "ok": False,
             "tool": "munin_wake",
             "mode": "sync",
-            "summary": f"failed to spawn runner for {subagent}",
-            "error": {"code": "spawn_failed", "message": str(exc)},
+            "summary": f"failed to enqueue wake for {subagent}",
+            "error": {"code": "wake_enqueue_failed", "message": str(exc)},
         }
 
+    pid = info.get("pid")
+    extra = f"pid={pid}" if pid else (info.get("reason") or "supervisor_v2")
     return {
         "ok": True,
         "tool": "munin_wake",
         "mode": "sync",
-        "summary": f"wake queued and runner spawned for {subagent} (pid={info.get('pid')})",
+        "summary": f"wake queued for {subagent} ({extra})",
         "data": {**info, "task": task},
     }
 
