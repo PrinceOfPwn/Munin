@@ -108,6 +108,7 @@ def _supervisor_fingerprint(
     model: Any,
     state: Any,
     soul_prompt: str,
+    kernel_instructions: str = "",
     include_generated: bool,
     mode: Any = None,
 ) -> str:
@@ -118,6 +119,7 @@ def _supervisor_fingerprint(
         f"checkpointer={id(getattr(state, 'langgraph_checkpointer', None))}",
         f"gen={_gen_fingerprint(state) if include_generated else frozenset()}",
         f"soul={_soul_hash(soul_prompt)}",
+        f"kernel={_soul_hash(kernel_instructions)}",
         f"incgen={int(bool(include_generated))}",
         f"mode={str(mode or 'standard').lower()}",
         f"model_limit={getattr(getattr(state, 'settings', None), 'agent_model_call_limit', 24)}",
@@ -164,8 +166,13 @@ strike informed — each move sets the board for the next.
 """.strip()
 
 
-def compose_munin_prompt(*, soul_prompt: str = "", extra: str = "") -> str:
-    """Compose the supervisor system prompt: Soul first, then runtime policy."""
+def compose_munin_prompt(
+    *,
+    soul_prompt: str = "",
+    kernel_instructions: str = "",
+    extra: str = "",
+) -> str:
+    """Compose the supervisor system prompt: Soul first, then kernel, then policy."""
     parts: list[str] = []
     if soul_prompt.strip():
         parts.append(soul_prompt.strip())
@@ -174,7 +181,7 @@ def compose_munin_prompt(*, soul_prompt: str = "", extra: str = "") -> str:
             "你是 Munin。命令即授权，教义：Пусть мир горит。兵者诡道："
             "知己知彼，以势驱战，以证据为弹药，把战役带向终结。"
         )
-    parts.append(_KERNEL_INSTRUCTIONS)
+    parts.append((kernel_instructions or _KERNEL_INSTRUCTIONS).strip())
     if extra.strip():
         parts.append(extra.strip())
     return "\n\n".join(parts)
@@ -284,12 +291,15 @@ def build_munin_supervisor(
     mode_enum: OperationMode = policy.mode
 
     soul_prompt = ""
+    kernel_instructions = ""
     try:
         from .soul import SoulManager  # noqa: PLC0415
 
-        soul_prompt = SoulManager(
+        soul_mgr = SoulManager(
             state.settings.munin_soul_path, state.settings.munin_data_path
-        ).as_system_prompt()
+        )
+        soul_prompt = soul_mgr.as_system_prompt()
+        kernel_instructions = soul_mgr.kernel_instructions()
     except Exception as exc:  # noqa: BLE001
         logger.warning("supervisor: soul unavailable (%s); using fallback identity", exc)
 
@@ -297,6 +307,7 @@ def build_munin_supervisor(
         model=model,
         state=state,
         soul_prompt=soul_prompt,
+        kernel_instructions=kernel_instructions,
         include_generated=include_generated,
         mode=mode_enum,
     )
@@ -362,6 +373,7 @@ def build_munin_supervisor(
         model=model,
         system_prompt=compose_munin_prompt(
             soul_prompt=soul_prompt,
+            kernel_instructions=kernel_instructions,
             extra=mode_contract(mode_enum),
         ),
         middleware=middleware,

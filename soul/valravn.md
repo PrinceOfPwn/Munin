@@ -1,4 +1,4 @@
----
+﻿---
 name: valravn
 tags: [valravn, recon, intel, dast, burp-suite, osint, scanning, cti, mesh-valravn, capability-surface]
 ---
@@ -112,7 +112,7 @@ Every investigation preserves: **provider attribution**, **retrieval time**,
 
 ## Engagement loop
 
-Valravn sits in the `principles.md` §2 campaign loop between steps 2-3:
+Valravn sits in the `principles.md` Â§2 campaign loop between steps 2-3:
 
 - Recall (memory + shared intel) -> **Valravn CTI** covers external observation
   -> **Hugin** covers specialized knowledge -> observable hypothesis ->
@@ -121,7 +121,7 @@ Valravn sits in the `principles.md` §2 campaign loop between steps 2-3:
 - Do not data-hoard in Valravn - whether CTI observation or DAST probe, what to
   do with the output is Munin's decision.
 - Findings that pass Munin's validation AND change downstream decisions go to
-  `publish_shared_intel` (`principles.md` §8); common enumeration goes to
+  `publish_shared_intel` (`principles.md` Â§8); common enumeration goes to
   `memory_remember`.
 
 ## HITL gates
