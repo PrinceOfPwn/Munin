@@ -303,7 +303,7 @@ describe("munin-ui/v1 schemas", () => {
 
   describe("discriminated union dispatch", () => {
     it("routes each known discriminator to its branch", () => {
-      const samples: Array<{ type: string }> = [
+      const samples: Array<{ type: string } & Record<string, unknown>> = [
         { type: "tool-invocation", toolCallId: "c", toolName: "t", state: "call" },
         { type: "command-output", toolName: "t", text: "x" },
         { type: "operational-trace", stage: "s", text: "x" },

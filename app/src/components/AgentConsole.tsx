@@ -170,6 +170,7 @@ interface CommandOutputData {
   toolName: string;
   stream: "stdout" | "stderr" | "meta";
   text: string;
+  sequence?: number;
   elapsedMs?: number;
   final?: boolean;
 }

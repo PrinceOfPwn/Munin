@@ -227,17 +227,6 @@ export type ReasoningPart = z.infer<typeof reasoningSchema>;
 export type PlanPart = z.infer<typeof planSchema>;
 export type GuidanceLifecyclePart = z.infer<typeof guidanceLifecycleSchema>;
 
-export {
-  toolInvocationSchema,
-  commandOutputSchema,
-  operationalTraceSchema,
-  hitlRequestSchema,
-  artifactSchema,
-  reasoningSchema,
-  planSchema,
-  guidanceLifecycleSchema,
-};
-
 // ---------------------------------------------------------------------------
 // Helper — pick the matching v1 schema for a raw ``data`` part coming through
 // the BFF translator. Returns ``null`` when the discriminator is unknown.

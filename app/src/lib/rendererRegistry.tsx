@@ -301,8 +301,11 @@ export function RendererFor({ dataPart, rendererKey, extraProps }: RendererForPr
   const finalProps = { ...(payload as Record<string, unknown>), ...(extraProps ?? {}) };
   return createElement(
     RendererErrorBoundary,
-    { rendererKey, fallbackElement: entry.fallbackElement },
-    createElement(Renderer, finalProps),
+    {
+      rendererKey,
+      fallbackElement: entry.fallbackElement,
+      children: createElement(Renderer, finalProps),
+    },
   );
 }
 
