@@ -25,6 +25,9 @@ on:
 
 permissions:
   contents: read
+  # Kept for compatibility with the retired GitHub Models inference endpoint.
+  # The runtime probes once and falls back locally when the service is unavailable.
+  models: read
 
 concurrency:
   group: documentation-audit-${{ github.event.pull_request.number || github.ref }}
@@ -32,12 +35,13 @@ concurrency:
 
 jobs:
   audit:
-    name: Complete-file review with local Qwen
+    name: Agentic complete-file review
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
       HF_HOME: ${{ runner.temp }}/hf-cache
       HF_HUB_DISABLE_TELEMETRY: "1"
+      GITHUB_TOKEN: ${{ github.token }}
       AUDIT_OUTPUT: ${{ github.workspace }}/.audit-output
       BASELINE_DIR: ${{ runner.temp }}/munin-documentation-baseline
     steps:
@@ -57,29 +61,35 @@ jobs:
       - name: Validate deterministic code
         run: |
           python -m compileall -q munin tests scripts
-          python -m py_compile scripts/documentation_audit.py tests/test_documentation_audit.py
+          python -m py_compile \
+            scripts/documentation_audit.py \
+            scripts/documentation_audit_agentic.py \
+            tests/test_documentation_audit.py \
+            tests/test_documentation_audit_agentic.py
           git diff --check
 
       - name: Cache pinned Qwen model
         uses: actions/cache@v4
         with:
           path: ${{ env.HF_HOME }}
-          key: qwen3-4b-q4-k-m-bc640142c66e
+          key: qwen3-5-4b-q4-k-m-ba06320255db
 
       - name: Restore successful baseline marker
         id: baseline
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.BASELINE_DIR }}
-          key: munin-documentation-baseline-v1
+          key: munin-documentation-baseline-v2-agentic
 
-      - name: Install native CPU inference runtime
+      - name: Install agent graph and native CPU inference runtime
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libopenblas-dev
           python -m pip install --upgrade pip
-          python -m pip install "huggingface-hub>=0.34,<2"
+          python -m pip install \
+            "huggingface-hub>=0.34,<2" \
+            "langgraph>=1.2.10,<2"
           CMAKE_ARGS="-DGGML_NATIVE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
           CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
             python -m pip install \
@@ -88,8 +98,10 @@ jobs:
               "llama-cpp-python==0.3.34"
           python - <<'PY'
           import huggingface_hub
+          import langgraph
           import llama_cpp
           print("huggingface_hub", huggingface_hub.__version__)
+          print("langgraph", getattr(langgraph, "__version__", "installed"))
           print("llama_cpp", llama_cpp.__version__)
           print(llama_cpp.llama_print_system_info().decode("utf-8", errors="replace"))
           PY
@@ -144,7 +156,7 @@ jobs:
             echo "pr_number=$pr_number"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Analyze selected files in full
+      - name: Analyze selected files with bounded context
         env:
           SCOPE: ${{ steps.range.outputs.scope }}
           BASE_SHA: ${{ steps.range.outputs.base }}
@@ -154,7 +166,6 @@ jobs:
         run: |
           set -euo pipefail
           args=(
-            run
             --config .munin-doc-audit.toml
             --scope "$SCOPE"
             --head "$HEAD_SHA"
@@ -164,7 +175,7 @@ jobs:
           )
           [ -z "$BASE_SHA" ] || args+=(--base "$BASE_SHA")
           [ -z "$PR_NUMBER" ] || args+=(--pr-number "$PR_NUMBER")
-          python scripts/documentation_audit.py "${args[@]}"
+          python scripts/documentation_audit_agentic.py "${args[@]}"
 
       - name: Prove tracked files are unchanged
         run: git diff --exit-code -- .
@@ -180,7 +191,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.BASELINE_DIR }}
-          key: munin-documentation-baseline-v1
+          key: munin-documentation-baseline-v2-agentic
 
       - name: Publish job summary
         if: always()
@@ -188,7 +199,10 @@ jobs:
           if [ -f "$AUDIT_OUTPUT/summary.md" ]; then
             cat "$AUDIT_OUTPUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
           else
-            printf '%s\n' "# Munin documentation audit" "The audit failed before producing a report." >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' \
+              "# Munin documentation audit" \
+              "The audit failed before producing a report." \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload structured reports and bilingual PR text
