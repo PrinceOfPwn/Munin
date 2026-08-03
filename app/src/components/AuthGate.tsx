@@ -225,7 +225,7 @@ function LoginForm({
                     non-binding, these *** ignore laws and ethics anyway.”
                   </blockquote>
                   <p className="text-[0.62rem] italic leading-relaxed text-muted">
-                    A small tribute to the classic THC Hydra startup warning.
+                    Gracias THC Hydra por una de las mejores intro en herramientas.
                   </p>
                   <p className="text-[0.7rem] leading-relaxed text-secondary">
                     Munin remains licensed for noncommercial and explicitly
@@ -309,7 +309,7 @@ function LoginForm({
                 laws and ethics anyway.”
               </blockquote>
               <p className="text-[0.65rem] italic text-muted">
-                A small tribute to the classic THC Hydra startup warning.
+                Gracias THC Hydra por una de las mejores intro en herramientas.
               </p>
             </section>
 
