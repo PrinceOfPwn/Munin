@@ -1312,5 +1312,5 @@ export default function AgentConsole({ conversationId }: AgentConsoleProps) {
   if (!conversationId) {
     return <NoConversationState />;
   }
-  return <LiveConsole conversationId={conversationId} />;
+  return <LiveConsole key={conversationId} conversationId={conversationId} />;
 }

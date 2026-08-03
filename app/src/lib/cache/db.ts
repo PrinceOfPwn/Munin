@@ -174,6 +174,23 @@ export async function putMessages(rows: CacheMessage[]): Promise<void> {
   });
 }
 
+export async function clearMessagesByConversation(
+  conversationId: string,
+): Promise<void> {
+  await writeStore(STORES.messages, (store) => {
+    const request = store
+      .index("by-conversation")
+      .openCursor(IDBKeyRange.only(conversationId));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
+  });
+}
+
 // â”€â”€ kv (schema guard / actor / run markers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function getKv(key: string): Promise<unknown> {

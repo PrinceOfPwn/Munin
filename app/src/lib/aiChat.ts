@@ -145,17 +145,32 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
           role: message.role,
           parts: message.parts,
         }));
-      } catch {
+      } catch (error) {
         // IndexedDB is optional; the server aggregate below is authoritative.
+        console.error({
+          context: "useMuninChat.cache.read",
+          error,
+          meta: { conversationId },
+          ts: Date.now(),
+        });
       }
 
       if (initial.length === 0) {
         try {
           const aggregate = await productionApi.conversation(conversationId);
           initial = aggregate.messages.map(serverMessageToUiMessage);
-        } catch {
+          if (initial.length > 0) {
+            cache.setMessages(conversationId, initial);
+          }
+        } catch (error) {
           // The live stream remains usable even if the initial timeline fetch
           // races authentication or a transient backend restart.
+          console.error({
+            context: "useMuninChat.aggregate.fetch",
+            error,
+            meta: { conversationId },
+            ts: Date.now(),
+          });
         }
       }
 

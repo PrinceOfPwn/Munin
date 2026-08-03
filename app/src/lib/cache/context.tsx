@@ -36,6 +36,7 @@ import {
   KV_SCHEMA_KEY,
   STORES,
   clearAllStores,
+  clearMessagesByConversation,
   deleteConversation,
   deleteKv,
   getAllConversations,
@@ -195,9 +196,16 @@ export function BrowserCacheProvider({ children }: { children: ReactNode }) {
         created_at: Date.now(),
         order: index,
       }));
-      void putMessages(rows).catch(() => {
-        // Cache is optional.
-      });
+      void clearMessagesByConversation(conversationId)
+        .then(() => putMessages(rows))
+        .catch((error) => {
+          console.error({
+            context: "cache.setMessages",
+            error,
+            meta: { conversationId, count: messages.length },
+            ts: Date.now(),
+          });
+        });
     },
     [],
   );
