@@ -18,7 +18,7 @@ intel.
   REST on `127.0.0.1:8111`), `mcp-server/` (Python 3.11+, `burpsuite_mcp`
   package, ~370 MCP tools, stdio transport, 151-file knowledge base). Apache-2.0
   upstream attribution retained in `valravn/NOTICE` per §4(d).
-- Docs rewritten from Chinese to Spanish with a mesh framing (Munin's CTI
+- Docs rewritten from Chinese to English with a mesh framing (Munin's CTI
   gateway for passive observation, Burp layer for active testing):
   `valravn/README.md`, `valravn/AGENTS.md`, `valravn/CLAUDE.md`,
   `valravn/docs/README.md`, `valravn/skill.json`.
@@ -42,11 +42,11 @@ intel.
   API-key table for every CTI provider, helper adjuncts table
   (CloakBrowser/uv/Java 21/ProjectDiscovery/interact.sh), build/setup steps,
   and pointers into CI for the runtime truth.
-- Soul: rewrote `soul/valravn.md` from Chinese to Spanish YAML-frontmatter form,
-  renamed to "Valravn intelligence & DAST mesh", added a "Capa DAST" section
-  distinguishes passive `valravn_*` (gateway) from active `burp_*` (wrapper) and
-  declares HITL gate semantics for active tools; same evidence-discipline and
-  `principles.md §2` campaign-loop integration as before.
+- Soul: rewrote `soul/valravn.md` from Chinese to English YAML-frontmatter form,
+  renamed to "Valravn intelligence & DAST mesh", added a "DAST layer" section
+  distinguishing passive `valravn_*` (gateway) from active `burp_*` (wrapper)
+  and declaring HITL gate semantics for active tools; same evidence-discipline
+  and `principles.md §2` campaign-loop integration as before.
 - Workflow `valravn-smoke.yml` extended with a second job
   `valravn-burp-import` running on `ubuntu-latest` without Burp / Java /
   CloakBrowser installed: AST-validate every `.py` under `valravn/`, JSON

@@ -215,7 +215,7 @@ jobs:
           assert "Apache-2.0" in notice.upper() or "Apache" in notice, "Apache-2.0 reference missing from NOTICE"
           print("NOTICE OK -- upstream attribution retained per Apache-2.0 §4(d)")
           PY
-      - name: Asegurar que .gitignore cubre .valravn-intel/ y el zip
+      - name: Assert .gitignore covers .valravn-intel/ and the zip
         run: |
           poetry run python - <<'PY'
           from pathlib import Path

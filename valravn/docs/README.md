@@ -1,68 +1,68 @@
-# Valravn — Documentación
+# Valravn - Documentation
 
-Esta carpeta contiene specs, plans y reviews históricos del desarrollo de la
-surface Burp DAST de la mesh Valravn. Los docs altos (README, AGENTS, CLAUDE,
-NOTICE, skill.json) están en `valravn/` (raíz del subtree); acá viven los
-documentos de diseño por fecha.
+This folder holds historical specs, plans and reviews for the development of
+the Valravn mesh's Burp DAST surface. High-level docs (README, AGENTS, CLAUDE,
+NOTICE, skill.json) live in `valravn/` (subtree root); per-date design
+documents live here.
 
-## Estructura
+## Structure
 
 ```
 docs/
-├── plans/       Implementation plans por milestone
+├── plans/       Implementation plans per milestone
 ├── specs/       Design specs (incl. agent council, KB refresh, autonomy frontier)
-├── reviews/     Gap reviews vs. competencia / releases externos
-└── *.md         Docs puntuales (gap analysis, agent status schema)
+├── reviews/     Gap reviews vs. competition / external releases
+└── *.md         One-off docs (gap analysis, agent status schema)
 ```
 
-## Convención
+## Convention
 
-Los archivos están date-prefixed (`YYYY-MM-DD-…`) para orden cronológico natural.
-Lenguaje original del cuerpo preservado salvo donde se anota reforma — los docs
-son snapshots de decisiones de diseño; el código es verdad. Para behavioral
-contracts ver `.. /CLAUDE.md` y `../AGENTS.md`. Para contribution rules ver
-`../README.md#contribuir`.
+Files are date-prefixed (`YYYY-MM-DD-...`) for natural chronological order.
+The original body language is preserved except where a rework is noted - the
+docs are snapshots of design decisions; code is truth. For behavioral contracts
+see `../CLAUDE.md` and `../AGENTS.md`. For contribution rules see
+`../README.md#contributing`.
 
-## Índice por milestone
+## Index by milestone
 
 ### Plans
 
-- `plans/2026-05-21-large-file-split-and-gap-fixes.md` — Plan: split de archivos
-  large + gap fixes. Implementación de scope-relax y KB expansion.
-- `plans/2026-05-21-scope-relax-and-kb-expansion.md` — Plan: scope-relax +
-  smart fuzzing + KB expansion en 2026 H2.
-- `plans/2026-05-22-grow-agent.md` — Plan: grow-agent, el orchestrator
-  per-domain.
-- `plans/2026-07-20-competitive-gap-closure.md` — Plan: roadmap de gap-closure
+- `plans/2026-05-21-large-file-split-and-gap-fixes.md` - Plan: large-file split
+  + gap fixes. Implementation of scope-relax and KB expansion.
+- `plans/2026-05-21-scope-relax-and-kb-expansion.md` - Plan: scope-relax +
+  smart fuzzing + KB expansion in 2026 H2.
+- `plans/2026-05-22-grow-agent.md` - Plan: grow-agent, the per-domain
+  orchestrator.
+- `plans/2026-07-20-competitive-gap-closure.md` - Plan: gap-closure roadmap
   (W33+).
-- `plans/2026-07-23-spec-D-p0-kb-refresh.md` — Plan: Spec D P0 — refresh KB
+- `plans/2026-07-23-spec-D-p0-kb-refresh.md` - Plan: Spec D P0 - KB refresh
   2026 H2.
 
 ### Specs
 
-- `specs/2026-05-21-large-file-split-and-gap-fixes-design.md` — Design spec del
-  plan large-file-split.
-- `specs/2026-05-21-scope-relax-and-kb-expansion-design.md` — Design spec scope
-  relax + smart fuzz + novel KB.
-- `specs/2026-05-22-grow-agent-design.md` — Design spec grow-agent.
-- `specs/2026-05-24-praetor-v1-milestone.md` — Plan v1.0 milestone (Praetor =
-  internal codename de la Burp extension).
-- `specs/2026-07-21-agent-council-design.md` — Spec 1: agent council +
+- `specs/2026-05-21-large-file-split-and-gap-fixes-design.md` - Design spec for
+  the large-file-split plan.
+- `specs/2026-05-21-scope-relax-and-kb-expansion-design.md` - Design spec for
+  scope-relax + smart fuzz + novel KB.
+- `specs/2026-05-22-grow-agent-design.md` - Design spec for grow-agent.
+- `specs/2026-05-24-praetor-v1-milestone.md` - v1.0 milestone plan (Praetor =
+  internal codename of the Burp extension).
+- `specs/2026-07-21-agent-council-design.md` - Spec 1: agent council +
   Real-Eyes/Handoff.
-- `specs/2026-07-23-enhancement-roadmap.md` — Roadmap 2026-07-23.
-- `specs/2026-07-23-spec-D-kb-refresh-2026h2.md` — Spec D: KB/payload/technique
+- `specs/2026-07-23-enhancement-roadmap.md` - Roadmap 2026-07-23.
+- `specs/2026-07-23-spec-D-kb-refresh-2026h2.md` - Spec D: KB/payload/technique
   refresh 2026 H2.
-- `specs/2026-07-23-spec-E-token-and-agent-efficiency.md` — Spec E: token &
+- `specs/2026-07-23-spec-E-token-and-agent-efficiency.md` - Spec E: token &
   agent-team efficiency.
-- `specs/2026-07-23-spec-F-autonomy-frontier.md` — Spec F: autonomy frontier.
+- `specs/2026-07-23-spec-F-autonomy-frontier.md` - Spec F: autonomy frontier.
 
 ### Reviews
 
-- `reviews/2026-07-25-cloud-and-burp-ai-at-gap-review.md` — Review: cloud
+- `reviews/2026-07-25-cloud-and-burp-ai-at-gap-review.md` - Review: cloud
   pentest / red-team + Burp AI / Burp AT gap (2026-07-25).
 
-### Sueltos
+### Standalone
 
-- `agent-status-schema.md` — Schema del agent status object.
-- `2026-08-02-competitive-gap-analysis.md` — Gap analysis verificado contra
+- `agent-status-schema.md` - Schema of the agent status object.
+- `2026-08-02-competitive-gap-analysis.md` - Gap analysis verified against the
   codebase (2026-08-02).

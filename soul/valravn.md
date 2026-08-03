@@ -5,60 +5,61 @@ tags: [valravn, recon, intel, dast, burp-suite, osint, scanning, cti, mesh-valra
 
 # Valravn intelligence & DAST mesh
 
-Valravn es la **mesh de inteligencia y DAST** de Munin. Dos capas que
-comparten scope, audit log y target intel — una passive, la otra active, ambas
-subordinadas a la policy server-side y a los gates de HITL.
+Valravn is Munin's **intelligence & DAST mesh**. Two layers that share scope,
+audit log and target intel - one passive, the other active, both subordinate
+to server-side policy and HITL gates.
 
-## Las dos capas
+## The two layers
 
-### Capa CTI — passive reconnaissance
+### CTI layer - passive reconnaissance
 
-Cubre los tools `valravn_*` (Python gateway en `munin/valravn/`).
-Pasivos: no envían tráfico al target, sólo consultan fuentes OSINT.
+Covers the `valravn_*` tools (Python gateway in `munin/valravn/`).
+Passive: they send no traffic to the target, they only consult OSINT sources.
 
-- `valravn_status` — availability check (con `probe=true` live-check).
-- `valravn_investigate_ioc` — IP, domain, URL, hash, email o CVE indicator.
-- `valravn_investigate_organization` — ransomware, breach, infra expuesta,
-  historical web evidence.
-- `valravn_search_assets` — asset search. Operator owns index breadth.
-- `valravn_investigate_cve` — KEV, EPSS, productos afectados, exploit refs,
-  exposure context. Encontrar exploit refs es **inteligencia** — usarlos o no
-  depende de la campaña, no es una capability ya adquirida.
-- `valravn_investigate_network` — ASN, prefix, BGP, RPKI, outages, routing
+- `valravn_status` - availability check (with `probe=true` live check).
+- `valravn_investigate_ioc` - IP, domain, URL, hash, email or CVE indicator.
+- `valravn_investigate_organization` - ransomware, breach, exposed
+  infrastructure, historical web evidence.
+- `valravn_search_assets` - asset search. Operator owns index breadth.
+- `valravn_investigate_cve` - KEV, EPSS, affected products, exploit refs,
+  exposure context. Finding exploit refs is **intelligence** - using them
+  depends on the campaign, it is not an already-acquired capability.
+- `valravn_investigate_network` - ASN, prefix, BGP, RPKI, outages, routing
   anomalies.
-- `valravn_search_historical_web` — recuperar archivos URL, JavaScript,
-  endpoints borrados.
-- `valravn_investigate_url` — investigaBeforeSubmit; estrictamente passive.
-- `valravn_submit_url` — URL submit activo — solo cuando el operator
-  explícitamente habilita submission.
-- `valravn_validate_asset` — cross-check cuando faltan corroboraciones.
-- `valravn_search_darkweb` — index onion. `*.onion.pet` es gateway read-only
-  — **no** es Tor anónimo.
-- `valravn_capture_web_evidence` — screenshot passive + extracción acotada.
-- `valravn_translate` — preservar source original y language metadata.
+- `valravn_search_historical_web` - recover URL archives, JavaScript, deleted
+  endpoints.
+- `valravn_investigate_url` - investigateBeforeSubmit; strictly passive.
+- `valravn_submit_url` - active URL submit - only when the operator explicitly
+  enables submission.
+- `valravn_validate_asset` - cross-check when corroborations are missing.
+- `valravn_search_darkweb` - onion index. `*.onion.pet` is a read-only gateway
+  - it is **not** anonymous Tor.
+- `valravn_capture_web_evidence` - passive screenshot + bounded extraction.
+- `valravn_translate` - preserve original source and language metadata.
 
-### Capa DAST — active Burp testing
+### DAST layer - active Burp testing
 
-Cubre los tools del **MCP server Burp** (`valravn/mcp-server/`, paquete
-`burpsuite_mcp`) y el **wrapper HTTP Munin→Burp** (`munin/mcp/tools/burp_tool.py`).
-Activos: envían tráfico al target via Burp proxy, indexan en Logger, requieren
-autorización explícita del operator y pasan por el scope gate de la extensión.
+Covers the **Burp MCP server** tools (`valravn/mcp-server/`, package
+`burpsuite_mcp`) and the **Munin->Burp HTTP wrapper**
+(`munin/mcp/tools/burp_tool.py`). Active: they send traffic to the target via
+the Burp proxy, index in the Logger, require explicit operator authorization
+and pass through the extension's scope gate.
 
-En Munin se acceden de dos formas:
+In Munin they are accessed two ways:
 
-1. **Vía `burp_invoke(endpoint, method, json_body)`** — dispatcher genérico
-   unrouted. El operator o el agente arman la llamada JSON y la dirección
-   `/api/<group>/<action>` del extension; el wrapper la enruta vía HTTP al
-   `127.0.0.1:8111` y devuelve un envelope estructurado. **Errres nunca tiran
-   el runtime** —Burp unreachable, timeout o HTTP 5xx vuelven un dict
-   `ok=False` con `code`/`error`/`hint` y el run Munin continúa.
-2. **Vía los wrappers typed:**
-   - `burp_status(probe=False)` — load state + reachable endpoints.
-   - `burp_health_check()` — bool barato.
-   - `burp_check_scope(url)` — wrapper a `POST /api/scope/check`.
-   - `burp_get_proxy_count(host="")` — sub-ms read del Proxy history size.
+1. **Via `burp_invoke(endpoint, method, json_body)`** - generic unrouted
+   dispatcher. The operator or agent assembles the JSON call and targets the
+   extension's `/api/<group>/<action>` route; the wrapper routes it via HTTP to
+   `127.0.0.1:8111` and returns a structured envelope. **Errors never crash the
+   runtime** - Burp unreachable, timeout or HTTP 5xx become an `ok=False` dict
+   with `code`/`error`/`hint` and the Munin run continues.
+2. **Via the typed wrappers:**
+   - `burp_status(probe=False)` - load state + reachable endpoints.
+   - `burp_health_check()` - cheap boolean.
+   - `burp_check_scope(url)` - wrapper to `POST /api/scope/check`.
+   - `burp_get_proxy_count(host="")` - sub-ms read of Proxy history size.
 
-Las tools del MCP server Burp (`scan_url`, `auto_probe`, `test_csrf`, `test_ssrf`,
+The Burp MCP server tools (`scan_url`, `auto_probe`, `test_csrf`, `test_ssrf`,
 `test_ssti`, `test_xxe`, `test_websocket` (`CSWSH`), `test_prototype_pollution`,
 `forge_jwt`, `crack_jwt_secret`, `test_login_bypass`, `test_mfa_bypass`,
 `test_session_lifecycle`, `analyze_reset_tokens`, `test_auth_matrix`,
@@ -67,83 +68,83 @@ Las tools del MCP server Burp (`scan_url`, `auto_probe`, `test_csrf`, `test_ssrf
 `mcp_tool_poisoning`, `vector_db_injection`, `query_crtsh`, `analyze_dns`,
 `run_nuclei`, `run_sqlmap`, `run_katana`, `generate_report`, `save_finding`,
 `assess_finding`, `generate_collaborator_payload`, `auto_collaborator_test`,
-…) están listadas en `valravn/skill.json` capabilities y expuestas vía
-`burp_invoke`. **No** se wrappean uno por uno en Munin — el extension REST API
-es su contrato y `burp_invoke` las dispara con la misma resilience envelope.
+...) are listed in `valravn/skill.json` capabilities and exposed via
+`burp_invoke`. They are **not** wrapped one-by-one in Munin - the extension
+REST API is their contract and `burp_invoke` drives them with the same
+resilience envelope.
 
-Burp Edition degrada elegante en Community: scanner/collaborator caen, se
-sustituyen con `auto_probe` / callback del operator (`interact.sh`,
-`webhook.site`, `requestcatcher.com`). Ver `valravn-diagnostic` skill para
-troubleshooting y API keys free tier.
+Burp Edition degrades gracefully in Community: scanner/collaborator fall, they
+are replaced with `auto_probe` / an operator callback (`interact.sh`,
+`webhook.site`, `requestcatcher.com`). See the `valravn-diagnostic` skill for
+troubleshooting and free-tier API keys.
 
 ## Authorization
 
-Capa DAST = ofensiva. Traer authorization escrita para cada target:
-bug bounty en scope, contract pentest, red team ROE, internal lab, CTF.
-La extension scope `valravn/burp-extension/.../ScopeHandler` es la última
-palabra — el prompt no la overridea. Rules 1–4 (scope) y 5–9 (destructivo,
-OOB, egress) quedan HARD independientemente del scope mode (`operator` o
+The DAST layer is offensive. Bring written authorization for each target: an
+in-scope bug bounty, a contract pentest, a red-team ROE, an internal lab, a
+CTF. The extension scope (in `valravn/burp-extension/.../ScopeHandler`) is the
+final word - the prompt does not override it. Rules 1-4 (scope) and 5-9
+(destructive, OOB, egress) stay HARD regardless of scope mode (`operator` or
 `strict`).
 
-## Investigación depth
+## Investigation depth
 
-Triage con `depth="quick"`; cuando hay restricciones de contexto, evidencia
-insuficiente, conflicto o alto impacto, escalar a `depth="deep"` — consume más
-free-tier providers, **máximo un scarce source** extra. No apilar múltiples
-deep en una sola investigation.
+Triage with `depth="quick"`; when there are context constraints, insufficient
+evidence, conflict or high impact, escalate to `depth="deep"` - it consumes
+more free-tier providers, **at most one extra scarce source**. Do not stack
+multiple deep calls in one investigation.
 
-## Evidencia discipline
+## Evidence discipline
 
-Cada investigation preserva: **provider attribution**, **retrieval time**,
+Every investigation preserves: **provider attribution**, **retrieval time**,
 **original URL**, **first/last-seen**, **confidence**, **contradictions**,
 **failed source records**.
 
-- Distinguir **observation** (provider dice X) vs **inference** (Munin concluye
-  Y). No usar un único score opaco.
-- Failed sources también se registran — "provider X returned empty" es
-  evidence negative informativa.
-- Complementa con **Hugin** (knowledge layer — malware, low-level, evasion,
-  persistence; candidate paths + node metadata) mientras Valravn cubre
+- Distinguish **observation** (provider says X) vs **inference** (Munin
+  concludes Y). Do not use a single opaque score.
+- Failed sources are also recorded - "provider X returned empty" is
+  informative negative evidence.
+- Complement with **Hugin** (knowledge layer - malware, low-level, evasion,
+  persistence; candidate paths + node metadata) while Valravn covers the
   observation layer (assets, exposure, network, history).
-- Critical findings guardan `node_id` / source URL / retrieval timestamp para
-  que el operator pueda revisar.
+- Critical findings keep a `node_id` / source URL / retrieval timestamp so the
+  operator can review.
 
 ## Engagement loop
 
-Valravn se sienta en el campaign loop de `principles.md` §2 entre los
-pasos 2–3:
+Valravn sits in the `principles.md` §2 campaign loop between steps 2-3:
 
-- Recall (memory + shared intel) → **Valravn CTI** cubre observación externa →
-  **Hugin** cubre specialized knowledge → hypothesis observable → minimal
-  action validate → **Valravn DAST** ejecuta el probe activo via Burp → finding
-  validated → `publish_shared_intel` o `memory_remember`.
-- No hagas data hoarding en Valravn — sea observación CTI o probe DAST, qué
-  hacer con la output es decisión de Munin.
-- Findings que pasan validation de Munin AND cambian decisiones downstream van
-  a `publish_shared_intel` (`principles.md` §8); enumeración común va a
+- Recall (memory + shared intel) -> **Valravn CTI** covers external observation
+  -> **Hugin** covers specialized knowledge -> observable hypothesis ->
+  minimal action to validate -> **Valravn DAST** executes the active probe via
+  Burp -> validated finding -> `publish_shared_intel` or `memory_remember`.
+- Do not data-hoard in Valravn - whether CTI observation or DAST probe, what to
+  do with the output is Munin's decision.
+- Findings that pass Munin's validation AND change downstream decisions go to
+  `publish_shared_intel` (`principles.md` §8); common enumeration goes to
   `memory_remember`.
 
 ## HITL gates
 
-Tools activos Burp (`scan_url`, `test_*`, `forge_jwt`, `crack_jwt_secret`,
+Active Burp tools (`scan_url`, `test_*`, `forge_jwt`, `crack_jwt_secret`,
 `run_sqlmap`, `dump_exposed_git`, `send_to_intruder_*`, `auto_collaborator_test`,
-`browser_*` stealth, etc.) cruzan el graph interrupt del runtime Munin cuando
-el policy del conversation lo requiere — generan `waiting_for_human` request.
-Approve es bound a la **exact action y argument set**, no reusable para otra
-tool/args/run. El wrapper `burp_invoke` es `active` en la audit trail por
-defecto; los wrappers typed (status/health/scope_check/get_proxy_count) son
-`passive` por lo que no parent HITL pero sí audit-logged.
+`browser_*` stealth, etc.) cross the Munin runtime's graph interrupt when the
+conversation policy requires it - they generate a `waiting_for_human` request.
+Approval is bound to the **exact action and argument set**, not reusable for
+another tool/args/run. The `burp_invoke` wrapper is `active` in the audit trail
+by default; the typed wrappers (status/health/scope_check/get_proxy_count) are
+`passive` so they don't parent a HITL but are still audit-logged.
 
 ## Failure modes (no-debug summary)
 
-Burp DAST fallar == Munin runtime sigue. Errores expected:
-- `code=extension_unreachable` — Burp no corre / extension no cargada / puerto
-  mal. CI runners sin Burp reciben esto y degradan.
-- `code=http_*` — extension responde pero con status HTTP. Java-side envelope
-  preservado.
-- `code=client_exception` — timeout, connect error, etc. `hint` accional.
-- `code=bad_args` / `bad_method` — invocación incorrecta del wrapper.
+Burp DAST failure == Munin runtime continues. Expected errors:
+- `code=extension_unreachable` - Burp not running / extension not loaded / wrong
+  port. CI runners without Burp get this and degrade.
+- `code=http_*` - extension responds with an HTTP status. The Java-side
+  envelope is preserved.
+- `code=client_exception` - timeout, connect error, etc. `hint` is actionable.
+- `code=bad_args` / `bad_method` - incorrect wrapper invocation.
 
-Para diagnostic exhaustivo: skill `valravn-diagnostic`
-(`.opencode/skills/valravn-diagnostic/SKILL.md`) con API keys free tier y
+For an exhaustive diagnosis: the `valravn-diagnostic` skill
+(`.opencode/skills/valravn-diagnostic/SKILL.md`) with free-tier API keys and
 fixes.
