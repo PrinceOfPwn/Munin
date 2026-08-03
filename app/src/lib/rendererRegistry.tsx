@@ -47,8 +47,6 @@ import { cn } from "@/lib/utils";
 // discriminated-key dispatch. ``any`` is contained to this module.
 // ---------------------------------------------------------------------------
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
 export interface RendererRegistryEntry {
   schemaRef: ZodTypeAny | null;
   Component: ComponentType<any>;
@@ -83,7 +81,7 @@ type AnyPartData = Record<string, unknown> & {
 interface ErrorBoundaryProps {
   rendererKey: string;
   fallbackElement: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
 }
 
 interface ErrorBoundaryState {
@@ -301,11 +299,8 @@ export function RendererFor({ dataPart, rendererKey, extraProps }: RendererForPr
   const finalProps = { ...(payload as Record<string, unknown>), ...(extraProps ?? {}) };
   return createElement(
     RendererErrorBoundary,
-    {
-      rendererKey,
-      fallbackElement: entry.fallbackElement,
-      children: createElement(Renderer, finalProps),
-    },
+    { rendererKey, fallbackElement: entry.fallbackElement },
+    createElement(Renderer, finalProps),
   );
 }
 

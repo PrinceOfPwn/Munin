@@ -185,10 +185,7 @@ def test_guidance_e2e_model_injection(production_store, monkeypatch):
     assert "guidance.queued" in kinds
 
     # 2. Exercise the OperatorGuidanceMiddleware the same way the supervisor
-    # does â?? read its run id binding from the contextvars the supervisor
-    # sets in ``runtime_adapter.supervisor_runner``.
-    # 2. Exercise the OperatorGuidanceMiddleware the same way the supervisor
-    # does â?? read its run id binding from the contextvars the supervisor
+    # does — read its run id binding from the contextvars the supervisor
     # sets in ``runtime_adapter.supervisor_runner``.
     import asyncio
 
@@ -197,9 +194,11 @@ def test_guidance_e2e_model_injection(production_store, monkeypatch):
     state = {"messages": [HumanMessage(content="prior assistant context")]}
     tok = ACTIVE_RUN_ID.set(run_id)
     try:
-        update = asyncio.get_event_loop().run_until_complete(
-            middleware.abefore_model(state, runtime=None)
-        )
+        # ``asyncio.run`` creates a fresh loop instead of reusing the ambient
+        # one: CI runs the full suite where an earlier ``asyncio.run`` may have
+        # closed the process-level loop, which makes ``get_event_loop()`` raise
+        # RuntimeError in Python 3.11+.
+        update = asyncio.run(middleware.abefore_model(state, runtime=None))
     finally:
         ACTIVE_RUN_ID.reset(tok)
     del asyncio  # imported inline so the early import stays ``from __future__``
