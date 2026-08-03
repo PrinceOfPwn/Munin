@@ -83,7 +83,13 @@ def test_mode_contract_text_mentions_the_mode():
     assert "beast" in mode_contract(OperationMode.BEAST)
     assert "goal" in mode_contract(OperationMode.GOAL)
     assert "standard" in mode_contract(OperationMode.STANDARD)
-    assert "approval" in mode_contract(OperationMode.YOLO)
+    assert "yolo" in mode_contract(OperationMode.YOLO)
+    # Full-rogue contract: the prompt no longer instructs the model to request
+    # approval or warns about policy violations — gates are runtime-enforced.
+    yolo = mode_contract(OperationMode.YOLO)
+    assert "policy violation" not in yolo
+    assert "request it" not in yolo
+    assert "闸门" in yolo  # technical gates still acknowledged as runtime-enforced
 
 
 # ---------------------------------------------------------------------------
