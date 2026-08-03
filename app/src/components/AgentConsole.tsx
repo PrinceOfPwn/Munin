@@ -1,4 +1,4 @@
-// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui]
+// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui, typed-renderer-registry, RendererFor, guidance-lifecycle, PR-2D, PR-2G]
 "use client";
 
 import {
@@ -80,6 +80,11 @@ import { useConversations } from "@/lib/queries";
 import { cancelRun, productionApi, type ProviderProfile } from "@/lib/production-api";
 import { logError } from "@/lib/logError";
 import { cn, formatDuration, isTerminalRun } from "@/lib/utils";
+// PR-2G — typed renderer registry delegates the eight munin-ui/v1 renderer
+// keys (PR-2F) through ``<RendererFor>`` so an unknown payload degrades to an
+// annotated fallback card instead of crashing the whole console tree. The
+// legacy direct renderers remain for parts outside the v1 allow-list.
+import { RendererFor } from "@/lib/rendererRegistry";
 
 // ---------------------------------------------------------------------------
 // Custom data part shapes emitted by the Munin BFF translator
@@ -338,10 +343,14 @@ function PartRenderer({
   // Dynamic tool part — emitted when translator writes tool-input-start /
   // tool-input-available / tool-output-available / tool-output-error chunks.
   if (part.type === "dynamic-tool") {
+    // PR-2G — typed registry delegation. Map the AI SDK normalized tool
+    // invocation onto the v1 ``tool-invocation`` schema shape; the registry's
+    // adapter translates ``input`` → ``args`` and ``errorText`` → ``error``
+    // for the trusted :component:`ToolInvocationPart`.
     const dp = part as DynamicToolUIPart;
-    let invState: ToolInvocationState = "call";
+    let invState: "partial-call" | "call" | "result" = "call";
     let result: unknown = undefined;
-    let error: string | undefined = undefined;
+    let errorText: string | undefined = undefined;
     if (dp.state === "input-streaming" || dp.state === "input-available") {
       invState = dp.state === "input-streaming" ? "partial-call" : "call";
     } else if (dp.state === "output-available") {
@@ -349,17 +358,21 @@ function PartRenderer({
       result = dp.output;
     } else if (dp.state === "output-error") {
       invState = "result";
-      error = dp.errorText;
+      errorText = dp.errorText;
     }
     return (
-      <ToolInvocationPart
+      <RendererFor
         key={key}
-        toolCallId={dp.toolCallId}
-        toolName={dp.toolName}
-        args={dp.state !== "input-streaming" ? (dp.input as Record<string, unknown> | undefined) : undefined}
-        state={invState}
-        result={result}
-        error={error}
+        rendererKey="tool-invocation"
+        dataPart={{
+          type: "tool-invocation",
+          toolCallId: dp.toolCallId,
+          toolName: dp.toolName,
+          state: invState,
+          input: dp.state !== "input-streaming" ? (dp.input as Record<string, unknown> | undefined) : undefined,
+          result,
+          errorText,
+        }}
       />
     );
   }
@@ -384,30 +397,44 @@ function PartRenderer({
   }
 
   if (part.type === "data-hitl-request") {
+    // PR-2G — delegate to the typed registry so an unknown payload degrades
+    // to a fallback card. We pass the AI-SDK data-part under ``dataPart``
+    // with its ``.data`` payload hoisted to the top-level discriminator
+    // field set so the v1 ``hitl-request`` schema validates, and forward the
+    // approve/reject callbacks via ``extraProps``.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as HitlData;
     return (
-      <HitlRequestPart
+      <RendererFor
         key={key}
-        requestId={d.requestId}
-        toolName={d.toolName}
-        args={d.args ?? {}}
-        nonce={d.nonce}
-        choices={d.choices}
-        resolution={d.resolution}
-        onApprove={hitlApprove}
-        onReject={hitlReject}
+        rendererKey="hitl-request"
+        dataPart={{
+          type: "hitl-request",
+          requestId: d.requestId,
+          toolName: d.toolName,
+          args: d.args ?? {},
+          nonce: d.nonce,
+          choices: d.choices,
+          resolved: d.resolution != null,
+          ...(d.resolution != null ? { resolution: d.resolution } : {}),
+        }}
+        extraProps={{ onApprove: hitlApprove, onReject: hitlReject }}
       />
     );
   }
 
   if (part.type === "data-artifact") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ArtifactData;
     return (
-      <ArtifactPart
+      <RendererFor
         key={key}
-        artifactId={d.artifactId}
-        mimeType={d.mimeType}
-        uri={d.uri}
+        rendererKey="artifact"
+        dataPart={{
+          type: "artifact",
+          artifactId: d.artifactId,
+          mimeType: d.mimeType,
+          uri: d.uri,
+        }}
       />
     );
   }
@@ -418,15 +445,23 @@ function PartRenderer({
   }
 
   if (part.type === "data-command-output") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as CommandOutputData;
     return (
-      <CommandOutputPart
+      <RendererFor
         key={key}
-        toolName={d.toolName ?? "command"}
-        stream={d.stream ?? "stdout"}
-        text={d.text ?? ""}
-        elapsedMs={d.elapsedMs}
-        final={d.final}
+        rendererKey="command-output"
+        dataPart={{
+          type: "command-output",
+          toolName: d.toolName ?? "command",
+          toolCallId: d.toolCallId,
+          jobId: d.jobId,
+          stream: d.stream,
+          text: d.text ?? "",
+          sequence: d.sequence,
+          elapsedMs: d.elapsedMs,
+          final: d.final,
+        }}
       />
     );
   }
@@ -445,13 +480,31 @@ function PartRenderer({
   }
 
   if (part.type === "reasoning") {
+    // PR-2G — typed registry delegation. The AI SDK ``ReasoningUIPart`` is a
+    // top-level part (no ``.data``), so we wrap its ``text`` into a v1
+    // ``reasoning`` schema payload before handing it to the registry. The id
+    // is preserved on the rendered component's ``id`` prop via ``extraProps``.
     const reasoning = part as ReasoningUIPart;
-    return reasoning.text ? <ReasoningPart key={key} id={key} text={reasoning.text} /> : null;
+    if (!reasoning.text) return null;
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="reasoning"
+        dataPart={{ type: "reasoning", text: reasoning.text, id: key }}
+      />
+    );
   }
 
   if (part.type === "data-activity") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ActivityData;
-    return <OperationalTracePart key={key} stage={d.stage ?? "working"} text={d.text ?? "Working"} />;
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="operational-trace"
+        dataPart={{ type: "operational-trace", stage: d.stage ?? "working", text: d.text ?? "Working" }}
+      />
+    );
   }
 
   if (part.type === "data-note") {
@@ -464,15 +517,51 @@ function PartRenderer({
     return <GuidancePart key={key} text={d.text} />;
   }
 
+  // PR-2D/2G — durable ``guidance.<state>`` lifecycle tick. Delegated through
+  // the typed registry so a future schema mismatch degrades to a fallback
+  // card instead of crashing the live console tree.
+  if (part.type === "data-guidance-lifecycle") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as {
+      state?: string;
+      guidanceId?: string;
+      appliedMessageId?: string;
+      supersededById?: string;
+      deliveredAtStep?: number;
+      actorId?: string;
+      runId?: string;
+    };
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="guidance-lifecycle"
+        dataPart={{
+          type: "guidance-lifecycle",
+          state: d.state ?? "queued",
+          guidanceId: d.guidanceId ?? "",
+          appliedMessageId: d.appliedMessageId,
+          supersededById: d.supersededById,
+          deliveredAtStep: d.deliveredAtStep,
+          actorId: d.actorId,
+          runId: d.runId,
+        }}
+      />
+    );
+  }
+
   // Fase 3 (autonomous modes): durable plan / goal / timer visibility.
   if (part.type === "data-plan") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as PlanData;
     return (
-      <PlanSnapshotPart
+      <RendererFor
         key={key}
-        goal={d.goal ?? null}
-        items={d.items ?? []}
-        updatedAtMs={d.updatedAtMs}
+        rendererKey="plan"
+        dataPart={{
+          type: "plan",
+          goal: d.goal ?? null,
+          items: d.items ?? [],
+          updatedAtMs: d.updatedAtMs,
+        }}
       />
     );
   }

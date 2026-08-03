@@ -1,4 +1,4 @@
-# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, cancel-fence, run.cancelling, observe_cancel_fence, PR-2A, PR-2B]
+# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, cancel-fence, run.cancelling, observe_cancel_fence, guidance-lifecycle, guidance.queued, guidance.delivered_to_runtime, guidance.applied_to_model_step, _envelope_from_event, PR-2A, PR-2B, PR-2D]
 """Deep Agents supervisor → SSE bridge (Fase 1a of issue #9 migration).
 
 This module owns ``POST /api/chat``, ``GET /api/chat/{conversation_id}/stream``
@@ -575,6 +575,31 @@ def _envelope_from_event(
         envelope = {"kind": kind, "run_id": run_id}
         if isinstance(payload, dict):
             envelope.update(payload)
+        return envelope
+
+    if kind.startswith("guidance."):
+        # PR-2D — guidance lifecycle events (queued / delivered_to_runtime /
+        # applied_to_model_step / expired / superseded / undelivered).  The
+        # durable ``state`` column on ``run_guidance_queue`` is the source of
+        # truth; these envelopes carry the same data so a connected client can
+        # surface a hyperprecise "operator guidance reached the model" tick
+        # without polling the queue table.  Mirrors the ``run.cancelling``
+        # family introduced by PR-2B.
+        envelope = {"kind": "guidance_lifecycle", "run_id": run_id}
+        if isinstance(payload, dict):
+            envelope["state"] = str(payload.get("state") or kind.split(".", 1)[1])
+            envelope["guidance_id"] = str(payload.get("guidance_id") or "")
+            if payload.get("applied_message_id"):
+                envelope["applied_message_id"] = str(payload["applied_message_id"])
+            if payload.get("superseded_by_id"):
+                envelope["superseded_by_id"] = str(payload["superseded_by_id"])
+            if payload.get("delivered_at_step") is not None:
+                envelope["delivered_at_step"] = int(payload["delivered_at_step"])
+            if payload.get("actor_id"):
+                envelope["actor_id"] = str(payload["actor_id"])
+        else:
+            envelope["state"] = kind.split(".", 1)[1]
+            envelope["guidance_id"] = ""
         return envelope
 
     return None
