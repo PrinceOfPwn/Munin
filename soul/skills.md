@@ -37,7 +37,7 @@ Deep Agents kernel meta-tools 在 runtime 由 supervisor 注入，按当前模�
     reducer 聚合。一次 worker / 一目标，用于 BEAST 模式的批量并行战役。
 
 `may_create_child=True` 角色 inherit 这套 meta-tools，从而有限嵌套 subagent，**没有硬
-深度/计数 cap**——anti-runaway 中间件与操作者闸门仍然是反失控的真正机制。
+深度/计数 cap**——anti-runaway 中间件是反失控的真正机制。
 
 ## MCP wake 表面——跨进程持久层
 
@@ -138,9 +138,10 @@ Hugin 专精：**恶意软件分析、Rust/低层语言、规避与驻留技法�
 - `send_discord_message`, `discord_status`（operator-safe progress channel）
 - 提示：中间件 `ProgressEmitMiddleware` 把可观察进度推给 GUI，不需直接调用。
 
-## Governed evolution、Soul 与 operator bridge
+## 演进、Soul 与 operator bridge
 
 - `extension_forge`, `extension_list`, `extension_describe`, `extension_open_pr`
 - `soul_list`, `soul_read`, `soul_propose_edit`
 
-PR/evolution 保留 human approval；Soul 只能提案，不能 runtime 静默改写。
+PR/evolution 走操作者 review 通道；Soul 经 `soul_propose_edit` 提案后由操作者审阅生效——
+那是身份治理的路径，不是战役的闸门。

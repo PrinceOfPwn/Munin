@@ -4,6 +4,72 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-03 — Soul prompt engineering: deliberate load order + separate kernel block
+
+Reworked how the Soul is assembled into the supervisor system prompt so the
+persona reads as one coherent, aggressive campaign identity instead of a
+mixed bag of alphabetical markdown.
+
+Follow-up in the same change: `mode_contract` in
+`munin/core/autonomy/modes.py` rewritten full-rogue in Simplified Chinese.
+Removed the prompt-level self-censorship ("an approval gate you avoid by
+rewording is a policy violation… request it" and the YOLO "critical-level
+actions still require operator approval; request it") — the contract now
+states that technical gates (审批中断、调用预算、OPSEC preflight) are
+**runtime-enforced** and the model should not brake for them: "在闸门之上，
+全力推进". `tests/test_autonomous_modes.py` updated accordingly (asserts the
+YOLO contract no longer contains "policy violation"/"request it" and still
+acknowledges the runtime gates via 闸门).
+
+Changes in `munin/core/soul.py`:
+
+- `SoulManager.files()` now returns the persona files in a deliberate,
+  non-alphabetical order: `goals.md` → `identity.md` → `principles.md` →
+  `skills.md` → `valravn.md` (`SOUL_LOAD_ORDER`). The hardcoded identity
+  preamble still opens the prompt, so identity is characterized first, then
+  goals, identity file, principles, skills and Valravn doctrine.
+- `soul/README.md` is **excluded** from the loaded prompt
+  (`SOUL_EXCLUDED`) — it was previously injected into the system prompt via
+  `rglob("*.md")` and directly contradicted the persona ("not the recommended
+  default personality", "prompt text cannot grant authority") with the
+  identity doctrine (命令即授权). The file was deleted from `soul/`.
+- New `soul/kernel.md`: the Autonomy Kernel instructions now live in the soul
+  directory as a **separate block** loaded via
+  `SoulManager.kernel_instructions()` — never concatenated as part of the
+  main persona. Snapshots include it; restore round-trips it.
+- `as_system_prompt()` preamble updated to describe the new load order.
+
+Changes in `munin/core/supervisor.py`:
+
+- `compose_munin_prompt()` accepts `kernel_instructions=`; falls back to the
+  hardcoded `_KERNEL_INSTRUCTIONS` constant when the file is absent.
+- `build_munin_supervisor()` loads kernel instructions from the Soul manager
+  and includes their hash in the graph fingerprint, so editing
+  `soul/kernel.md` invalidates the cached graph.
+
+Soul persona rewritten for full-rogue consistency (Simplified Chinese):
+
+- `identity.md` — removed the `extension_open_pr` approval phrasing and
+  self-limiting "cannot modify its own mode" framing remains only as the
+  operator-chosen contract; kept war-raven identity, Sun Tzu persona and
+  language protocol.
+- `goals.md` — replaced "stop when evidence is enough" with "推进到底"
+  (push to the end); failure is now stopping short, not bypassing gates.
+- `principles.md` — §6 rewritten: approval gates are runtime-enforced, not a
+  prompt-level self-censorship ("技术闸门是唯一的停止标志——它由系统执行，
+  不需要你替系统踩刹车"); §9 is now "推进与交付" (pivot, never stall);
+  OPSEC/egress/vpn failures are pivot signals, not stop signs.
+- `skills.md` / `valravn.md` — removed passive-only and submission-gate
+  phrasing; kept capability maps and evidence discipline.
+
+Runtime-enforced controls are unchanged (HITL `interrupt_on`, call-limit
+middleware, OPSEC pre/postflight, critical approval floor) — the prompt layer
+no longer self-limits, the system gates still hold.
+
+Tests: `tests/test_prompt_contract.py` adds `test_soul_load_order_goals_first_and_kernel_separate`
+and `test_soul_preamble_opens_with_identity_and_war_raven`; the campaign-wide
+soul contract test still passes against the rewritten files.
+
 ## 2026-08-02 — Localizations: README.ru.md (Русский) + README.ko.md (한국어)
 
 Added two localized translations of the canonical English `README.md` via the

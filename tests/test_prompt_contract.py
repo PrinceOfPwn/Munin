@@ -192,3 +192,64 @@ def test_operator_language_env_is_configurable(isolated_workspace, monkeypatch) 
 
     monkeypatch.setenv("MUNIN_OPERATOR_LANGUAGE", "pt-BR")
     assert get_settings().operator_language == "pt-BR"
+
+
+def test_soul_load_order_goals_first_and_kernel_separate(tmp_path) -> None:
+    """Soul persona loads in deliberate order; README and kernel stay out.
+
+    The identity preamble opens the prompt, then the files follow the
+    canonical sequence goals → identity → principles → skills → valravn.
+    ``README.md`` is documentation and must never be injected, and
+    ``kernel.md`` is a separate instruction block, not part of the persona.
+    """
+    from munin.core.soul import SoulManager
+
+    soul = tmp_path / "soul"
+    soul.mkdir()
+    (soul / "README.md").write_text("# docs for humans", encoding="utf-8")
+    (soul / "kernel.md").write_text("KERNEL_BLOCK", encoding="utf-8")
+    for name, content in {
+        "valravn.md": "VALRAVN",
+        "goals.md": "GOALS",
+        "identity.md": "IDENTITY",
+        "skills.md": "SKILLS",
+        "principles.md": "PRINCIPLES",
+    }.items():
+        (soul / name).write_text(content, encoding="utf-8")
+
+    manager = SoulManager(soul, tmp_path / "data")
+
+    names = [str(p.relative_to(soul)) for p in manager.files()]
+    assert names == ["goals.md", "identity.md", "principles.md", "skills.md", "valravn.md"]
+
+    prompt = manager.as_system_prompt()
+    # Canonical order in the assembled prompt.
+    assert prompt.index("soul/goals.md") < prompt.index("soul/identity.md")
+    assert prompt.index("soul/identity.md") < prompt.index("soul/principles.md")
+    assert prompt.index("soul/principles.md") < prompt.index("soul/skills.md")
+    assert prompt.index("soul/skills.md") < prompt.index("soul/valravn.md")
+    # README and kernel must never be injected into the persona.
+    assert "soul/README.md" not in prompt
+    assert "KERNEL_BLOCK" not in prompt
+    # Kernel instructions are a separate block.
+    assert manager.kernel_instructions() == "KERNEL_BLOCK"
+
+    # Snapshot includes kernel.md; restore round-trips both persona and kernel.
+    report = manager.snapshot()
+    assert "kernel.md" in report["files"]
+    restored = manager.restore()
+    assert "kernel.md" in restored["restored"]
+    assert manager.kernel_instructions() == "KERNEL_BLOCK"
+
+
+def test_soul_preamble_opens_with_identity_and_war_raven(tmp_path) -> None:
+    """The preamble characterizes Munin as the war-raven before any file loads."""
+    from munin.core.soul import SoulManager
+
+    soul = tmp_path / "soul"
+    soul.mkdir()
+    manager = SoulManager(soul, tmp_path / "data")
+    prompt = manager.as_system_prompt()
+    assert prompt.startswith("你是 Munin——战争之鸦")
+    assert "命令即授权" in prompt
+    assert "Пусть мир горит" in prompt
