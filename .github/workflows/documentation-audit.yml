@@ -1,0 +1,201 @@
+name: Munin Documentation Audit
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Scan the complete repository or one commit range
+        type: choice
+        required: true
+        default: full
+        options: [full, changed]
+      base_sha:
+        description: Optional base SHA for a changed scan
+        required: false
+        type: string
+      max_files:
+        description: Optional file limit; zero means unlimited
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Complete-file review with local Qwen
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      HF_HOME: ${{ runner.temp }}/hf-cache
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      AUDIT_OUTPUT: ${{ github.workspace }}/.audit-output
+      BASELINE_DIR: ${{ runner.temp }}/munin-documentation-baseline
+    steps:
+      - name: Checkout analyzed revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Validate deterministic code
+        run: |
+          python -m compileall -q munin tests scripts
+          python -m py_compile scripts/documentation_audit.py tests/test_documentation_audit.py
+          git diff --check
+
+      - name: Cache pinned Qwen model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.HF_HOME }}
+          key: qwen3-4b-q4-k-m-bc640142c66e
+
+      - name: Restore successful baseline marker
+        id: baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BASELINE_DIR }}
+          key: munin-documentation-baseline-v1
+
+      - name: Install native CPU inference runtime
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libopenblas-dev
+          python -m pip install --upgrade pip
+          python -m pip install "huggingface-hub>=0.34,<2"
+          CMAKE_ARGS="-DGGML_NATIVE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
+          CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
+            python -m pip install \
+              --no-cache-dir \
+              --no-binary=llama-cpp-python \
+              "llama-cpp-python==0.3.34"
+          python - <<'PY'
+          import huggingface_hub
+          import llama_cpp
+          print("huggingface_hub", huggingface_hub.__version__)
+          print("llama_cpp", llama_cpp.__version__)
+          print(llama_cpp.llama_print_system_info().decode("utf-8", errors="replace"))
+          PY
+
+      - name: Resolve audit range
+        id: range
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+          INPUT_SCOPE: ${{ inputs.scope }}
+          INPUT_BASE: ${{ inputs.base_sha }}
+          INPUT_MAX_FILES: ${{ inputs.max_files }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASELINE_HIT: ${{ steps.baseline.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          scope=changed
+          base=""
+          head="$PUSH_HEAD"
+          max_files=0
+          pr_number=""
+
+          case "$EVENT_NAME" in
+            pull_request)
+              base="$PR_BASE"
+              head="$PR_HEAD"
+              pr_number="$PR_NUMBER"
+              ;;
+            push)
+              base="$PUSH_BASE"
+              if [ "$BASELINE_HIT" != "true" ]; then
+                scope=full
+                base=""
+              fi
+              ;;
+            workflow_dispatch)
+              scope="${INPUT_SCOPE:-full}"
+              base="${INPUT_BASE:-}"
+              max_files="${INPUT_MAX_FILES:-0}"
+              ;;
+          esac
+
+          {
+            echo "scope=$scope"
+            echo "base=$base"
+            echo "head=$head"
+            echo "max_files=$max_files"
+            echo "pr_number=$pr_number"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Analyze selected files in full
+        env:
+          SCOPE: ${{ steps.range.outputs.scope }}
+          BASE_SHA: ${{ steps.range.outputs.base }}
+          HEAD_SHA: ${{ steps.range.outputs.head }}
+          MAX_FILES: ${{ steps.range.outputs.max_files }}
+          PR_NUMBER: ${{ steps.range.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          args=(
+            run
+            --config .munin-doc-audit.toml
+            --scope "$SCOPE"
+            --head "$HEAD_SHA"
+            --output-dir "$AUDIT_OUTPUT"
+            --model-cache "$HF_HOME"
+            --max-files "$MAX_FILES"
+          )
+          [ -z "$BASE_SHA" ] || args+=(--base "$BASE_SHA")
+          [ -z "$PR_NUMBER" ] || args+=(--pr-number "$PR_NUMBER")
+          python scripts/documentation_audit.py "${args[@]}"
+
+      - name: Prove tracked files are unchanged
+        run: git diff --exit-code -- .
+
+      - name: Create successful baseline marker
+        if: ${{ success() && github.event_name == 'push' && steps.baseline.outputs.cache-hit != 'true' }}
+        run: |
+          mkdir -p "$BASELINE_DIR"
+          printf '%s\n' "${{ github.sha }}" > "$BASELINE_DIR/completed"
+
+      - name: Save successful baseline marker
+        if: ${{ success() && github.event_name == 'push' && steps.baseline.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BASELINE_DIR }}
+          key: munin-documentation-baseline-v1
+
+      - name: Publish job summary
+        if: always()
+        run: |
+          if [ -f "$AUDIT_OUTPUT/summary.md" ]; then
+            cat "$AUDIT_OUTPUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "# Munin documentation audit" "The audit failed before producing a report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload structured reports and bilingual PR text
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: munin-documentation-audit
+          path: ${{ env.AUDIT_OUTPUT }}/
+          retention-days: 90
+          if-no-files-found: warn

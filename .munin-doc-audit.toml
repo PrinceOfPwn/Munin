@@ -1,0 +1,35 @@
+# Local, CPU-only documentation review model.
+[model]
+repo_id = "Qwen/Qwen3-4B-GGUF"
+revision = "bc640142c66e1fdd12af0bd68f40445458f3869b"
+filename = "Qwen3-4B-Q4_K_M.gguf"
+context_tokens = 32768
+file_output_tokens = 1400
+report_output_tokens = 6000
+threads = 4
+batch_size = 256
+temperature = 0.1
+
+[scan]
+max_findings_per_file = 8
+minimum_confidence = 0.72
+max_files = 0
+ignored_globs = [
+  ".git/**",
+  ".venv/**",
+  "venv/**",
+  "node_modules/**",
+  ".next/**",
+  "dist/**",
+  "build/**",
+  "coverage/**",
+  "vendor/**",
+  "generated/**",
+  "**/*.min.js",
+  "**/*.min.css",
+  "**/*.map",
+  "**/*.lock",
+  "package-lock.json",
+  "poetry.lock",
+  "uv.lock",
+]

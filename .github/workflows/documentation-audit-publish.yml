@@ -1,0 +1,47 @@
+name: Publish Munin Documentation Audit
+
+on:
+  workflow_run:
+    workflows: [Munin Documentation Audit]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number != null }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted publisher
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download audit artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: munin-documentation-audit
+          path: ${{ runner.temp }}/munin-documentation-audit
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Use trusted PR number from workflow event
+        env:
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          test -n "$PR_NUMBER"
+          printf '%s\n' "$PR_NUMBER" > "${{ runner.temp }}/munin-documentation-audit/pr-number.txt"
+
+      - name: Update bounded section in PR description
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/documentation_audit.py publish-pr \
+            --report "${{ runner.temp }}/munin-documentation-audit/pr-body.md" \
+            --pr-number-file "${{ runner.temp }}/munin-documentation-audit/pr-number.txt"
