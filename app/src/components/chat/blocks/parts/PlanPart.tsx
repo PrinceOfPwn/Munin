@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, lucide-icons, i-t-e-m--s-t-a-t-u-s--v-a-r-i-a-n-t, todo-mutation-part, hypothesis-part, o-p--l-a-b-e-l-s, plan-snapshot-part]
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, i-t-e-m--s-t-a-t-u-s--v-a-r-i-a-n-t, todo-mutation-part, hypothesis-part, o-p--l-a-b-e-l-s, plan-snapshot-part, react-memo, PR-4A, PR-4E, optional-chaining]
+import { memo } from "react";
 import { Circle, ListChecks, RotateCcw, TestTube2 } from "lucide-react";
 
 import { Badge, type BadgeProps } from "@/components/ui/badge";
@@ -67,11 +68,20 @@ const OP_LABELS: Record<string, string> = {
   replan: "plan reset",
 };
 
+/** Safe status text — a partial payload must not crash the render. */
+function statusText(status: string | undefined): string {
+  return (status ?? "pending").replace("_", " ");
+}
+
 // ---------------------------------------------------------------------------
 // Plan snapshot (data-plan) — durable goal + item board for the turn
 // ---------------------------------------------------------------------------
 
-export function PlanSnapshotPart({ goal, items, updatedAtMs }: PlanSnapshotPartProps) {
+export const PlanSnapshotPart = memo(function PlanSnapshotPart({
+  goal,
+  items,
+  updatedAtMs,
+}: PlanSnapshotPartProps) {
   return (
     <div className="w-full rounded-lg border border-border bg-surface">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
@@ -108,8 +118,8 @@ export function PlanSnapshotPart({ goal, items, updatedAtMs }: PlanSnapshotPartP
         <ul className="divide-y divide-border border-t border-border">
           {items.map((item) => (
             <li key={item.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
-              <Badge variant={ITEM_STATUS_VARIANT[item.status]} className="w-16 shrink-0 justify-center">
-                {item.status.replace("_", " ")}
+              <Badge variant={ITEM_STATUS_VARIANT[item.status] ?? "neutral"} className="w-16 shrink-0 justify-center">
+                {statusText(item.status)}
               </Badge>
               <span className="min-w-0 truncate text-body" title={item.title}>
                 {item.title}
@@ -135,13 +145,18 @@ export function PlanSnapshotPart({ goal, items, updatedAtMs }: PlanSnapshotPartP
       ) : null}
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Todo mutation (data-todo / data-replan) — incremental plan deltas
 // ---------------------------------------------------------------------------
 
-export function TodoMutationPart({ op, item, reason, resetIds }: TodoMutationPartProps) {
+export const TodoMutationPart = memo(function TodoMutationPart({
+  op,
+  item,
+  reason,
+  resetIds,
+}: TodoMutationPartProps) {
   const label = OP_LABELS[op] ?? op;
   if (op === "replan") {
     return (
@@ -159,8 +174,8 @@ export function TodoMutationPart({ op, item, reason, resetIds }: TodoMutationPar
   if (!item) return null;
   return (
     <div className="flex items-start gap-2 rounded-md border border-border bg-surface px-3 py-1.5 text-xs text-secondary">
-      <Badge variant={ITEM_STATUS_VARIANT[item.status]} className="w-16 shrink-0 justify-center">
-        {item.status.replace("_", " ")}
+      <Badge variant={ITEM_STATUS_VARIANT[item.status] ?? "neutral"} className="w-16 shrink-0 justify-center">
+        {statusText(item.status)}
       </Badge>
       <span className="min-w-0">
         <span className={cn("text-body")} title={item.title}>
@@ -171,13 +186,17 @@ export function TodoMutationPart({ op, item, reason, resetIds }: TodoMutationPar
       </span>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Hypothesis (data-hypothesis) — a falsifiable claim the agent tracks
 // ---------------------------------------------------------------------------
 
-export function HypothesisPart({ statement, status, evidence }: HypothesisPartProps) {
+export const HypothesisPart = memo(function HypothesisPart({
+  statement,
+  status,
+  evidence,
+}: HypothesisPartProps) {
   return (
     <div className="border-l-4 border-info/60 bg-info/10 px-3 py-2 text-sm" role="note">
       <p className="mb-0.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-info">
@@ -187,4 +206,4 @@ export function HypothesisPart({ statement, status, evidence }: HypothesisPartPr
       {evidence && <p className="mt-1 text-xs text-secondary">Evidence: {evidence}</p>}
     </div>
   );
-}
+});

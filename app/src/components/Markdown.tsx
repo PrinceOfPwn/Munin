@@ -1,12 +1,19 @@
-// tags: [ui-component, console-surface, markdown-rendering, client-component, markdown]
+// tags: [ui-component, console-surface, markdown-rendering, client-component, markdown, react-memo, PR-4A, markdown-plugins, PR-4G]
 "use client";
 
-import type { Components } from "react-markdown";
+import { memo } from "react";
+import type { Components, Options } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 
 import { cn } from "@/lib/utils";
+
+// PR-4G — module-scope plugin arrays. Inline array literals inside the JSX
+// would be reallocated on every render and defeat memoization of the markdown
+// tree (BUG-8); these constants keep the plugin references stable.
+const REMARK_PLUGINS: Options["remarkPlugins"] = [remarkGfm];
+const REHYPE_PLUGINS: Options["rehypePlugins"] = [rehypeHighlight];
 
 // ---------------------------------------------------------------------------
 // Renderer for assistant text parts.  `react-markdown` + GFM + highlight.js
@@ -118,16 +125,22 @@ const markdownComponents: Components = {
   },
 };
 
-export function Markdown({ text, className }: { text: string; className?: string }) {
+export const Markdown = memo(function Markdown({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
   return (
     <div className={cn("text-sm leading-relaxed text-body", className)}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
         components={markdownComponents}
       >
         {text}
       </ReactMarkdown>
     </div>
   );
-}
+});

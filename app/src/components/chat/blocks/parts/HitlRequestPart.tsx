@@ -1,8 +1,9 @@
-// tags: [ui-component, data-part, chat-stream-part, client-component, use-state, hitl-request-part]
+// tags: [ui-component, data-part, chat-stream-part, client-component, use-state, hitl-request-part, react-memo, PR-4A, PR-4E, optional-chaining]
 "use client";
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import { cn } from "@/lib/utils";
+import { logError } from "@/lib/logError";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +21,25 @@ export interface HitlRequestPartProps {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Serialize HITL args defensively — a non-JSON payload must not crash render. */
+function safeArgsJson(args: Record<string, unknown> | null | undefined, requestId: string): string {
+  if (!args) return "";
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch (error) {
+    logError({
+      context: "hitl_args_serialize",
+      error,
+      meta: { requestId },
+    });
+    return String(args);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -30,7 +50,7 @@ export interface HitlRequestPartProps {
  * Buttons are disabled (and replaced by a resolution badge) once a resolution
  * has been recorded.
  */
-export function HitlRequestPart({
+export const HitlRequestPart = memo(function HitlRequestPart({
   requestId,
   toolName,
   args,
@@ -122,9 +142,9 @@ export function HitlRequestPart({
       </div>
 
       {/* Args */}
-      {Object.keys(args).length > 0 && (
+      {args && Object.keys(args).length > 0 && (
         <pre className="mt-2 max-h-40 overflow-auto rounded bg-raised p-2 text-xs font-mono text-secondary">
-          {JSON.stringify(args, null, 2)}
+          {safeArgsJson(args, requestId)}
         </pre>
       )}
 
@@ -183,4 +203,4 @@ export function HitlRequestPart({
       )}
     </div>
   );
-}
+});

@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, guidance-part]
+// tags: [ui-component, data-part, chat-stream-part, guidance-part, react-memo, PR-4A]
+import { memo } from "react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -18,7 +19,7 @@ export interface GuidancePartProps {
  * Uses an info left-border accent and italic text to distinguish it from
  * agent-authored reasoning and operator notes.
  */
-export function GuidancePart({ text }: GuidancePartProps) {
+export const GuidancePart = memo(function GuidancePart({ text }: GuidancePartProps) {
   return (
     <div
       className={cn(
@@ -33,4 +34,4 @@ export function GuidancePart({ text }: GuidancePartProps) {
       <p className="italic text-body">{text}</p>
     </div>
   );
-}
+});

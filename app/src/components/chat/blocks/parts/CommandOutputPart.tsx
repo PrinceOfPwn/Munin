@@ -1,8 +1,11 @@
-// tags: [ui-component, data-part, chat-stream-part, lucide-icons, client-component, command-output-part]
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, client-component, command-output-part, react-memo, PR-4A, expand-copy, PR-4H]
 "use client";
 
-import { Terminal, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { memo, useState } from "react";
+import { Terminal, AlertTriangle, CheckCircle2, Maximize2, Copy, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { logError } from "@/lib/logError";
+import { FloatingWindow } from "@/components/ui/floating-window";
 
 export interface CommandOutputPartProps {
   toolName: string;
@@ -19,7 +22,7 @@ function elapsedLabel(elapsedMs: number): string {
 }
 
 /** A compact terminal line streamed from an authorized external command. */
-export function CommandOutputPart({
+export const CommandOutputPart = memo(function CommandOutputPart({
   toolName,
   stream,
   text,
@@ -28,6 +31,24 @@ export function CommandOutputPart({
 }: CommandOutputPartProps) {
   const isError = stream === "stderr";
   const isMeta = stream === "meta";
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function copyOutput() {
+    if (typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_600);
+    } catch (error) {
+      logError({
+        context: "clipboard",
+        error,
+        meta: { component: "CommandOutputPart", toolName, stream },
+      });
+    }
+  }
+
   return (
     <div
       className={cn(
@@ -49,7 +70,31 @@ export function CommandOutputPart({
         <span className={cn(isError ? "text-danger" : isMeta ? "text-warning" : "text-secondary")}>
           {stream}
         </span>
-        <span className="ml-auto text-muted">{elapsedLabel(elapsedMs)}</span>
+        <span className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            title="Expand full output"
+            aria-label="Expand full output"
+            className="rounded p-1 text-muted transition-colors hover:bg-bg hover:text-body"
+          >
+            <Maximize2 className="h-3 w-3" aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => void copyOutput()}
+            title="Copy full output"
+            aria-label="Copy full output"
+            className="rounded p-1 text-muted transition-colors hover:bg-bg hover:text-body"
+          >
+            {copied ? (
+              <Check className="h-3 w-3 text-success" aria-hidden />
+            ) : (
+              <Copy className="h-3 w-3" aria-hidden />
+            )}
+          </button>
+          <span>{elapsedLabel(elapsedMs)}</span>
+        </span>
       </div>
       <pre
         className={cn(
@@ -59,6 +104,20 @@ export function CommandOutputPart({
       >
         {text}
       </pre>
+
+      {expanded && (
+        <FloatingWindow
+          id={`command-output:${toolName}:${stream}`}
+          title={`${toolName} · ${stream} output`}
+          icon={<Terminal className="h-3.5 w-3.5" />}
+          onClose={() => setExpanded(false)}
+          defaultSize={{ width: 720, height: 480 }}
+        >
+          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-bg p-4 font-mono text-xs leading-relaxed text-secondary">
+            {text}
+          </pre>
+        </FloatingWindow>
+      )}
     </div>
   );
-}
+});

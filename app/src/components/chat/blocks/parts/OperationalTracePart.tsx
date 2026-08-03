@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, lucide-icons, operational-trace-part]
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, operational-trace-part, react-memo, PR-4A]
+import { memo } from "react";
 import { CircleDashed } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -9,7 +10,10 @@ export interface OperationalTracePartProps {
 }
 
 /** A concise, replayable activity record — never private model reasoning. */
-export function OperationalTracePart({ stage, text }: OperationalTracePartProps) {
+export const OperationalTracePart = memo(function OperationalTracePart({
+  stage,
+  text,
+}: OperationalTracePartProps) {
   return (
     <div
       className={cn(
@@ -24,4 +28,4 @@ export function OperationalTracePart({ stage, text }: OperationalTracePartProps)
       <span className="min-w-0 break-words sm:truncate">{text}</span>
     </div>
   );
-}
+});

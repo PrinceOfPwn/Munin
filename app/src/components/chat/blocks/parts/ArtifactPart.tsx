@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, artifact-part]
+// tags: [ui-component, data-part, chat-stream-part, artifact-part, react-memo, PR-4A, PR-4E, optional-chaining]
+import { memo } from "react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -7,8 +8,8 @@ import { cn } from "@/lib/utils";
 
 export interface ArtifactPartProps {
   artifactId: string;
-  mimeType: string;
-  uri: string;
+  mimeType?: string;
+  uri?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -16,7 +17,8 @@ export interface ArtifactPartProps {
 // ---------------------------------------------------------------------------
 
 /** Extract a display filename from a URI or fall back to the artifact id. */
-function displayName(uri: string, artifactId: string): string {
+function displayName(uri: string | undefined, artifactId: string): string {
+  if (!uri) return artifactId;
   try {
     const url = new URL(uri);
     const segments = url.pathname.split("/").filter(Boolean);
@@ -30,7 +32,8 @@ function displayName(uri: string, artifactId: string): string {
 }
 
 /** Return a short human-readable label for common MIME types. */
-function mimeLabel(mimeType: string): string {
+function mimeLabel(mimeType: string | undefined): string {
+  if (!mimeType) return "FILE";
   const map: Record<string, string> = {
     "application/pdf": "PDF",
     "text/plain": "TXT",
@@ -47,7 +50,7 @@ function mimeLabel(mimeType: string): string {
 }
 
 /** Validate URI to prevent script execution via javascript: or other unsafe protocols. */
-function isSafeUri(uri: string): boolean {
+function isSafeUri(uri: string | undefined): boolean {
   if (!uri) return false;
 
   const safeProtocols = ["http:", "https:", "data:", "blob:"];
@@ -67,13 +70,17 @@ function isSafeUri(uri: string): boolean {
 /**
  * Renders an artifact chip with filename, MIME type badge, and a download link.
  */
-export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
+export const ArtifactPart = memo(function ArtifactPart({
+  artifactId,
+  mimeType,
+  uri,
+}: ArtifactPartProps) {
   const filename = displayName(uri, artifactId);
   const label = mimeLabel(mimeType);
   const safeUri = isSafeUri(uri) ? uri : undefined;
   const artifactUri = safeUri || `/api/production/artifacts/${encodeURIComponent(artifactId)}?download=true`;
   const previewUri = `/api/production/artifacts/${encodeURIComponent(artifactId)}?inline=true`;
-  const isImage = mimeType.toLowerCase().startsWith("image/");
+  const isImage = mimeType?.toLowerCase().startsWith("image/") ?? false;
 
   return (
     <div className="flex max-w-full flex-col items-start gap-2">
@@ -104,7 +111,7 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
       {/* Name and type */}
       <span className="flex flex-col leading-tight">
         <span className="font-medium text-body">{filename}</span>
-        <span className="text-xs text-secondary">{mimeType}</span>
+        <span className="text-xs text-secondary">{mimeType ?? "unknown"}</span>
       </span>
 
       {/* MIME badge */}
@@ -121,4 +128,4 @@ export function ArtifactPart({ artifactId, mimeType, uri }: ArtifactPartProps) {
       </a>
     </div>
   );
-}
+});
