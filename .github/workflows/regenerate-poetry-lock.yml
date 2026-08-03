@@ -44,7 +44,9 @@ jobs:
           pip install poetry
 
       - name: Regenerate poetry.lock (no version bumps)
-        run: poetry lock --no-update
+        # Poetry 2.x dropped `--no-update`; bare `poetry lock` regenerates
+        # the lock in place without bumping already-resolved versions.
+        run: poetry lock
 
       - name: Show lock diff (first 200 lines)
         run: |
