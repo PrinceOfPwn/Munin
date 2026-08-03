@@ -1,14 +1,39 @@
-# Local, CPU-only documentation review model.
+# Bounded documentation review with a local CPU fallback.
 [model]
-repo_id = "Qwen/Qwen3-4B-GGUF"
-revision = "bc640142c66e1fdd12af0bd68f40445458f3869b"
-filename = "Qwen3-4B-Q4_K_M.gguf"
+repo_id = "bartowski/Qwen_Qwen3.5-4B-GGUF"
+revision = "ba06320255db2dbec194dad738d066be90dabf29"
+filename = "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
 context_tokens = 32768
 file_output_tokens = 1400
 report_output_tokens = 6000
 threads = 4
 batch_size = 256
 temperature = 0.1
+
+[agent]
+enabled = true
+max_context_files = 3
+max_candidates = 24
+planning_output_tokens = 256
+context_token_budget = 12000
+model_sha256 = "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983"
+
+[github_models]
+# GitHub retired the hosted Models service on 2026-07-30. This one-shot probe
+# remains only for compatible GitHub Enterprise installations or a future
+# replacement endpoint. Public GitHub currently falls back to local Qwen.
+enabled = true
+catalog_url = "https://models.github.ai/catalog/models"
+inference_url = "https://models.github.ai/inference/chat/completions"
+timeout_seconds = 12
+preferred_models = [
+  "claude-opus-5",
+  "gpt-5.6-sol",
+  "kimi-k3",
+  "glm-5.2",
+  "minimax-m3",
+  "qwen3.6-27b",
+]
 
 [scan]
 max_findings_per_file = 8
