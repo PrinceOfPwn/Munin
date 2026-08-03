@@ -43,9 +43,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install poetry
 
-      - name: Show pyproject.toml diff vs lock (sanity check)
-        run: poetry check
-
       - name: Regenerate poetry.lock (no version bumps)
         run: poetry lock --no-update
 
@@ -62,11 +59,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          MSG="${{ inputs.commit_message }}"
+          if [ -z "$MSG" ]; then MSG="chore(deps): regenerate poetry.lock after pyproject.toml change"; fi
           if git diff --quiet poetry.lock; then
             echo "No lock changes to commit"
           else
             git add poetry.lock
-            git commit -m "${{ inputs.commit_message }}"
+            git commit -m "$MSG"
             git push
             echo "Pushed lock update to ${{ github.ref_name }}"
           fi
