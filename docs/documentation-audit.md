@@ -1,38 +1,99 @@
-# Local documentation audit
+# Agentic local documentation audit
 
-Munin's documentation audit uses the official `Qwen/Qwen3-4B-GGUF` Q4_K_M model on a CPU-only GitHub-hosted runner. It performs two local inference stages:
+Munin's documentation audit reviews selected source files without changing repository code. The diff chooses which primary files are reviewed; each selected primary file is always supplied in full.
 
-1. Each selected source file is supplied to the model in full. The result is structured JSON written only in English.
-2. A separate aggregation inference deduplicates the file reports and generates an extensive pull-request section in English and Spanish.
+The workflow has three bounded stages:
 
-The model is not an agent. It has no shell, filesystem tools, network tools, or patch capability. Repository files are opened as text, never imported or executed. A final `git diff --exit-code` check verifies that tracked files were not changed.
+1. A provider router tries the configured GitHub Models catalog and inference endpoint once.
+2. A small LangGraph decides whether a primary file genuinely needs context from a local dependency.
+3. File-level English JSON reports are consolidated into one extensive pull-request section in English and Spanish.
 
-## Runs
+## Provider order
 
-- The first successful push to `main` without a baseline marker scans the complete repository and stores a cache marker only after the read-only checks pass.
-- Later pushes to `main` analyze every supported source file changed by the merge.
-- Pull-request runs analyze every changed supported source file, while still sending each whole file to the model.
-- `workflow_dispatch` can force either a full scan or an explicitly selected commit range.
+GitHub retired the public GitHub Models playground, catalog, and inference API on July 30, 2026. The probe remains for compatibility with GitHub Enterprise installations or a future replacement endpoint, but public GitHub is expected to reject it and immediately use the local fallback.
 
-If the baseline cache is eventually evicted, the next `main` push safely recreates the full baseline. A file that cannot fit into the pinned 32,768-token context is reported as skipped and is never silently truncated.
+When a compatible catalog is available, the router searches the configured preference order. The order is informed by the August 2026 Artificial Analysis intelligence leaderboard:
 
-## Imported symbols and external context
+1. Claude Opus 5
+2. GPT-5.6 Sol
+3. Kimi K3
+4. GLM-5.2
+5. MiniMax-M3
+6. Qwen3.6 27B
 
-The file reviewer does not receive the implementations of imported symbols unless they happen to be present in the same file. Its prompt therefore forbids assumptions about external behavior. Findings that require another implementation must use `requires_external_context`; they are always non-blocking.
+Availability in a provider catalog is still required. A benchmark ranking does not grant access to a model.
+
+The CPU fallback is `bartowski/Qwen_Qwen3.5-4B-GGUF`, file `Qwen_Qwen3.5-4B-Q4_K_M.gguf`, pinned by repository revision and SHA256. Artificial Analysis scores Qwen3.5 4B substantially above the deprecated Qwen3 4B, while its approximately 4.7-billion-parameter size remains practical for a standard GitHub-hosted CPU runner. The upstream Qwen organization publishes the base model; the pinned GGUF quantization is a community conversion, so the workflow verifies its complete SHA256 before loading it.
+
+## Bounded LangGraph
+
+The graph is deliberately small:
+
+```text
+primary file
+    |
+    v
+resolve local import candidates
+    |
+    v
+model selects zero to three exact paths
+    |                         \
+    | no context               \ context requested
+    v                           v
+review primary file        read allowlisted files in full
+                                |
+                                v
+                         review primary file
+```
+
+The model does not receive a general file-reading tool. Candidate paths are resolved deterministically from tracked local imports:
+
+- Python imports, including relative imports.
+- Relative JavaScript and TypeScript imports or `require()` calls.
+- Quoted C and C++ includes.
+
+The model can choose only exact paths from that allowlist. It gets one selection round, may request at most three files, and cannot follow transitive imports. Related files are read completely or skipped; they are never silently truncated.
+
+Related files are auxiliary evidence only. Findings continue to target the primary file and its line numbers.
 
 ## Security boundary
 
-The analysis workflow has `contents: read` only. A second `workflow_run` workflow, loaded from the trusted default branch, downloads the completed Markdown artifact and replaces only the section bounded by:
+The analyzer has no shell tool, arbitrary path tool, repository-write tool, code execution tool, or recursive browsing loop. Source files are opened as text and are never imported or executed.
+
+The analysis workflow has:
+
+- `contents: read`
+- `models: read`, retained only for the compatibility probe
+
+A final `git diff --exit-code` verifies that tracked files were not modified.
+
+A second trusted `workflow_run` workflow downloads the bounded Markdown artifact and replaces only the pull-request section between:
 
 ```text
 <!-- munin-doc-audit:start -->
 <!-- munin-doc-audit:end -->
 ```
 
-This avoids granting a pull-request branch a write-capable token. The publisher does not execute artifact content and rejects oversized or unbounded reports.
+The pull-request branch never receives a write-capable token.
 
-## Configuration
+## Full and incremental runs
 
-`.munin-doc-audit.toml` pins the official model revision, quantization, context size, confidence threshold, ignored paths, and output budgets. The model weights are cached by GitHub Actions and loaded once per audit job.
+- The first successful push to `main` without the version-two baseline marker scans the complete repository.
+- Later pushes to `main` select supported files changed by the merge.
+- Pull-request runs select supported files changed between the base and head commits.
+- Every selected primary file is still reviewed in full.
+- `workflow_dispatch` can force a complete scan or a chosen commit range.
+- If the baseline cache is evicted, the next push to `main` safely creates a new full baseline.
 
-The full per-file JSON, manifest, selected-file list, bilingual Markdown, and job summary are retained as a workflow artifact for 90 days.
+## Outputs
+
+The workflow retains for 90 days:
+
+- one English JSON report per primary file;
+- the list of selected primary files;
+- context candidates, requested paths, loaded paths, and skipped paths in report metadata;
+- a manifest containing the final provider;
+- a job summary;
+- the bounded bilingual pull-request Markdown.
+
+The model is loaded once per job and reused for context planning, file reviews, and final aggregation.
