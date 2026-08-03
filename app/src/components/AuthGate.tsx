@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, tanstack-query, react-query, lucide-icons, client-component, use-query-client, use-effect, use-state, auth-gate, login-form]
 "use client";
 
 import Image from "next/image";

@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, client-component, popover, popover-content, popover-anchor, popover-trigger]
 "use client";
 
 // Minimal Popover primitive built on Radix.  Matches the shadcn shape so the

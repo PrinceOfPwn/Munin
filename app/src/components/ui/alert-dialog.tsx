@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, client-component, alert-dialog-description, alert-dialog-title, alert-dialog-overlay, alert-dialog-trigger, alert-dialog-content, alert-dialog-action, alert-dialog-footer, alert-dialog-cancel, alert-dialog, alert-dialog-header, alert-dialog-portal]
 "use client";
 
 import * as React from "react";

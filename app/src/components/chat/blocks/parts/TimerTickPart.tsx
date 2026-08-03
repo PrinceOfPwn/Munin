@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, timer-tick-part]
 import { Timer } from "lucide-react";
 
 import { cn, formatDuration } from "@/lib/utils";

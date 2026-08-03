@@ -1,3 +1,4 @@
+// tags: [utility-library, c-a-t-e-g-o-r-y--t-a-b-s, t-o-o-l--c-a-t-e-g-o-r-i-e-s]
 export interface ToolCategoryDef {
   key: string;
   label: string;

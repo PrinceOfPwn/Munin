@@ -1,3 +1,4 @@
+// tags: [utility-library]
 import type { UIMessageChunk } from "ai";
 
 // ---------------------------------------------------------------------------

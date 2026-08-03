@@ -1,3 +1,4 @@
+// tags: [utility-library, bff-client, csrf, http-client]
 // -----------------------------------------------------------------------------
 // production-api — Fase 2 (issue #9) trimmed surface.
 //

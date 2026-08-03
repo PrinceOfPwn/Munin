@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, lucide-icons, client-component, use-state, artifact-actions]
 "use client";
 
 import { Check, Copy, Download } from "lucide-react";

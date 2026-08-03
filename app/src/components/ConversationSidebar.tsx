@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, lucide-icons, client-component, use-conversations, use-effect, use-create-conversation, use-state, conversation-sidebar]
 "use client";
 
 import Image from "next/image";

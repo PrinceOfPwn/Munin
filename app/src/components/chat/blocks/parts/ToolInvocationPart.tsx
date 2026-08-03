@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, client-component, use-state, status-badge, json-block, tool-invocation-part]
 "use client";
 
 import { useState } from "react";

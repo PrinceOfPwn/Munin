@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, lucide-icons, client-component, use-state, e-m-p-t-y--d-r-a-f-t, provider-switcher]
 "use client";
 
 import { useState } from "react";

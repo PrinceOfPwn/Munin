@@ -1,3 +1,4 @@
+// tags: [ui-component, console-surface, markdown-rendering, client-component, markdown]
 "use client";
 
 import type { Components } from "react-markdown";

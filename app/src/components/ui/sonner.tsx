@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, client-component, toaster]
 "use client";
 
 import { Toaster as SonnerToaster } from "sonner";
