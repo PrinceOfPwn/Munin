@@ -13,8 +13,6 @@ the legacy supervisor_v1 spawn behavior documented in
 
 from __future__ import annotations
 
-import os
-
 from munin.core.orchestrator import Orchestrator
 
 
