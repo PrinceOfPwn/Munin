@@ -41,7 +41,6 @@ jobs:
     env:
       HF_HOME: ${{ runner.temp }}/hf-cache
       HF_HUB_DISABLE_TELEMETRY: "1"
-      GITHUB_TOKEN: ${{ github.token }}
       AUDIT_OUTPUT: ${{ github.workspace }}/.audit-output
       BASELINE_DIR: ${{ runner.temp }}/munin-documentation-baseline
     steps:
@@ -158,6 +157,9 @@ jobs:
 
       - name: Analyze selected files with bounded context
         env:
+          # Never expose the repository token to pull-request code. A compatibility
+          # probe is allowed only for trusted push/manual runs.
+          GITHUB_MODELS_TOKEN: ${{ github.event_name != 'pull_request' && github.token || '' }}
           SCOPE: ${{ steps.range.outputs.scope }}
           BASE_SHA: ${{ steps.range.outputs.base }}
           HEAD_SHA: ${{ steps.range.outputs.head }}
