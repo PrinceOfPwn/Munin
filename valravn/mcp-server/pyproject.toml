@@ -1,0 +1,47 @@
+[project]
+name = "valravn-mcp"
+version = "1.0.0"
+description = "Valravn — agentic DAST orchestrator for Burp Suite. MCP server with persistent target memory, KB-driven probes, save-finding pipeline, and 11-agent team."
+license = "Apache-2.0"
+readme = "../README.md"
+requires-python = ">=3.11"
+authors = [{name = "PrinceOfPwn"}]
+keywords = ["mcp", "burp-suite", "pentest", "security", "bug-bounty", "valravn", "dast", "agentic-security"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "mcp==1.27.0",
+    "httpx==0.28.1",
+    "pydantic==2.12.5",
+    "pydantic-settings==2.13.1",
+    "cloakbrowser>=0.3.28",
+    # h2: HTTP/2 frame-level control for probe_race_singlepacket / probe_timeless_timing.
+    # No httpx http2 extra — we need raw frame access (multi-stream coalesce, send-all-in-one-packet).
+    "h2>=4.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/PrinceOfPwn/Valravn"
+Repository = "https://github.com/PrinceOfPwn/Valravn"
+Issues = "https://github.com/PrinceOfPwn/Valravn/issues"
+
+[project.scripts]
+valravn-mcp = "burpsuite_mcp.__main__:main"
+# Backwards-compatible aliases — kept for v1.x release line.
+burpsuite-mcp = "burpsuite_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/burpsuite_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/burpsuite_mcp/data" = "burpsuite_mcp/data"
+"src/burpsuite_mcp/tools/analysis/rulesets" = "burpsuite_mcp/tools/analysis/rulesets"

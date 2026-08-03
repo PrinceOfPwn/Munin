@@ -61,6 +61,22 @@ CAPABILITY_PROFILES: tuple[dict[str, Any], ...] = (
         ),
         "generated_tool_guidance": "Forge narrow, deterministic helpers with typed parameters. Store durable findings in memory/intel, not module globals.",
     },
+    {
+        "id": "burp_dast",
+        "title": "Valravn Burp extension — agentic DAST bridge",
+        "safety": "active_authorization_required",
+        "native_tools": (
+            "burp_status", "burp_health_check", "burp_check_scope",
+            "burp_get_proxy_count", "burp_invoke",
+        ),
+        "generated_tool_guidance": (
+            "Target the Valravn Burp extension REST API at 127.0.0.1:8111 (BURP_API_HOST / BURP_API_PORT "
+            "override via env). burp_invoke is the generic dispatcher; prefer the typed wrappers "
+            "(burp_status, burp_check_scope, burp_get_proxy_count) when they fit. The extension owns scope "
+            "enforcement; this wrapper never bypasses check_scope. The wrapper is resilient: an unreachable "
+            "extension returns ok=False with code=extension_unreachable and never cancels the Munin run."
+        ),
+    },
 )
 
 

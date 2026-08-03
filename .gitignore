@@ -15,3 +15,20 @@ soul_pending/
 /dist
 /build
 *.egg-info/
+
+# Valravn source archive (stays local, never commit)
+Valravn.zip
+valravn/*.zip
+
+# Valravn Burp/MCP runtime artifacts
+valravn/burp-extension/target/
+valravn/.valravn-intel/
+valravn/.remember/
+valravn/.mcp.json
+valravn/.claude/settings.local.json
+valravn/docs/superpowers/
+valravn/mcp-server/.venv/
+valravn/mcp-server/dist/
+valravn/mcp-server/build/
+valravn/mcp-server/.eggs/
+valravn/mcp-server/*.egg-info/

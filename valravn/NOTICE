@@ -1,0 +1,19 @@
+Valravn — Burp DAST surface (mesh Valravn)
+Copyright 2025-2026 Valravn Contributors
+
+This tool integrates with Burp Suite, a product of PortSwigger Ltd.
+Burp Suite is a registered trademark of PortSwigger Ltd.
+This project is not affiliated with or endorsed by PortSwigger.
+
+This tool uses the Model Context Protocol (MCP), developed by Anthropic.
+
+This distribution is part of the Valravn intelligence mesh maintained at
+https://github.com/PrinceOfPwn/Munin (subtree: valravn/). It is the
+active-testing surface of the mesh; passive reconnaissance (CTI gateway,
+AS lookups, Wayback, dark-web indexing) lives at munin/valravn/ in the
+same repository. Both surfaces share the .valravn-intel/<domain>/ target
+intel store, scope policy and audit log.
+
+Upstream attribution, retained as required by Apache-2.0 section 4(d):
+this product includes software originally developed at
+https://github.com/PrinceOfPwn/Valravn.

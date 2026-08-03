@@ -4,6 +4,84 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-03 — Valravn mesh: integrate Burp DAST surface as `valravn/`
+
+The Valravn mesh now has two layers. The passive CTI gateway
+(`munin/valravn/`, entry 2026-08-02 below) is prefixed "the CTI layer"; the new
+active Burp DAST is "the DAST layer". Both share scope, audit log and target
+intel.
+
+### What landed
+
+- New repo subtree `valravn/` integrating the Burp Suite agentic DAST
+  orchestration: `burp-extension/` (Java 21+, Montoya API, zero external deps,
+  REST on `127.0.0.1:8111`), `mcp-server/` (Python 3.11+, `burpsuite_mcp`
+  package, ~370 MCP tools, stdio transport, 151-file knowledge base). Apache-2.0
+  upstream attribution retained in `valravn/NOTICE` per §4(d).
+- Docs rewritten from Chinese to Spanish with a mesh framing (Munin's CTI
+  gateway for passive observation, Burp layer for active testing):
+  `valravn/README.md`, `valravn/AGENTS.md`, `valravn/CLAUDE.md`,
+  `valravn/docs/README.md`, `valravn/skill.json`.
+- Rebrand `.burp-intel/` -> `.valravn-intel/` consistently across 86 files so
+  the two layers share the same target-intel directory name; nothing left of
+  the old `.burp-intel` identifier.
+- Removed `valravn/mcp-server/.claude/skills/` (11 English snapshots older
+  than the Chinese top-level `.claude/skills/` — duplicate-maintenance hazard).
+- Wrapper `munin/mcp/tools/burp_tool.py`: resilient HTTP bridge from Munin to
+  the Burp extension. Five tools registered (`burp_status`,
+  `burp_health_check`, `burp_check_scope`, `burp_get_proxy_count`,
+  `burp_invoke`). Lazy httpx client, never raises; an unreachable Burp
+  extension returns `{"ok": False, "error": {"code": "extension_unreachable"}}`
+  and the Munin run continues. `burp_invoke` is the generic dispatcher for the
+  ~250 Burp MCP tools; the typed wrappers cover the common passive probes.
+- Capability profile `burp_dast` added to `munin/mcp/capabilities.py` with
+  safety `active_authorization_required`.
+- Poetry deps: added `httpx>=0.27.0`.
+- New opencode skill `.opencode/skills/valravn-diagnostic/SKILL.md` — operator
+  runbook: failure-mode triage table, 12 numbered diagnostic sections, free-tier
+  API-key table for every CTI provider, helper adjuncts table
+  (CloakBrowser/uv/Java 21/ProjectDiscovery/interact.sh), build/setup steps,
+  and pointers into CI for the runtime truth.
+- Soul: rewrote `soul/valravn.md` from Chinese to Spanish YAML-frontmatter form,
+  renamed to "Valravn intelligence & DAST mesh", added a "Capa DAST" section
+  distinguishes passive `valravn_*` (gateway) from active `burp_*` (wrapper) and
+  declares HITL gate semantics for active tools; same evidence-discipline and
+  `principles.md §2` campaign-loop integration as before.
+- Workflow `valravn-smoke.yml` extended with a second job
+  `valravn-burp-import` running on `ubuntu-latest` without Burp / Java /
+  CloakBrowser installed: AST-validate every `.py` under `valravn/`, JSON
+  validate every KB and payload file, validate the `skill.json` shape and
+  Apache-2.0 §4(d) attribution retention in `NOTICE`, assert `.gitignore`
+  covers `.valravn-intel/` + `Valravn.zip`, probe the `burp_tool` wrapper for
+  graceful degradation (no exception escapes), assert the `burp_dast`
+  capability registers. Triggers on `valravn/**`, `munin/mcp/tools/burp_tool.py`,
+  `munin/mcp/capabilities.py` and `soul/valravn.md` in addition to the existing
+  paths.
+- `.gitignore` (root + `valravn/.gitignore`) updated to ignore `Valravn.zip`,
+  `valravn/*.zip`, `valravn/burp-extension/target/`, `valravn/.valravn-intel/`,
+  `valravn/.remember/`, `valravn/.mcp.json`, `valravn/.claude/settings.local.json`,
+  `valravn/mcp-server/.venv/` and friends. None of this gets committed.
+- Munin `AGENTS.md` repo map updated to reflect the two-layer mesh and the
+  new `munin/mcp/tools/burp_tool.py` resilient bridge; the validation section
+  now points at the `valravn-smoke` workflow and the `valravn-diagnostic` skill.
+
+### No claims made
+
+- Burp Edition compatibility, deployment on hosts without Burp, and behavioral
+  tests of the upstream `burpsuite_mcp` MCP tools are NOT verified by this PR.
+  The CI job validates Python AST, KB JSON well-formedness, skill.json shape,
+  NOTICE attribution, `burp_tool` wrapper resilience and capability registration
+  only. Runtime behavioral testing of the Burp MCP server happens on the
+  operator's host where Burp + Java 21 are installed — `valravn-diagnostic`
+  documents the failure modes and free-tier setup.
+
+### Source
+
+Rebranding and wrapper authored by Raven-Mind against `origin/main` `0fdb273`
+on worktree `munition-valravn-integrate` (branch `raven-mind/integrate-valravn`).
+Upstream Valravn Burp DAST codebase imported under Apache-2.0; `valravn/NOTICE`
+retains the §4(d) attribution.
+
 ## 2026-08-02 — Localizations: README.ru.md (Русский) + README.ko.md (한국어)
 
 Added two localized translations of the canonical English `README.md` via the

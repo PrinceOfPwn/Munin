@@ -1,0 +1,41 @@
+# Java / Maven
+burp-extension/target/
+*.class
+*.war
+*.ear
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+
+# Claude Code local
+.remember/
+.mcp.json
+.claude/settings.local.json
+docs/superpowers/
+
+# Target intelligence (sensitive — never commit)
+.valravn-intel/

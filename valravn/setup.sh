@@ -1,0 +1,538 @@
+#!/usr/bin/env bash
+# Valravn — Setup Script
+# Installs all required and optional dependencies for Linux and macOS.
+# Usage: chmod +x setup.sh && ./setup.sh
+#
+# Coverage policy (2026-05-22):
+#   The KB ships 122 probe catalogs mapped to OWASP Top 10 (Web/API/LLM/Mobile),
+#   WSTG, PayloadsAllTheThings, HackTricks Web + Cloud. Cloud coverage is
+#   ANONYMOUS-EXTERNAL ONLY (anonymous list / public Function URL / exposed
+#   K8s endpoint) — no provider-credential-based tooling (e.g. Pacu, ScoutSuite,
+#   Prowler) is installed here, by design. Operators who need cred-based cloud
+#   privesc testing install those separately, out-of-band, with their own
+#   engagement-specific credentials.
+
+set -euo pipefail
+
+# ── Colors ──────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+info()  { echo -e "${BLUE}[*]${NC} $1"; }
+ok()    { echo -e "${GREEN}[+]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
+fail()  { echo -e "${RED}[-]${NC} $1"; }
+
+# ── Detect OS ───────────────────────────────────────────────────────
+OS="$(uname -s)"
+case "$OS" in
+    Linux*)  PLATFORM="linux";;
+    Darwin*) PLATFORM="macos";;
+    *)       fail "Unsupported OS: $OS"; exit 1;;
+esac
+info "Detected platform: $PLATFORM"
+
+# ── Helper: check if command exists ─────────────────────────────────
+has() { command -v "$1" &>/dev/null; }
+
+# ── Helper: install package via system package manager ──────────────
+pkg_install() {
+    if [ "$PLATFORM" = "linux" ]; then
+        if has apt-get; then
+            sudo apt-get install -y "$@"
+        elif has dnf; then
+            sudo dnf install -y "$@"
+        elif has pacman; then
+            sudo pacman -S --noconfirm "$@"
+        else
+            fail "No supported package manager found (apt/dnf/pacman)"
+            return 1
+        fi
+    elif [ "$PLATFORM" = "macos" ]; then
+        if has brew; then
+            brew install "$@"
+        else
+            fail "Homebrew not found. Install: https://brew.sh"
+            return 1
+        fi
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════
+# PHASE 1: Required Dependencies
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "  Phase 1: Required Dependencies"
+echo "════════════════════════════════════════════════════"
+
+# ── Java 21+ ────────────────────────────────────────────────────────
+info "Checking Java..."
+
+detect_java() {
+    # Returns the path to a java binary, or empty string if none found.
+    if has java; then
+        command -v java
+        return
+    fi
+    if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        echo "$JAVA_HOME/bin/java"
+        return
+    fi
+    echo ""
+}
+
+parse_java_major() {
+    # Parse the major version from `<java> -version` output (both old "1.8" and new "21" styles).
+    local java_bin="$1"
+    "$java_bin" -version 2>&1 | awk -F'"' '
+        /version/ {
+            split($2, v, ".")
+            if (v[1] == "1") print v[2]; else print v[1]
+            exit
+        }
+    '
+}
+
+JAVA_BIN="$(detect_java)"
+if [ -n "$JAVA_BIN" ]; then
+    JAVA_VER="$(parse_java_major "$JAVA_BIN" 2>/dev/null || echo 0)"
+    if [ -n "$JAVA_VER" ] && [ "$JAVA_VER" -ge 21 ] 2>/dev/null; then
+        ok "Java $JAVA_VER found at $JAVA_BIN"
+    else
+        warn "Java found at $JAVA_BIN but version=${JAVA_VER:-unknown} < 21"
+        warn "Install Java 21+: https://adoptium.net/temurin/releases/?version=21"
+    fi
+else
+    warn "Java not found (checked PATH and JAVA_HOME)"
+    info "Installing Java 21..."
+    if [ "$PLATFORM" = "linux" ]; then
+        if has apt-get; then
+            sudo apt-get install -y openjdk-21-jdk
+        elif has dnf; then
+            sudo dnf install -y java-21-openjdk-devel
+        elif has pacman; then
+            sudo pacman -S --noconfirm jdk21-openjdk
+        fi
+    elif [ "$PLATFORM" = "macos" ]; then
+        pkg_install openjdk@21
+    fi
+    if has java; then
+        ok "Java installed"
+    else
+        fail "Java installation failed — install manually: https://adoptium.net/temurin/releases/?version=21"
+    fi
+fi
+
+# ── Maven ───────────────────────────────────────────────────────────
+info "Checking Maven..."
+if has mvn; then
+    ok "Maven found: $(mvn --version 2>&1 | head -1)"
+else
+    info "Installing Maven..."
+    pkg_install maven
+    has mvn && ok "Maven installed" || fail "Maven installation failed"
+fi
+
+# ── Python 3.11+ ────────────────────────────────────────────────────
+info "Checking Python..."
+if has python3; then
+    PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
+    if [ "$PY_MINOR" -ge 11 ] 2>/dev/null; then
+        ok "Python $PY_VER found"
+    else
+        warn "Python $PY_VER found but < 3.11 required"
+    fi
+else
+    warn "Python3 not found"
+    info "Installing Python..."
+    if [ "$PLATFORM" = "linux" ]; then
+        pkg_install python3 python3-venv python3-pip
+    elif [ "$PLATFORM" = "macos" ]; then
+        pkg_install python@3.13
+    fi
+fi
+
+# ── uv (Python package manager) ────────────────────────────────────
+info "Checking uv..."
+if has uv; then
+    ok "uv found: $(uv --version 2>&1)"
+else
+    info "Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Add to current session PATH
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    has uv && ok "uv installed" || fail "uv installation failed — see https://docs.astral.sh/uv/"
+fi
+
+# ── Go (for ProjectDiscovery tools) ────────────────────────────────
+info "Checking Go..."
+if has go; then
+    ok "Go found: $(go version)"
+else
+    info "Installing Go..."
+    if [ "$PLATFORM" = "linux" ]; then
+        GO_VERSION="1.24.4"
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64)  GO_ARCH="amd64";;
+            aarch64) GO_ARCH="arm64";;
+            *)       GO_ARCH="amd64";;
+        esac
+        curl -LO "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+        sudo rm -rf /usr/local/go
+        sudo tar -C /usr/local -xzf "go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+        rm -f "go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+        export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+    elif [ "$PLATFORM" = "macos" ]; then
+        pkg_install go
+    fi
+    has go && ok "Go installed: $(go version)" || fail "Go installation failed — see https://go.dev/dl/"
+fi
+
+# Ensure Go bin is in PATH
+export PATH="$HOME/go/bin:$PATH"
+
+# ════════════════════════════════════════════════════════════════════
+# PHASE 2: Build the Project
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "  Phase 2: Build the Project"
+echo "════════════════════════════════════════════════════"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Build Java extension ────────────────────────────────────────────
+info "Building Burp extension..."
+cd "$SCRIPT_DIR/burp-extension"
+if mvn package -q; then
+    JAR="target/valravn-burp-ext-1.0.0.jar"
+    if [ -f "$JAR" ]; then
+        ok "Extension built: $JAR"
+    else
+        fail "JAR not found at $JAR"
+    fi
+else
+    fail "Maven build failed"
+fi
+
+# ── Install Python MCP server ──────────────────────────────────────
+info "Setting up Python MCP server..."
+cd "$SCRIPT_DIR/mcp-server"
+uv venv 2>/dev/null || true
+uv pip install -e . 2>&1 | tail -1
+ok "MCP server installed"
+
+# Verify it loads
+TOOL_COUNT=$(uv run python -c "from burpsuite_mcp.server import mcp; print(len(mcp._tool_manager._tools))" 2>/dev/null || echo "0")
+if [ "$TOOL_COUNT" -gt 0 ]; then
+    ok "MCP server verified: $TOOL_COUNT tools loaded"
+else
+    fail "MCP server failed to load"
+fi
+
+# CloakBrowser stealth Chromium for browser_* tools (browser_crawl, browser_navigate, ...)
+# First import auto-downloads the patched binary (~200MB, cached). Pre-warm it
+# now so the first MCP call doesn't pay that latency.
+info "Warming CloakBrowser stealth Chromium (first run downloads ~200MB)..."
+if uv run python -c "import cloakbrowser" >/dev/null 2>&1; then
+    ok "CloakBrowser ready"
+else
+    warn "CloakBrowser warm-up failed — browser_* tools will trigger the download on first call instead"
+fi
+
+# ════════════════════════════════════════════════════════════════════
+# PHASE 3: Optional — ProjectDiscovery Recon Tools
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "  Phase 3: Recon Tools (optional)"
+echo "════════════════════════════════════════════════════"
+info "These tools enhance reconnaissance. They are NOT required."
+echo ""
+
+install_pd_tool() {
+    local name="$1"
+    local install_cmd="$2"
+    if has "$name"; then
+        ok "$name already installed"
+    else
+        info "Installing $name..."
+        if eval "$install_cmd" 2>&1 | tail -1; then
+            has "$name" && ok "$name installed" || warn "$name: install completed but binary not in PATH"
+        else
+            warn "$name installation failed (optional — skipping)"
+        fi
+    fi
+}
+
+install_pd_tool "subfinder" \
+    "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+
+install_pd_tool "httpx" \
+    "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest"
+
+install_pd_tool "nuclei" \
+    "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+
+install_pd_tool "katana" \
+    "CGO_ENABLED=1 go install github.com/projectdiscovery/katana/cmd/katana@latest"
+
+install_pd_tool "dalfox" \
+    "go install -v github.com/hahwul/dalfox/v2@latest"
+
+install_pd_tool "gau" \
+    "go install -v github.com/lc/gau/v2/cmd/gau@latest"
+
+install_pd_tool "waybackurls" \
+    "go install -v github.com/tomnomnom/waybackurls@latest"
+
+install_pd_tool "ffuf" \
+    "go install -v github.com/ffuf/ffuf/v2@latest"
+
+install_pd_tool "amass" \
+    "go install -v github.com/owasp-amass/amass/v4/cmd/amass@master"
+
+# Python CLI tools — installed via `uv tool install` (isolated venv per tool,
+# same UX as pipx). Project standardizes on uv; never pip.
+install_pd_tool "wafw00f" \
+    "uv tool install wafw00f"
+
+install_pd_tool "arjun" \
+    "uv tool install arjun"
+
+install_pd_tool "sqlmap" \
+    "uv tool install sqlmap"
+
+install_pd_tool "commix" \
+    "uv tool install commix"
+
+# nikto (legacy web scanner — optional)
+if has nikto; then
+    ok "nikto already installed"
+else
+    info "Installing nikto..."
+    pkg_install nikto || warn "nikto install failed (optional)"
+fi
+
+# wpscan (WordPress — optional, Ruby gem)
+if has wpscan; then
+    ok "wpscan already installed"
+else
+    if has gem; then
+        info "Installing wpscan..."
+        gem install --user-install wpscan 2>&1 | tail -1 || warn "wpscan install failed (optional)"
+    else
+        warn "wpscan not found and no Ruby gem available — install via: gem install wpscan"
+    fi
+fi
+
+# ── Valravn v1.0 SAST + secrets layer ──
+echo ""
+info "Valravn v1.0 — installing SAST + secrets layer (optional but recommended)..."
+
+install_pd_tool "opengrep" \
+    "curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash"
+
+install_pd_tool "gitleaks" \
+    "go install -v github.com/gitleaks/gitleaks/v8@latest"
+
+install_pd_tool "trufflehog" \
+    "go install -v github.com/trufflesecurity/trufflehog/v3@latest"
+
+# git-dumper — Python CLI, install via uv tool
+install_pd_tool "git-dumper" \
+    "uv tool install git-dumper"
+
+# OWASP Noir — Crystal binary. brew tap exists for macOS; Linux build from source.
+# We surface a hint only; binary distribution is platform-specific.
+if has noir; then
+    ok "noir already installed"
+else
+    warn "noir not installed — operator install: https://github.com/owasp-noir/noir (brew tap noir-cr/noir/noir on macOS)"
+fi
+
+# ════════════════════════════════════════════════════════════════════
+# PHASE 4: Generate .mcp.json
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "  Phase 4: Claude Code Configuration"
+echo "════════════════════════════════════════════════════"
+
+cd "$SCRIPT_DIR"
+MCP_JSON="$SCRIPT_DIR/.mcp.json"
+VENV_PYTHON="$SCRIPT_DIR/mcp-server/.venv/bin/python"
+
+# ── WSL detection ───────────────────────────────────────────────────
+# When the MCP server runs in WSL but Burp runs on the Windows host, the
+# extension API is not on WSL's 127.0.0.1. Two supported modes:
+#   mirrored — Windows 127.0.0.1 is reachable from WSL as 127.0.0.1
+#              (secure, recommended; no env override, no bind change).
+#   NAT      — reach Burp via the Windows host IP (the WSL default-route
+#              gateway); the extension must bind off-loopback.
+IS_WSL=0
+WSL_MODE=""
+WSL_HOST_IP=""
+if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+    IS_WSL=1
+    if has wslinfo; then
+        WSL_MODE="$(wslinfo --networking-mode 2>/dev/null || true)"
+    fi
+    if [ -z "$WSL_MODE" ]; then
+        # wslinfo unavailable — infer from loopback reachability. In mirrored
+        # mode the default route is the LAN gateway, NOT the Windows host, so
+        # deriving BURP_API_HOST from it would be wrong. If Burp already answers
+        # on loopback we're effectively connected (mirrored), so leave the host
+        # at the default; otherwise assume NAT.
+        if curl -s -m 2 -o /dev/null "http://127.0.0.1:${BURP_API_PORT:-8111}/api/health" 2>/dev/null; then
+            WSL_MODE="mirrored"
+        else
+            WSL_MODE="nat"
+        fi
+    fi
+    if [ "$WSL_MODE" != "mirrored" ]; then
+        # NAT — Windows host is the WSL default-route gateway.
+        WSL_HOST_IP="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+    fi
+    info "WSL detected (networking mode: ${WSL_MODE:-unknown})"
+fi
+
+if [ ! -f "$MCP_JSON" ]; then
+    info "Generating .mcp.json..."
+    if [ "$IS_WSL" = "1" ] && [ "$WSL_MODE" = "nat" ] && [ -n "$WSL_HOST_IP" ]; then
+        cat > "$MCP_JSON" << MCPEOF
+{
+  "mcpServers": {
+    "valravn": {
+      "command": "$VENV_PYTHON",
+      "args": ["-m", "burpsuite_mcp"],
+      "env": {
+        "BURP_API_HOST": "$WSL_HOST_IP"
+      }
+    }
+  }
+}
+MCPEOF
+        ok "Created $MCP_JSON (WSL NAT → BURP_API_HOST=$WSL_HOST_IP)"
+    else
+        cat > "$MCP_JSON" << MCPEOF
+{
+  "mcpServers": {
+    "valravn": {
+      "command": "$VENV_PYTHON",
+      "args": ["-m", "burpsuite_mcp"]
+    }
+  }
+}
+MCPEOF
+        ok "Created $MCP_JSON"
+    fi
+else
+    ok ".mcp.json already exists — skipping"
+    if [ "$IS_WSL" = "1" ] && [ "$WSL_MODE" = "nat" ] && [ -n "$WSL_HOST_IP" ]; then
+        warn "WSL NAT: .mcp.json must set env BURP_API_HOST=$WSL_HOST_IP (Windows host) — or switch to mirrored networking (see 'WSL → Windows Burp' below)"
+    fi
+fi
+
+# ════════════════════════════════════════════════════════════════════
+# SUMMARY
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "  Setup Complete"
+echo "════════════════════════════════════════════════════"
+echo ""
+
+# Check all components
+check() {
+    if has "$1"; then
+        echo -e "  ${GREEN}✓${NC} $1"
+    else
+        echo -e "  ${RED}✗${NC} $1 (not found)"
+    fi
+}
+
+echo "Required:"
+check java
+check mvn
+check python3
+check uv
+check go
+
+echo ""
+echo "Optional (recon):"
+check subfinder
+check httpx
+check nuclei
+check katana
+check ffuf
+check dalfox
+check amass
+check wafw00f
+check arjun
+check sqlmap
+check commix
+check nikto
+check wpscan
+
+echo ""
+echo "Project:"
+# Version-agnostic: a version bump in pom.xml must not make this report
+# "not built".
+JAR_PATH="$(ls -t "$SCRIPT_DIR"/burp-extension/target/valravn-burp-ext-*.jar 2>/dev/null \
+        | grep -v -e '-sources' -e '-javadoc' | head -1)"
+if [ -f "$JAR_PATH" ]; then
+    echo -e "  ${GREEN}✓${NC} Burp extension JAR built"
+else
+    echo -e "  ${RED}✗${NC} Burp extension JAR not found"
+fi
+
+if [ -f "$VENV_PYTHON" ]; then
+    echo -e "  ${GREEN}✓${NC} Python venv ready"
+else
+    echo -e "  ${RED}✗${NC} Python venv not found"
+fi
+
+if [ -f "$MCP_JSON" ]; then
+    echo -e "  ${GREEN}✓${NC} .mcp.json configured"
+else
+    echo -e "  ${RED}✗${NC} .mcp.json not found"
+fi
+
+echo ""
+echo "Next steps:"
+echo "  1. Open Burp Suite"
+echo "  2. Extensions → Add → Java → Select: $JAR_PATH"
+echo "  3. Verify: 'Valravn MCP started on port 8111' in Burp output"
+echo "  4. Start Claude Code in this directory"
+echo ""
+echo "The extension tab defaults to Host 127.0.0.1 / Port 8111 — same as the MCP"
+echo "server default — so on a single host it auto-connects with no config. Edit the"
+echo "tab's Host/Port only for a custom port or a cross-host bind (see WSL below)."
+echo ""
+
+if [ "$IS_WSL" = "1" ]; then
+    echo "WSL → Windows Burp:"
+    if [ "$WSL_MODE" = "mirrored" ]; then
+        echo -e "  ${GREEN}✓${NC} Mirrored networking active — Burp on Windows 127.0.0.1:8111 is reachable directly."
+        echo "    Keep the Valravn tab Host at 127.0.0.1 (no bind flag, no env override)."
+        echo "    Verify (with Burp running):  curl -s http://127.0.0.1:8111/api/health"
+    else
+        echo "  NAT mode — pick one:"
+        echo "    RECOMMENDED (secure): enable mirrored networking, then re-run this script —"
+        echo "      • add to C:\\Users\\<you>\\.wslconfig :   [wsl2]  networkingMode=mirrored"
+        echo "      • PowerShell:  wsl --shutdown   (restarts WSL)"
+        echo "      • Burp stays on 127.0.0.1; drop the BURP_API_HOST env block from .mcp.json."
+        echo "    OR (NAT — exposes the API on the WSL vSwitch, trusted host only):"
+        echo "      • Valravn config tab → Host = 0.0.0.0"
+        echo "      • launch Burp with JVM flag:  -Dvalravn.allow_non_loopback_bind=true"
+        echo "      • keep  env BURP_API_HOST=${WSL_HOST_IP:-<windows-host-ip>}  in .mcp.json"
+    fi
+    echo ""
+fi
