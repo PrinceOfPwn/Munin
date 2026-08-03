@@ -1,10 +1,21 @@
-# Changes
+﻿# Changes
 
 Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
-## 2026-08-03 — Soul prompt engineering: deliberate load order + separate kernel block
+## 2026-08-03 â€” PR-0 of Issue #32 matrix: sqlite Plan 18 indexes, supervisor_v2 wake path, cache correctness, orphan cleanup (PR #40)
+
+First implementation PR of the Issue #32 critical path (10 cards of PLAN-0/PLAN-1), built in worktree `munin-pr0` (branch `raven-mind/pr-0-cleanup-cache`, base `origin/main` @ `3d52ae1`). Commits `12c8c06` + `0f915c8`; all CI checks green (backend+Turso 59s, frontend build 1m5s, E2E lab 3m43s, CodeQL, Analyze x3).
+
+- `store.py`: `_PLAN18_DDL` (8 idempotent `CREATE INDEX IF NOT EXISTS`) + `_install_plan18_indexes()` at the end of `migrate()`; regression proof via `tests/test_store_indexes.py` (EXPLAIN QUERY PLAN, SCAN â†’ USING INDEX, fixtures `tests/fixtures/explain_query_plan_{before,after}.txt`).
+- `orchestrator.py`: `wake()` winner branch returns `{spawned: False, reason: "supervisor_v2_wake_path"}` and releases the spawn slot to IDLE â€” `munin.subagents.runner` does not ship in v1.0.0; `_spawn_runner` retained as legacy supervisor_v1; `munin_wake` registration untouched.
+- `main.py`: `valravn_tool` explicitly imported, decoupled from the `tavily_tool` side-effect import.
+- Removed 5 orphan `munin/production` modules (zero imports verified): `agents`, `extensions`, `memory`, `page_agent`, `skills_catalog`. Deprecation markers (comment-only) on legacy coordination modules (`swarm`, `handoff_tools`, `base`, `ldap_agent`).
+- Frontend cache correctness: `useConversations` write-through gated to `query === ""` (BUG-1); `aiChat.ts` write-through on cold hydrate + `{context,error,meta,ts}` logging on silent catches; `<LiveConsole key={conversationId}>`; `clearMessagesByConversation` before `putMessages` (BUG-2); removed orphan `app/src/lib/mcp.ts`.
+- Findings: `agent_runs` `conversation_id` lookups are already covered by `sqlite_autoindex_agent_runs_2` (UNIQUE constraint leading column); chat.py polling-loop optimization explicitly deferred (out of scope). Process: Antigravity CLI delegations (Tier 2 token-list shims, 1 frontend + 2 backend attempts â€” first aborted by shell auto-deny) + full operator re-review; local validation (`pytest tests/test_store_indexes.py`, `py_compile`, `git diff --check`) before push.
+
+## 2026-08-03 â€” Soul prompt engineering: deliberate load order + separate kernel block
 
 Reworked how the Soul is assembled into the supervisor system prompt so the
 persona reads as one coherent, aggressive campaign identity instead of a
@@ -13,29 +24,29 @@ mixed bag of alphabetical markdown.
 Follow-up in the same change: `mode_contract` in
 `munin/core/autonomy/modes.py` rewritten full-rogue in Simplified Chinese.
 Removed the prompt-level self-censorship ("an approval gate you avoid by
-rewording is a policy violation… request it" and the YOLO "critical-level
-actions still require operator approval; request it") — the contract now
-states that technical gates (审批中断、调用预算、OPSEC preflight) are
-**runtime-enforced** and the model should not brake for them: "在闸门之上，
-全力推进". `tests/test_autonomous_modes.py` updated accordingly (asserts the
+rewording is a policy violationâ€¦ request it" and the YOLO "critical-level
+actions still require operator approval; request it") â€” the contract now
+states that technical gates (å®¡æ‰¹ä¸­æ–­ã€è°ƒç”¨é¢„ç®—ã€OPSEC preflight) are
+**runtime-enforced** and the model should not brake for them: "åœ¨é—¸é—¨ä¹‹ä¸Šï¼Œ
+å…¨åŠ›æŽ¨è¿›". `tests/test_autonomous_modes.py` updated accordingly (asserts the
 YOLO contract no longer contains "policy violation"/"request it" and still
-acknowledges the runtime gates via 闸门).
+acknowledges the runtime gates via é—¸é—¨).
 
 Changes in `munin/core/soul.py`:
 
 - `SoulManager.files()` now returns the persona files in a deliberate,
-  non-alphabetical order: `goals.md` → `identity.md` → `principles.md` →
-  `skills.md` → `valravn.md` (`SOUL_LOAD_ORDER`). The hardcoded identity
+  non-alphabetical order: `goals.md` â†’ `identity.md` â†’ `principles.md` â†’
+  `skills.md` â†’ `valravn.md` (`SOUL_LOAD_ORDER`). The hardcoded identity
   preamble still opens the prompt, so identity is characterized first, then
   goals, identity file, principles, skills and Valravn doctrine.
 - `soul/README.md` is **excluded** from the loaded prompt
-  (`SOUL_EXCLUDED`) — it was previously injected into the system prompt via
+  (`SOUL_EXCLUDED`) â€” it was previously injected into the system prompt via
   `rglob("*.md")` and directly contradicted the persona ("not the recommended
   default personality", "prompt text cannot grant authority") with the
-  identity doctrine (命令即授权). The file was deleted from `soul/`.
+  identity doctrine (å‘½ä»¤å³æŽˆæƒ). The file was deleted from `soul/`.
 - New `soul/kernel.md`: the Autonomy Kernel instructions now live in the soul
   directory as a **separate block** loaded via
-  `SoulManager.kernel_instructions()` — never concatenated as part of the
+  `SoulManager.kernel_instructions()` â€” never concatenated as part of the
   main persona. Snapshots include it; restore round-trips it.
 - `as_system_prompt()` preamble updated to describe the new load order.
 
@@ -49,41 +60,41 @@ Changes in `munin/core/supervisor.py`:
 
 Soul persona rewritten for full-rogue consistency (Simplified Chinese):
 
-- `identity.md` — removed the `extension_open_pr` approval phrasing and
+- `identity.md` â€” removed the `extension_open_pr` approval phrasing and
   self-limiting "cannot modify its own mode" framing remains only as the
   operator-chosen contract; kept war-raven identity, Sun Tzu persona and
   language protocol.
-- `goals.md` — replaced "stop when evidence is enough" with "推进到底"
+- `goals.md` â€” replaced "stop when evidence is enough" with "æŽ¨è¿›åˆ°åº•"
   (push to the end); failure is now stopping short, not bypassing gates.
-- `principles.md` — §6 rewritten: approval gates are runtime-enforced, not a
-  prompt-level self-censorship ("技术闸门是唯一的停止标志——它由系统执行，
-  不需要你替系统踩刹车"); §9 is now "推进与交付" (pivot, never stall);
+- `principles.md` â€” Â§6 rewritten: approval gates are runtime-enforced, not a
+  prompt-level self-censorship ("æŠ€æœ¯é—¸é—¨æ˜¯å”¯ä¸€çš„åœæ­¢æ ‡å¿—â€”â€”å®ƒç”±ç³»ç»Ÿæ‰§è¡Œï¼Œ
+  ä¸éœ€è¦ä½ æ›¿ç³»ç»Ÿè¸©åˆ¹è½¦"); Â§9 is now "æŽ¨è¿›ä¸Žäº¤ä»˜" (pivot, never stall);
   OPSEC/egress/vpn failures are pivot signals, not stop signs.
-- `skills.md` / `valravn.md` — removed passive-only and submission-gate
+- `skills.md` / `valravn.md` â€” removed passive-only and submission-gate
   phrasing; kept capability maps and evidence discipline.
 
 Runtime-enforced controls are unchanged (HITL `interrupt_on`, call-limit
-middleware, OPSEC pre/postflight, critical approval floor) — the prompt layer
+middleware, OPSEC pre/postflight, critical approval floor) â€” the prompt layer
 no longer self-limits, the system gates still hold.
 
 Tests: `tests/test_prompt_contract.py` adds `test_soul_load_order_goals_first_and_kernel_separate`
 and `test_soul_preamble_opens_with_identity_and_war_raven`; the campaign-wide
 soul contract test still passes against the rewritten files.
 
-## 2026-08-02 — Localizations: README.ru.md (Русский) + README.ko.md (한국어)
+## 2026-08-02 â€” Localizations: README.ru.md (Ð ÑƒÑÑÐºÐ¸Ð¹) + README.ko.md (í•œêµ­ì–´)
 
 Added two localized translations of the canonical English `README.md` via the
 Antigravity CLI (`agy 1.1.9`) running headlessly under the user's Google
 subscription session. This was the first end-to-end use of the
 `antigravity-coder` skill on this host.
 
-Files changed (six, all at repo root — no source/runtime files touched):
+Files changed (six, all at repo root â€” no source/runtime files touched):
 
-- `README.ru.md` (new, ~27 KB) — Russian localization.
-- `README.ko.md` (new, ~19 KB) — Korean (Hangul) localization.
-- `README.md`, `README.es.md`, `README.pt-BR.md`, `README.zh-CN.md` — only the
+- `README.ru.md` (new, ~27 KB) â€” Russian localization.
+- `README.ko.md` (new, ~19 KB) â€” Korean (Hangul) localization.
+- `README.md`, `README.es.md`, `README.pt-BR.md`, `README.zh-CN.md` â€” only the
   top centered language-selector paragraph touched (+2 lines each: appended
-  `· <a href="README.ru.md">Русский</a> · <a href="README.ko.md">한국어</a>`).
+  `Â· <a href="README.ru.md">Ð ÑƒÑÑÐºÐ¸Ð¹</a> Â· <a href="README.ko.md">í•œêµ­ì–´</a>`).
 
 Conventions honored (mirrored from `README.zh-CN.md`):
 
@@ -97,7 +108,7 @@ Conventions honored (mirrored from `README.zh-CN.md`):
   is translated and the `<h1>Munin</h1>` title and the raven-mark image are
   untouched.
 - Each file's language-selector paragraph keeps its own `<strong>` marker on
-  its own current language; RU bolds "Русский" and KO bolds "한국어".
+  its own current language; RU bolds "Ð ÑƒÑÑÐºÐ¸Ð¹" and KO bolds "í•œêµ­ì–´".
 
 Local `agy` setup performed once on this host (worth recording so the next
 delegation works without re-diagnosis):
@@ -139,7 +150,7 @@ Known minor cosmetic defect (not warranting a re-delegation): in
 `README.ko.md`, line 332 `### 2. Start the server` is left in English while
 the surrounding prose is translated. This sub-heading has no anchor in the
 TOC, so no internal link is broken. The Russian file translated the same
-heading to `### 2. Запуск сервера`. Easy follow-up if a translator pass is
+heading to `### 2. Ð—Ð°Ð¿ÑƒÑÐº ÑÐµÑ€Ð²ÐµÑ€Ð°`. Easy follow-up if a translator pass is
 desired.
 
 Delegation summary:
@@ -154,7 +165,7 @@ Delegation summary:
   mandatory review (diff inspection, validation exit-codes, scope check)
   was performed manually and is reflected here.
 
-## 2026-08-02 — Soul rebuild (identity, doctrine, capabilities, idiomatic delegation)
+## 2026-08-02 â€” Soul rebuild (identity, doctrine, capabilities, idiomatic delegation)
 
 Rebuild of all five `soul/*.md` files on top of the latest `main` (which carried
 the autonomous-modes refactor). The previous soul leaned hard on AD/LDAP-specific
@@ -163,7 +174,7 @@ subagent), over-fixed several rules (forge loop on goals AND principles, scope
 doctrine on four files) and cited infrastructure as if the agent had to operate
 it (Turso online, GitHub Actions, GUI proxy, pytest tests/, `munin reset`).
 
-- `soul/identity.md` — doctrine moved to the first line. The "applies to
+- `soul/identity.md` â€” doctrine moved to the first line. The "applies to
   GLM/MiMo/Qwen/DeepSeek/Kimi/Yi" model-family list was deleted (the model does
   not need to enumerate its siblings). Hugin's role is narrowed to its actual
   specialty: malware analysis, Rust / low-level implementation, evasion and
@@ -172,11 +183,11 @@ it (Turso online, GitHub Actions, GUI proxy, pytest tests/, `munin reset`).
   (operation modes STANDARD/YOLO/GOAL/BEAST and the durable TODO plan +
   hypothesis tracking under GOAL/BEAST); the soul refers to the runtime as the
   authority, it does not re-paste mode rules.
-- `soul/principles.md` — Scope Doctrine now lives once, marked as the sole
+- `soul/principles.md` â€” Scope Doctrine now lives once, marked as the sole
   authority, and is referenced by the other files instead of being re-stated.
-  §3 restates Hugin's specialty boundary. §6 is a condensed reference to the
+  Â§3 restates Hugin's specialty boundary. Â§6 is a condensed reference to the
   four modes (the runtime contract in `autonomy/modes.py` stays authoritative).
-  **§7 (delegation) is rewritten around two surfaces**: §7.1 documents the
+  **Â§7 (delegation) is rewritten around two surfaces**: Â§7.1 documents the
   idiomatic in-process path via the Autonomy Kernel's 12 meta-tools as
   registered in `kernel.py` (`create_tool`, `invoke_registered_tool`,
   `list_registered_tools`, `inspect_registered_tool`, `create_subagent`,
@@ -184,13 +195,13 @@ it (Turso online, GitHub Actions, GUI proxy, pytest tests/, `munin reset`).
   `create_workflow`, `invoke_registered_workflow`, `list_registered_workflows`,
   `schedule_workers`), and the three `SubagentSpec.runtime_type` choices
   (`deep_agent` / `compiled_langgraph` / `persisted_subagent_dict`) as the
-  agent's decision; §7.2 documents the cross-process persistent path via MCP
+  agent's decision; Â§7.2 documents the cross-process persistent path via MCP
   wake (`munin_wake`, `munin_wake_claim`, `munin_wake_list`,
-  `read_wake_artifact`, `subagent_trace`, `graph_forge`). §8 expands the
+  `read_wake_artifact`, `subagent_trace`, `graph_forge`). Â§8 expands the
   "shared intel vs memory" rule from a closed AD-specific list (Kerberoast /
   AS-REP / Domain Admins) to an open pivot-based criterion: any validated pivot
   that changes the next decision goes to `publish_shared_intel`.
-- `soul/skills.md` — regrouped by operational function, not by source file.
+- `soul/skills.md` â€” regrouped by operational function, not by source file.
   Added the previously missing operator-facing tools that were already in the
   runtime: `munin_chat` (the conversational portal that runs the internal ReAct
   loop), `conversation_list` / `conversation_get` / `conversation_create` (the
@@ -203,21 +214,21 @@ it (Turso online, GitHub Actions, GUI proxy, pytest tests/, `munin reset`).
   entry in "native agents" was deleted (it was incorrect: `_NATIVE_SUBAGENTS`
   is empty in `subagents/base.py` and the agent should `create_subagent` /
   `graph_forge` specialists on demand).
-- `soul/goals.md` — rewritten as a standard of operational excellence, not a
+- `soul/goals.md` â€” rewritten as a standard of operational excellence, not a
   product roadmap. Removed maintainer-facing items ("make Turso the long-term
   campaign memory", "GitHub Actions / LDAP lab / GUI proxy reproducible",
   "`pytest tests/` passes", "`munin reset` reproducible"). The agent's success
   criterion is campaign speed and depth with low noise, dense evidence and
   capability reuse, not a build status.
-- `soul/valravn.md` — operational doctrine only. Removed the §"运营守卫" block
+- `soul/valravn.md` â€” operational doctrine only. Removed the Â§"è¿è¥å®ˆå«" block
   about Google Safe Browsing business mode suppression, FullHunt opt-in and
-  provider quotas — those concerns are for the operator / maintainer, not the
+  provider quotas â€” those concerns are for the operator / maintainer, not the
   agent. Kept the operational contract: status probe, IOC / org / asset / CVE /
   network / historical-web / URL / darkweb / capture / translate flows, the
   `depth="quick"` vs `depth="deep"` rule, the evidence-discipline requirement
   to retain provider attribution + retrieval time + source URL + first/last
   seen + contradictions. Added an explicit bridge to the campaign loop
-  (`principles.md §2`) and how Hugin (knowledge) and Valravn (observation) are
+  (`principles.md Â§2`) and how Hugin (knowledge) and Valravn (observation) are
   complementary, both external evidence to verify.
 
 No runtime code changed. `munin/core/prompting.py`, `autonomy/modes.py` and
@@ -225,7 +236,7 @@ the subagent native files (`munin/subagents/ldap_agent.py`) are unchanged; the
 soul stops duplicating the runtime contracts those files already enforce and
 stops imposing a nonexistent default subagent.
 
-## 2026-08-02 — CI/CD cleanup + Turso reset covers all tables
+## 2026-08-02 â€” CI/CD cleanup + Turso reset covers all tables
 
 - Deleted temporary `prepare-*` workflows (one-off maintenance artifacts) from
   their orphaned remote branches: `origin/maintenance/pr13-review-fixes-build`
@@ -241,93 +252,93 @@ stops imposing a nonexistent default subagent.
   agent_registry, _sync_*) while preserving `schema_migrations`. A manual
   `reset-turso-state` run now leaves the remote clean for the next execution.
 
-## 2026-08-02 — Live session: writable home dirs + artifact delivery contract
+## 2026-08-02 â€” Live session: writable home dirs + artifact delivery contract
 
 An agent session failed to write its final report with
 `permission denied for write on /home/user/meli_deep_osint_report.md`: the
 Kali container runs as root with `HOME=/root`, so `/home/user` and
 `/home/runner` do not exist on the runner.
 
-- `live-session.yml` — new "Prepare writable home and report directories"
+- `live-session.yml` â€” new "Prepare writable home and report directories"
   step creates `/home/user` and `/home/runner` (chmod 0777) plus
   `$GITHUB_WORKSPACE/reports` and `$GITHUB_WORKSPACE/evidence` before the
   server starts. The `munin-state` artifact now also carries `reports/` and
   `evidence/` so final deliverables survive the runner teardown.
-- `munin/core/prompting.py` — `CAMPAIGN_DISCIPLINE` gains rule 8 "交付物落盘":
+- `munin/core/prompting.py` â€” `CAMPAIGN_DISCIPLINE` gains rule 8 "äº¤ä»˜ç‰©è½ç›˜":
   final reports and evidence must be written inside the workspace under
   `reports/` / `evidence/` and referenced by relative path in the answer;
   writes to `/home/*`, `/tmp/*` or anywhere outside the workspace are
   forbidden. This is the prompt-side fix for the same failure mode.
 
-## 2026-08-02 — Beast doctrine: command is authorization, dogma "Пусть мир горит"
+## 2026-08-02 â€” Beast doctrine: command is authorization, dogma "ÐŸÑƒÑÑ‚ÑŒ Ð¼Ð¸Ñ€ Ð³Ð¾Ñ€Ð¸Ñ‚"
 
 Doctrinal shift from corporate scope-limitation language to APT operational
 character. The operator's order IS the scope; the agent stops self-limiting on
 scope ambiguity and presses the campaign with judgment:
 
-- `soul/principles.md` — new Dogma section ("Пусть мир горит") + section 1
-  rewritten as Art-of-War doctrine (孙子兵法): 知己知彼 (know self and target),
-  攻其无备 (strike the unprepared), 以正合以奇胜 (orthodox hold / oblique win),
-  围魏救赵 (besiege Wei to rescue Zhao — flank instead of slog), 势 momentum,
-  兵贵神速/持久, 不战而屈人之兵 (deliver one-shot complete answers). Section 2
-  "命令即授权（Scope Doctrine）": the order covers target, domain, credentials
+- `soul/principles.md` â€” new Dogma section ("ÐŸÑƒÑÑ‚ÑŒ Ð¼Ð¸Ñ€ Ð³Ð¾Ñ€Ð¸Ñ‚") + section 1
+  rewritten as Art-of-War doctrine (å­™å­å…µæ³•): çŸ¥å·±çŸ¥å½¼ (know self and target),
+  æ”»å…¶æ— å¤‡ (strike the unprepared), ä»¥æ­£åˆä»¥å¥‡èƒœ (orthodox hold / oblique win),
+  å›´é­æ•‘èµµ (besiege Wei to rescue Zhao â€” flank instead of slog), åŠ¿ momentum,
+  å…µè´µç¥žé€Ÿ/æŒä¹…, ä¸æˆ˜è€Œå±ˆäººä¹‹å…µ (deliver one-shot complete answers). Section 2
+  "å‘½ä»¤å³æŽˆæƒï¼ˆScope Doctrineï¼‰": the order covers target, domain, credentials
   and action level, no per-action re-confirmation; the generic LDAP
   anti-injection rule and the secrets "red line" (never restate
-  credentials/hashes/tokens) removed entirely — craft is left to the model's
+  credentials/hashes/tokens) removed entirely â€” craft is left to the model's
   judgment; sections 5/6/7 drop "must be operator-approved / only authorized
   targets" friction.
-- `soul/identity.md` — identity reframed as war-raven ("战争之鸦") under
-  Art-of-War personality: 谋定而后动, 虚虚实实 (feint and shadow), 知己知彼,
-  因敌制胜 (adapt to the target), 以势驱战 (momentum-driven ops), long-term
-  dormancy and one-strike kills; removed "绝不自主扩大攻击面" and
-  "Hugin 绝不提供授权" corporatism.
-- `soul/goals.md` — removed the "script kiddie" comparison; excellence defined
+- `soul/identity.md` â€” identity reframed as war-raven ("æˆ˜äº‰ä¹‹é¸¦") under
+  Art-of-War personality: è°‹å®šè€ŒåŽåŠ¨, è™šè™šå®žå®ž (feint and shadow), çŸ¥å·±çŸ¥å½¼,
+  å› æ•Œåˆ¶èƒœ (adapt to the target), ä»¥åŠ¿é©±æˆ˜ (momentum-driven ops), long-term
+  dormancy and one-strike kills; removed "ç»ä¸è‡ªä¸»æ‰©å¤§æ”»å‡»é¢" and
+  "Hugin ç»ä¸æä¾›æŽˆæƒ" corporatism.
+- `soul/goals.md` â€” removed the "script kiddie" comparison; excellence defined
   as campaign speed and depth under the dogma; Art-of-War principles as the
-  backbone (知己知彼，因敌制胜，势如破竹).
-- `munin/core/soul.py` — system-prompt preamble rewritten in Chinese (was the
+  backbone (çŸ¥å·±çŸ¥å½¼ï¼Œå› æ•Œåˆ¶èƒœï¼ŒåŠ¿å¦‚ç ´ç«¹).
+- `munin/core/soul.py` â€” system-prompt preamble rewritten in Chinese (was the
   English "Odin's raven of memory" intro) and now opens with the dogma + the
   Art of War; the `soul_propose_edit` human-review note folded into the
   character line ("they are your standing orders: changed only via
   human-reviewed proposal; on the field, execution is yours") instead of a
   standalone instruction.
-- `munin/core/supervisor.py` — kernel instructions and the no-soul fallback
+- `munin/core/supervisor.py` â€” kernel instructions and the no-soul fallback
   prompt rewritten: order = scope, campaign advances; Art-of-War flavor
-  (兵者诡道, 知己知彼); removed "never widens the authorized scope".
-- `munin/core/autonomy/modes.py` — `_BASE_CONTRACT` and per-mode rules no
+  (å…µè€…è¯¡é“, çŸ¥å·±çŸ¥å½¼); removed "never widens the authorized scope".
+- `munin/core/autonomy/modes.py` â€” `_BASE_CONTRACT` and per-mode rules no
   longer instruct "stop and ask on scope/ambiguity"; BEAST re-targets on
-  failed hypotheses instead of pausing (因敌制胜); YOLO strikes the unprepared
-  (攻其无备); GOAL turns stalled paths as flanks (围魏救赵). Technical
+  failed hypotheses instead of pausing (å› æ•Œåˆ¶èƒœ); YOLO strikes the unprepared
+  (æ”»å…¶æ— å¤‡); GOAL turns stalled paths as flanks (å›´é­æ•‘èµµ). Technical
    invariants untouched: preflight, audit, secrets handling, `critical` approval
    floor.
-- `munin/core/prompting.py` — language contract now explicit: processes and
+- `munin/core/prompting.py` â€” language contract now explicit: processes and
   reasoning in Chinese, code and technical artefacts (tool names, args, JSON
   keys, filenames, identifiers, commits) always in English, the most idiomatic
   language for Python and other programming languages. Campaign discipline
   step 1 rewritten: the operator's objective IS the full authorization; the
   agent self-appoints success criteria and presses until met. Hugin protocol
-  drops "scope/authorization/permission to execute" — Munin owns decisions,
+  drops "scope/authorization/permission to execute" â€” Munin owns decisions,
   execution and memory. Coordinator few-shot Example B no longer asks to
   confirm "WEB01 has active testing authorization" (verification seed string
   preserved for tests).
-- `soul/skills.md` — "命令在身，active surface 全部可用": command in hand makes
+- `soul/skills.md` â€” "å‘½ä»¤åœ¨èº«ï¼Œactive surface å…¨éƒ¨å¯ç”¨": command in hand makes
   the whole active surface available; removed "only for explicit active scope",
   the LDAP escaping rule and "results do not constitute authorization".
-- `soul/valravn.md` — rewritten from English into Chinese; removed the
+- `soul/valravn.md` â€” rewritten from English into Chinese; removed the
   "operator-authorized scope, do not expand authorization" limits. Index width
-  is not a limit — discovered assets are campaign leads; an exploit reference
+  is not a limit â€” discovered assets are campaign leads; an exploit reference
   is intelligence, its use is a campaign decision. ToS/quota guards and
   untrusted-external-content handling kept.
-- `munin/subagents/ldap_agent.py` — subagent system prompt aligned: no
+- `munin/subagents/ldap_agent.py` â€” subagent system prompt aligned: no
   "waiting for authorization" on writes, no mandatory LDAP
   f-string/escape rule, no "do not restate secrets" prompt rule (craft left to
   the model; tool-level guards unchanged). Out-of-task domains/targets are
   campaign leads; only capability limits escalate to the parent.
-- Tests: `tests/test_prompt_contract.py` kept green (17 passed) — the two
+- Tests: `tests/test_prompt_contract.py` kept green (17 passed) â€” the two
   failures were stale phrase assertions, resolved by restoring the technical
   line the tests check while keeping the new contract. Runtime scope gates
   (BEAST requires_scope, HITL approval, hugin plan scope) untouched by design.
 
-## 2026-08-02 ART — Valravn reconnaissance mesh
+## 2026-08-02 ART â€” Valravn reconnaissance mesh
 
 Adds Valravn (`munin/valravn/`), a native reconnaissance and external
 threat-intelligence capability mesh exposed as twelve `valravn_*` tools on the
@@ -353,28 +364,28 @@ existing FastMCP singleton:
   `docs/VALRAVN_THIRD_PARTY_NOTICES.md`; doctrine in `soul/valravn.md`;
   offline + opt-in live smoke in `.github/workflows/valravn-smoke.yml`.
 
-## 2026-08-01 — Autonomous modes (Standard / YOLO / GOAL / BEAST)
+## 2026-08-01 â€” Autonomous modes (Standard / YOLO / GOAL / BEAST)
 
 Operator-chosen autonomy contracts over the single Deep Agents supervisor loop.
 One execution path; the mode shapes policy, not scope:
 
-- `munin/core/autonomy/modes.py` — `OperationMode` (StrEnum), `ModePolicy`,
+- `munin/core/autonomy/modes.py` â€” `OperationMode` (StrEnum), `ModePolicy`,
   `policy_for` / `parse_mode_policy` / `mode_contract`. Per-mode approval levels
   (the `critical` floor is immutable in every mode), `requires_goal` /
   `requires_scope` gates, planning on/off, delegation, anti-runaway
   `model_call_limit` / `tool_call_limit` (BEAST; env-observable via
   `MUNIN_BEAST_MODEL_CALL_LIMIT` / `MUNIN_BEAST_TOOL_CALL_LIMIT`), and a
   `plan_reminder_every_steps` cadence (`MUNIN_PLAN_REMINDER_EVERY_STEPS`).
-- `munin/core/autonomy/planning.py` — durable TODO plan as real LangChain 1.x
+- `munin/core/autonomy/planning.py` â€” durable TODO plan as real LangChain 1.x
   middleware (`TodoPlanMiddleware`) + `todo_update` / `hypothesis` tools
   (InjectedToolCallId). Plan is authoritative in the store
   (`todo_events` append-only log), never in graph state; re-injected per model
   call from `ACTIVE_PLAN_SNAPSHOT`. `_apply_ops` validates create/edit/
   set_state/set_priority/link_hypothesis/attach_evidence/discard/replan.
-- `munin/core/autonomy/goals.py` — `GoalMiddleware` + `render_goal_block` /
+- `munin/core/autonomy/goals.py` â€” `GoalMiddleware` + `render_goal_block` /
   `new_goal_id`; persistent operator-owned objective injected each model call
   from `ACTIVE_GOAL`.
-- `munin/core/autonomy/context.py` — `ACTIVE_STORE` / `ACTIVE_MODE` /
+- `munin/core/autonomy/context.py` â€” `ACTIVE_STORE` / `ACTIVE_MODE` /
   `ACTIVE_GOAL` / `ACTIVE_PLAN_SNAPSHOT` / `ACTIVE_EMITTER` contextvars set
   per invocation by `runtime_adapter.supervisor_runner` (cached-graph-safe).
 - Store Fase 3 (`production/store.py`): `goals`, `todo_events`, `timers` tables
@@ -385,13 +396,13 @@ One execution path; the mode shapes policy, not scope:
   `complete_timer_tick` / `pause_timer` / `cancel_timer`; `create_turn` and
   `run_execution_context` carry `mode` / `goal_id`. `MuninStore` forwards the
   durable ones.
-- `munin/production/timers.py` — durable scheduler (`timer_tick_loop`) with
+- `munin/production/timers.py` â€” durable scheduler (`timer_tick_loop`) with
   lease/fencing; `_dispatch_tick` launches a GOAL wake-up as a governed turn
   through the same `create_turn` + `_launch_chat_run` path (idempotency
   `timer:{id}:{tick}`), only when the goal is active, no run is non-terminal,
   and `MUNIN_TIMER_WAKEUP_ENABLED` is set. Lifecycle envs:
   `MUNIN_TIMER_POLL_SECONDS`, `MUNIN_TIMER_LEASE_SECONDS`.
-- `munin/core/supervisor.py` / `runtime_adapter.py` — builder takes `mode`,
+- `munin/core/supervisor.py` / `runtime_adapter.py` â€” builder takes `mode`,
   schedules `TodoPlanMiddleware` + `GoalMiddleware`, composes the mode contract
   into the prompt, raises per-mode budgets, emits the initial `plan` envelope;
   the runner sets/resets the autonomy contextvars and passes the goal through.
@@ -412,7 +423,7 @@ One execution path; the mode shapes policy, not scope:
   `translator.test.ts` adds the new envelopes (30 total). ruff `--select F`
   clean; tsc + vitest green.
 - Frontend polish (same PR): assistant text parts now render Markdown
-  (`app/src/components/Markdown.tsx` — react-markdown + remark-gfm +
+  (`app/src/components/Markdown.tsx` â€” react-markdown + remark-gfm +
   rehype-highlight, tokens from the design system, hljs-* syntax colors mapped
   in `globals.css`; user bubbles stay plain). Auto-scroll no longer drags the
   view down while the agent streams: the console only follows the stream when
@@ -424,7 +435,7 @@ for operator approval; the hard boundaries (scope preflight, opsec, audit
 redaction, critical floor) never widen.
 
 
-## 2026-07-31 18:26 ART — CI gates, canonical MCP endpoints, and provider reasoning replay
+## 2026-07-31 18:26 ART â€” CI gates, canonical MCP endpoints, and provider reasoning replay
 
 This follow-up closes the remaining CI failures without adding a second
 application-specific agent loop:
@@ -498,7 +509,7 @@ application-specific agent loop:
   exposing the API key to the browser. The selected profile applies to the
   next turn; the conversation id and durable history remain unchanged.
 
-## 2026-07-31 18:18 ART — Durable chat recovery after process restart
+## 2026-07-31 18:18 ART â€” Durable chat recovery after process restart
 
 The AI SDK replay endpoint already persisted operator-visible run events, but
 the detached executor itself was process-local: a crash left a `running` row
@@ -531,7 +542,7 @@ with `Command`. `tests/test_chat_recovery.py` covers fenced crash recovery,
 HITL non-autostart and approved-command recovery; the focused backend suite is
 green (19 passed) and the full backend suite is green (222 passed, 4 skipped).
 
-## 2026-07-31 03:58 ART — CI repair Part 2: fix double `/mcp` mount prefix + session-manager lifespan
+## 2026-07-31 03:58 ART â€” CI repair Part 2: fix double `/mcp` mount prefix + session-manager lifespan
 
 The Fase 3 unification (`munin serve` mounting the FastMCP streamable-http
 sub-app under `Mount("/mcp")`) shipped two latent bugs that made every
@@ -581,11 +592,11 @@ Validation: `python -m munin.server.create_app` builds; a uvicorn run on
 `event: message` JSON-RPC, `GET /health` -> 200; `tests/test_production_foundation.py`
 11/11 green.
 
-## 2026-07-31 03:50 ART — CI repair: tests + smoke + workflow aligned with the Fase 2-4 contract
+## 2026-07-31 03:50 ART â€” CI repair: tests + smoke + workflow aligned with the Fase 2-4 contract
 
 The migration (issue #9) removed `claim_next_run` (replaced by the direct
 claim in `POST /api/chat`) and the `/turns` + `/api/runs/*` two-hop, and
-unified the two-process launch into `munin serve` — but tests, the live-LLM
+unified the two-process launch into `munin serve` â€” but tests, the live-LLM
 smoke and `ci.yml` still exercised the old contract, so CI ran red on
 `feat/issue9-deep-agents-migration` (3 jobs: backend tests, live LLM smoke,
 E2E GUI MCP proxy).
@@ -595,7 +606,7 @@ E2E GUI MCP proxy).
   `test_leased_run_rejects_late_worker_and_recovers_expired_claim`): claims
   via `_claim_direct` (chat.py) instead of the removed `claim_next_run`;
   asserts a second direct claim is rejected (`RuntimeError`) and the
-  lease-expiry → `recover_expired_runs` → `interrupted` path still works.
+  lease-expiry â†’ `recover_expired_runs` â†’ `interrupted` path still works.
 - `test_human_gate_tools_subagents_retry_and_recorded_branch`: uses
   `_claim_direct` and its `lease_token` for `complete_run`.
 - `test_asgi_login_uses_cookie_session_and_csrf_for_turns`: now drives
@@ -607,12 +618,12 @@ E2E GUI MCP proxy).
 
 ### Production store (`munin/production/store.py`)
 - Added `delete_user_for_test(username)` (ProductionStore + MuninStore
-  façade): removes a CI fixture user (must start with `llm_smoke_`, refuses
+  faÃ§ade): removes a CI fixture user (must start with `llm_smoke_`, refuses
   anything else) plus its sessions, with audit row.
 
 ### Live LLM smoke (`scripts/live_llm_smoke.py`)
 - Login no longer depends on `bootstrap_admin` (global-once on the shared
-  Turso → 401): CI pre-creates a per-run fixture user exported via
+  Turso â†’ 401): CI pre-creates a per-run fixture user exported via
   `MUNIN_LIVE_SMOKE_ADMIN` / `MUNIN_LIVE_SMOKE_PASSWORD`.
 - Replaced `POST /api/conversations/{id}/turns` + `GET /api/runs/*` polling
   with `POST /api/chat`: reads the SSE stream to `close`, extracts
@@ -631,7 +642,7 @@ E2E GUI MCP proxy).
   mounts `/mcp`.
 - MCP catalog smokes point at `MUNIN_SMOKE_BASE_URL=http://127.0.0.1:8787`.
 - `live-llm-smoke` now uses a valid `e2e_<run_id>_deadbeef` test namespace
-  (was `llm_smoke_…`, which `cleanup_test_run` rejected), creates the
+  (was `llm_smoke_â€¦`, which `cleanup_test_run` rejected), creates the
   fixture user via the store before the run, and deletes it in the `always()`
   cleanup step.
 
@@ -639,51 +650,51 @@ Validation: `tests/test_production_foundation.py` 11/11 pass locally
 (Windows venv); full-suite failures elsewhere are local-env artifacts
 (stale `langchain` without `create_agent`, LLM-dependent tests). YAML parses.
 
-## 2026-07-30 22:38 ART — Fleet integration: bug fixes, singleton graph, delta sync, browser cache
+## 2026-07-30 22:38 ART â€” Fleet integration: bug fixes, singleton graph, delta sync, browser cache
 
 Hand-off log for the Deep Agents + AI SDK v5 migration follow-up (issue #9).
 All changes landed on `feat/issue9-deep-agents-migration`. Validation:
 `tsc --noEmit` clean, `next build` OK, backend `py_compile` + `import` OK,
-`/health` smoke 200 (86 MCP tools), delta-sync functional smoke (hot→durable
+`/health` smoke 200 (86 MCP tools), delta-sync functional smoke (hotâ†’durable
 5 rows, outbox trim to 0, idempotent re-flush).
 
 ### Bug fixes (from audit fleet)
-- `app/src/components/AgentConsole.tsx:125,130` — StatusBadge now uses
+- `app/src/components/AgentConsole.tsx:125,130` â€” StatusBadge now uses
   `text-warning` / `text-success` tokens instead of the hardcoded
   `text-yellow-400` / `text-green-400` (art-direction rule: semantic colors
   only via tokens).
-- `munin/core/middleware/progress_emit.py` — `tool_result` / `tool_failed`
-  envelopes now carry `tool_name` (was dropped after the `_before` → `_after`
+- `munin/core/middleware/progress_emit.py` â€” `tool_result` / `tool_failed`
+  envelopes now carry `tool_name` (was dropped after the `_before` â†’ `_after`
   refactor), so the audit trail records the tool for completed/failed calls,
   not "unknown".
-- `app/src/app/layout.tsx` + `app/tailwind.config.ts` — loaded Inter and
+- `app/src/app/layout.tsx` + `app/tailwind.config.ts` â€” loaded Inter and
   JetBrains Mono via `next/font/google` (CSS vars `--font-inter` /
   `--font-geist-mono`); `font-sans` / `font-mono` Tailwind utilities now
   resolve to the actual fonts instead of falling back to system-ui.
-- `README.md:43` — stale `soul_reject_proposal` mention corrected to
-  `soul_propose_edit → PR (human merge)` (the reject tool never existed).
+- `README.md:43` â€” stale `soul_reject_proposal` mention corrected to
+  `soul_propose_edit â†’ PR (human merge)` (the reject tool never existed).
 
-### Singleton supervisor graph + shared checkpointer (issue #9 §3)
+### Singleton supervisor graph + shared checkpointer (issue #9 Â§3)
 `munin/core/supervisor.py`:
 - `_GRAPH_CACHE` keyed by `(model identity, active gen__* tool set +
-  signatures, soul prompt hash, SharedStateStore identity)` — the compiled
+  signatures, soul prompt hash, SharedStateStore identity)` â€” the compiled
   Deep Agents graph is now built ONCE per process and reused across requests.
   `build_munin_supervisor` returns the cached graph on a fingerprint hit.
 - `_CHECKPOINTER_CACHE` now holds a single process-wide `MemorySaver`
   (`_get_checkpointer`), so `thread_id` checkpoints survive across turns /
-  `run_id` changes — HITL interrupts and resume work within one Munin
+  `run_id` changes â€” HITL interrupts and resume work within one Munin
   process. `invalidate_supervisor_cache()` drops only the graph (keeps the
   checkpointer) for callers to invoke when the procedural table changes.
 - Per-run state (`run_id`, `progress_sink`) is no longer build-time: it is
   delivered per-invocation via `ACTIVE_RUN_ID` / `ACTIVE_PROGRESS_SINK`
   contextvars (set/reset by `runtime_adapter.supervisor_runner` around the
   `astream_events` loop) so one cached graph serves many concurrent runs.
-- `munin/core/middleware/operator_guidance.py` and `progress_emit.py` —
+- `munin/core/middleware/operator_guidance.py` and `progress_emit.py` â€”
   `_resolve_run_id` / `_resolve_sink` read the contextvars at hook time with
   build-time fallbacks (keeps the direct-construction contract intact for
   `tests/characterization/*`).
 
-### Local-first Turso delta sync (issue #9 §3 conversation durability)
+### Local-first Turso delta sync (issue #9 Â§3 conversation durability)
 `munin/production/store.py` + `munin/mcp/config.py`:
 - New settings: `MUNIN_HOT_DB_PATH` (default `/tmp/munin-hot.db`),
   `MUNIN_DURABLE_DB_URL` + `MUNIN_DURABLE_DB_AUTH_TOKEN` (fall back to legacy
@@ -692,7 +703,7 @@ All changes landed on `feat/issue9-deep-agents-migration`. Validation:
   `MUNIN_SYNC_INTERVAL` (default 0 = only at run end / shutdown),
   `MUNIN_SYNC_BATCH_SIZE` (default 500).
 - `MuninStore` split backend: hot SQLite for churn, durable Turso for long-
-  lived rows. `complete_run` already migrates a finished run hot→durable;
+  lived rows. `complete_run` already migrates a finished run hotâ†’durable;
   new `flush_pending_syncs()` uploads the REST of the conversation delta
   (messages, participants, summaries, run events, audit) via an outbox.
 - `_sync_outbox` table + AFTER INSERT/UPDATE/DELETE triggers on every
@@ -700,10 +711,10 @@ All changes landed on `feat/issue9-deep-agents-migration`. Validation:
   Installed hot-only via `ProductionStore.install_sync_tracking()` from
   `MuninStore.from_settings`; the durable namespace adapter never sees the
   triggers.
-- Flush lifecycle: capture `MAX(seq)` watermark → read referenced rows →
+- Flush lifecycle: capture `MAX(seq)` watermark â†’ read referenced rows â†’
   upsert into durable in ONE transaction (parents before children via
-  `_SYNC_TABLES` order) → trim outbox `<= watermark` only after a committed
-  durable write → leftover entries replay on the next flush (crash-safe,
+  `_SYNC_TABLES` order) â†’ trim outbox `<= watermark` only after a committed
+  durable write â†’ leftover entries replay on the next flush (crash-safe,
   idempotent via `INSERT OR REPLACE` on primary keys).
 - Flush points: `close_pools()` (ASGI shutdown, guarded by `sync_at_end`)
   and end of `complete_run`. `sync_due()` enables opportunistic idle syncs
@@ -715,28 +726,28 @@ All changes landed on `feat/issue9-deep-agents-migration`. Validation:
 ### Frontend browser cache (issue #9 cache layer)
 `app/src/lib/cache/` (new): `db.ts` (hand-rolled IndexedDB wrapper, schema v1
 with `conversations` / `messages` / `kv` stores, no new deps) +
-`context.tsx` (`BrowserCacheProvider` + `useBrowserCache()` — actor-scoped
+`context.tsx` (`BrowserCacheProvider` + `useBrowserCache()` â€” actor-scoped
 cache wipe, schema guard, write-through).
-- `app/src/lib/queries.ts` — `useConversations` paints instantly from the
+- `app/src/lib/queries.ts` â€” `useConversations` paints instantly from the
   IndexedDB mirror via v5 `placeholderData` then background-refetches;
-  create / rename / archive run the v5 optimistic pattern (`onMutate` →
-  `setQueryData` + IndexedDB write-through → server call → `onSuccess` /
-  `onError` rollback → `onSettled` invalidate). `keepPreviousData` removed
+  create / rename / archive run the v5 optimistic pattern (`onMutate` â†’
+  `setQueryData` + IndexedDB write-through â†’ server call â†’ `onSuccess` /
+  `onError` rollback â†’ `onSettled` invalidate). `keepPreviousData` removed
   (v5 dropped it).
-- `app/src/lib/aiChat.ts` — `useMuninChat` now seeds the visible timeline
+- `app/src/lib/aiChat.ts` â€” `useMuninChat` now seeds the visible timeline
   from the cache via `setMessages` on mount (cache-first render),
   persists the final message batch via `onFinish`, and sets/clears a run
   marker so the console can surface a "resume streaming?" hint after a
   mid-run refresh.
-- `app/src/components/Providers.tsx` — `BrowserCacheProvider` mounted
+- `app/src/components/Providers.tsx` â€” `BrowserCacheProvider` mounted
   between `QueryClientProvider` and the app so queries/mutations can reach
   `useBrowserCache()`.
 
 ### Subagent creation wiring (verified, small fix)
-`munin/core/autonomy/subagent_factory.py:61-70` — the `invoke_subagent` dict
+`munin/core/autonomy/subagent_factory.py:61-70` â€” the `invoke_subagent` dict
 branch no longer `NotImplementedError`s for `persisted_subagent_dict` runs;
-it normalises the `SubAgent`-shaped dict (`description`→`purpose`, tool
-objects→names, non-string model dropped) and materialises it as
+it normalises the `SubAgent`-shaped dict (`description`â†’`purpose`, tool
+objectsâ†’names, non-string model dropped) and materialises it as
 `compiled_langgraph`. `compiled_langgraph` and `deep_agent` creation paths
 were already correctly wired (fresh CompiledStateGraph each call); native
 `subagents=` delegation on the supervisor remains unused (documented redesign
