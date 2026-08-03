@@ -12,6 +12,12 @@ on:
         description: "Commit message for the lock update"
         required: false
         default: "chore(deps): regenerate poetry.lock after pyproject.toml change"
+  push:
+    branches:
+      - raven-mind/integrate-valravn
+    paths:
+      - .github/workflows/regenerate-poetry-lock.yml
+      - pyproject.toml
 
 permissions:
   contents: write
