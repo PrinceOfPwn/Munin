@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, i-t-e-m--s-t-a-t-u-s--v-a-r-i-a-n-t, todo-mutation-part, hypothesis-part, o-p--l-a-b-e-l-s, plan-snapshot-part]
 import { Circle, ListChecks, RotateCcw, TestTube2 } from "lucide-react";
 
 import { Badge, type BadgeProps } from "@/components/ui/badge";

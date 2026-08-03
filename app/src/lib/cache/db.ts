@@ -1,3 +1,4 @@
+// tags: [utility-library, indexeddb, browser-cache, persistence, c-a-c-h-e--d-b--n-a-m-e, c-a-c-h-e--d-b--v-e-r-s-i-o-n, c-a-c-h-e--s-c-h-e-m-a--v-e-r-s-i-o-n, k-v--a-c-t-o-r--k-e-y, k-v--s-c-h-e-m-a--k-e-y, s-t-o-r-e-s]
 ﻿// -----------------------------------------------------------------------------
 // db.ts â€” minimal hand-rolled IndexedDB wrapper for the Munin browser cache.
 //

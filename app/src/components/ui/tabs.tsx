@@ -1,3 +1,4 @@
+// tags: [ui-component, shadcn-ui, primitive, client-component, tabs, tabs-trigger, tabs-list, tabs-content]
 "use client";
 
 import * as React from "react";

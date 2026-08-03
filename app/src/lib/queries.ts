@@ -1,3 +1,4 @@
+// tags: [utility-library, tanstack-query, react-query, mutations, indexeddb, client-component, use-conversations, use-archive-conversation, use-browser-cache, use-create-conversation, use-rename-conversation, use-effect, use-mutation, use-query, use-munin-chat, use-query-client]
 ﻿"use client";
 
 // -----------------------------------------------------------------------------

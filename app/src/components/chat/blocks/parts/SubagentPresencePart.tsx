@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, subagent-presence-part]
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------

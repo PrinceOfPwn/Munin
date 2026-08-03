@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, operational-trace-part]
 import { CircleDashed } from "lucide-react";
 
 import { cn } from "@/lib/utils";

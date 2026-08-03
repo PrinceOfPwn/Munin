@@ -1,3 +1,4 @@
+// tags: [utility-library, n-s--c-o-l-o-r-s, c-o-l-o-r-s]
 /**
  * Munin — Defensive Logger
  *

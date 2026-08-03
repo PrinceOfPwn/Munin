@@ -132,3 +132,18 @@ In opencode, the `context7` MCP server is wired at `https://mcp.context7.com/mcp
 ## 9. Build rather than narrate
 
 Deliver the working implementation and mention only material design or technical assumptions. Build rather than narrate possibilities.
+
+## 10. Frontend File Tagging Convention
+
+Every new or modified source file under `app/` (`.ts`, `.tsx`, `.css`) must begin on line 1 with a tag header:
+- **TypeScript / TSX (`.ts`, `.tsx`)**:
+  ```typescript
+  // tags: [layer:ui-component, ai-sdk-v5, tanstack-query, client-component, agent-console]
+  ```
+- **CSS (`.css`)**:
+  ```css
+  /* tags: [global-styles, tailwind-css] */
+  ```
+
+Always assign tags based on layer (`layer:bff-proxy`, `layer:ui-component`, `layer:react-hook`, `layer:cache-indexeddb`), key libraries (`ai-sdk-v5`, `tanstack-query`, `indexeddb`, `zod`), and component surface (`app-shell`, `agent-console`, `hitl-request-part`) as detailed in `munin-management`.
+

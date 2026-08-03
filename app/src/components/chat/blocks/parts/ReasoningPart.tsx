@@ -1,3 +1,4 @@
+// tags: [ui-component, data-part, chat-stream-part, reasoning-part]
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------

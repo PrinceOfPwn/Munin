@@ -1,3 +1,4 @@
+// tags: [api-route, bff-proxy, server-side, o-p-t-i-o-n-s, p-o-s-t, p-a-t-c-h, g-e-t, d-e-l-e-t-e, f-o-r-w-a-r-d-e-d--h-e-a-d-e-r-s]
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";

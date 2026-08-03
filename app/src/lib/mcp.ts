@@ -1,3 +1,4 @@
+// tags: [utility-library, d-e-f-a-u-l-t-s]
 /**
  * Munin MCP Client — fault-tolerant JSON-RPC 2.0 transport.
  *

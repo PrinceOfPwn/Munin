@@ -1,3 +1,4 @@
+// tags: [d-e-l-e-t-e, o-p-t-i-o-n-s, p-o-s-t, h-o-p--b-y--h-o-p--r-e-s-p-o-n-s-e--h-e-a-d-e-r-s, g-e-t, m-c-p--h-e-a-d-e-r-s]
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
