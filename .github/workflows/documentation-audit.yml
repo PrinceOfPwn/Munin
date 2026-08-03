@@ -39,10 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
-      HF_HOME: ${{ runner.temp }}/hf-cache
       HF_HUB_DISABLE_TELEMETRY: "1"
-      AUDIT_OUTPUT: ${{ github.workspace }}/.audit-output
-      BASELINE_DIR: ${{ runner.temp }}/munin-documentation-baseline
     steps:
       - name: Checkout analyzed revision
         uses: actions/checkout@v4
@@ -70,14 +67,14 @@ jobs:
       - name: Cache pinned Qwen model
         uses: actions/cache@v4
         with:
-          path: ${{ env.HF_HOME }}
+          path: ${{ runner.temp }}/hf-cache
           key: qwen3-5-4b-q4-k-m-ba06320255db
 
       - name: Restore successful baseline marker
         id: baseline
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.BASELINE_DIR }}
+          path: ${{ runner.temp }}/munin-documentation-baseline
           key: munin-documentation-baseline-v2-agentic
 
       - name: Install agent graph and native CPU inference runtime
@@ -165,6 +162,8 @@ jobs:
           HEAD_SHA: ${{ steps.range.outputs.head }}
           MAX_FILES: ${{ steps.range.outputs.max_files }}
           PR_NUMBER: ${{ steps.range.outputs.pr_number }}
+          AUDIT_OUTPUT: ${{ github.workspace }}/.audit-output
+          MODEL_CACHE: ${{ runner.temp }}/hf-cache
         run: |
           set -euo pipefail
           args=(
@@ -172,7 +171,7 @@ jobs:
             --scope "$SCOPE"
             --head "$HEAD_SHA"
             --output-dir "$AUDIT_OUTPUT"
-            --model-cache "$HF_HOME"
+            --model-cache "$MODEL_CACHE"
             --max-files "$MAX_FILES"
           )
           [ -z "$BASE_SHA" ] || args+=(--base "$BASE_SHA")
@@ -184,6 +183,8 @@ jobs:
 
       - name: Create successful baseline marker
         if: ${{ success() && github.event_name == 'push' && steps.baseline.outputs.cache-hit != 'true' }}
+        env:
+          BASELINE_DIR: ${{ runner.temp }}/munin-documentation-baseline
         run: |
           mkdir -p "$BASELINE_DIR"
           printf '%s\n' "${{ github.sha }}" > "$BASELINE_DIR/completed"
@@ -192,11 +193,13 @@ jobs:
         if: ${{ success() && github.event_name == 'push' && steps.baseline.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.BASELINE_DIR }}
+          path: ${{ runner.temp }}/munin-documentation-baseline
           key: munin-documentation-baseline-v2-agentic
 
       - name: Publish job summary
         if: always()
+        env:
+          AUDIT_OUTPUT: ${{ github.workspace }}/.audit-output
         run: |
           if [ -f "$AUDIT_OUTPUT/summary.md" ]; then
             cat "$AUDIT_OUTPUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
@@ -212,6 +215,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: munin-documentation-audit
-          path: ${{ env.AUDIT_OUTPUT }}/
+          path: ${{ github.workspace }}/.audit-output/
           retention-days: 90
           if-no-files-found: warn

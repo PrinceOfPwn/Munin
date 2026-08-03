@@ -85,6 +85,10 @@ The pull-request branch never receives a write-capable token.
 - `workflow_dispatch` can force a complete scan or a chosen commit range.
 - If the baseline cache is evicted, the next push to `main` safely creates a new full baseline.
 
+### First activation
+
+A newly added workflow may not receive the same `push` event that introduces its YAML file. If no run appears after the initial merge, create one subsequent pull request or push after the workflow already exists on `main`. That event registers the workflow and, while no successful baseline marker exists, the next push to `main` performs the complete repository scan.
+
 ## Outputs
 
 The workflow retains for 90 days:
