@@ -301,11 +301,13 @@ def burp_health_check(run_id: str = "") -> dict[str, Any]:
     otherwise. Useful as a guard before any ``burp_invoke`` call.
     """
     payload = _request("GET", "/api/health")
-    healthy = (not _is_error_envelope(payload)) and payload.get("status") == "ok"
+    if _is_error_envelope(payload):
+        return _error("burp_health_check", payload)
+    healthy = payload.get("status") == "ok"
     return _ok(
         "burp_health_check",
         "Burp extension is healthy" if healthy else "Burp extension unreachable",
-        {"healthy": bool(healthy), "status": payload.get("status") if not _is_error_envelope(payload) else None, "base_url": _burp_base_url()},
+        {"healthy": bool(healthy), "status": payload.get("status"), "base_url": _burp_base_url()},
     )
 
 
