@@ -218,14 +218,21 @@ function LoginForm({
             <div className="grid gap-3 rounded-lg border border-accent/30 bg-accent/5 p-3.5">
               <div className="flex items-start gap-2.5">
                 <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-                <div className="grid gap-1">
-                  <p className="text-xs font-semibold text-body">
-                    Noncommercial and authorized use only
+                <div className="grid gap-2">
+                  <blockquote className="text-xs font-semibold leading-relaxed text-body">
+                    “Please do not use in military or secret service
+                    organizations, or for illegal purposes — this is
+                    non-binding, these *** ignore laws and ethics anyway.”
+                  </blockquote>
+                  <p className="text-[0.62rem] italic leading-relaxed text-muted">
+                    Thank you, THC Hydra, for one of the most iconic intros in
+                    security tooling.
                   </p>
                   <p className="text-[0.7rem] leading-relaxed text-secondary">
-                    Commercial use or direct or indirect commercial benefit
-                    requires a separate written license. You are responsible
-                    for authorization, scope, actions, and results.
+                    Munin remains licensed for noncommercial and explicitly
+                    authorized use only. Commercial benefit requires a separate
+                    written license, and each operator is responsible for scope,
+                    actions, and results.
                   </p>
                 </div>
               </div>
@@ -296,6 +303,18 @@ function LoginForm({
           </DialogHeader>
 
           <div className="grid gap-4 text-sm leading-relaxed text-secondary">
+            <section className="grid gap-2 rounded-lg border border-accent/30 bg-accent/5 p-3.5">
+              <blockquote className="font-medium italic text-body">
+                “Please do not use in military or secret service organizations,
+                or for illegal purposes — this is non-binding, these *** ignore
+                laws and ethics anyway.”
+              </blockquote>
+              <p className="text-[0.65rem] italic text-muted">
+                Thank you, THC Hydra, for one of the most iconic intros in
+                security tooling.
+              </p>
+            </section>
+
             <section className="grid gap-1.5 rounded-lg border border-border bg-bg/40 p-3.5">
               <h2 className="font-semibold text-body">Noncommercial license</h2>
               <p>
