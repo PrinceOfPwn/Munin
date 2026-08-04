@@ -569,6 +569,45 @@ def _envelope_from_event(
         # ``_pending_human_request_envelopes`` below.
         return None
 
+    if kind.startswith("subagent."):
+        # PR-6D — workflow event vocabulary.  The durable runtime emits the
+        # dotted ``subagent.*`` family (``subagent.queued`` today via
+        # ``create_subagent_run``; ``subagent.started`` / ``subagent.state``
+        # are the reserved transitions).  The frontend contract (BFF
+        # DOTTED_KIND_MAP + translator) expects the normalized
+        # ``subagent_started`` / ``subagent_state`` envelope with the stable
+        # ``subagent_id`` / ``name`` fields, while the durable payload
+        # carries ``subagent_run_id`` / ``profile_id``.  We normalize here so
+        # live and replay streams agree without inventing producers.
+        subagent_state = str(kind.split(".", 1)[1])
+        if not isinstance(payload, dict):
+            return None
+        subagent_id = str(payload.get("subagent_id") or payload.get("subagent_run_id") or "")
+        name = str(payload.get("name") or payload.get("profile_id") or "")
+        if not subagent_id:
+            return None
+        if subagent_state in {"queued", "started", "spawn"}:
+            envelope = {
+                "kind": "subagent_started",
+                "run_id": run_id,
+                "subagent_id": subagent_id,
+                "name": name,
+                "state": "started",
+            }
+        else:
+            # state / completed / failed / cancelled — surface the truthful
+            # transition; the client renders the raw state verbatim.
+            envelope = {
+                "kind": "subagent_state",
+                "run_id": run_id,
+                "subagent_id": subagent_id,
+                "name": name,
+                "state": str(payload.get("state") or subagent_state),
+            }
+        if payload.get("objective"):
+            envelope["objective"] = str(payload["objective"])
+        return envelope
+
     if kind.startswith("human_request.") or kind.startswith("subagent."):
         # Pass through — the BFF normalizer folds ``payload`` into the
         # top-level envelope and the client translator understands both.
