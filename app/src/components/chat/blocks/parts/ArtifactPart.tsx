@@ -1,6 +1,7 @@
-// tags: [ui-component, data-part, chat-stream-part, artifact-part, react-memo, PR-4A, PR-4E, optional-chaining]
+// tags: [ui-component, data-part, chat-stream-part, artifact-part, react-memo, PR-4A, PR-4E, optional-chaining, PR-5B, PR-5D, block-registry]
 import { memo } from "react";
 import { cn } from "@/lib/utils";
+import { BlockRendererFor, lookupBlockRenderer, normalizeMediaType } from "../registry";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -10,6 +11,17 @@ export interface ArtifactPartProps {
   artifactId: string;
   mimeType?: string;
   uri?: string;
+  /**
+   * PR-5B/5D — optional artifact body. When present and the media type has a
+   * registered block renderer (markdown, code, json/csv/table, mermaid,
+   * sandboxed-html, IOC table), the body is rendered by that renderer instead
+   * of the plain chip. Absent in the live stream (pointer-only), populated by
+   * consumers holding the full read-model payload (e.g. run-detail views).
+   */
+  content?: string;
+  /** PLAN-6 rich metadata forwarded to block renderers that display them. */
+  previewUrl?: string;
+  downloadUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -74,6 +86,9 @@ export const ArtifactPart = memo(function ArtifactPart({
   artifactId,
   mimeType,
   uri,
+  content,
+  previewUrl,
+  downloadUrl,
 }: ArtifactPartProps) {
   const filename = displayName(uri, artifactId);
   const label = mimeLabel(mimeType);
@@ -81,6 +96,28 @@ export const ArtifactPart = memo(function ArtifactPart({
   const artifactUri = safeUri || `/api/production/artifacts/${encodeURIComponent(artifactId)}?download=true`;
   const previewUri = `/api/production/artifacts/${encodeURIComponent(artifactId)}?inline=true`;
   const isImage = mimeType?.toLowerCase().startsWith("image/") ?? false;
+
+  // PR-5B/5D — a body-bearing artifact whose media type is registered in the
+  // block registry is rendered by its block renderer (sandboxed-html →
+  // SandboxedPreview, mermaid → MermaidPart, IOC table → IocTablePart, …).
+  // Images and pointer-only artifacts keep the native chip below. The
+  // registry itself handles unknown types with logError + a fallback card.
+  const hasBody = typeof content === "string" && content.length > 0;
+  const blockRenderable = hasBody && lookupBlockRenderer(mimeType) !== null;
+  if (blockRenderable) {
+    return (
+      <BlockRendererFor
+        mediaType={mimeType ?? ""}
+        data={{
+          media_type: normalizeMediaType(mimeType),
+          content,
+          ...(previewUrl ? { preview_url: previewUrl } : {}),
+          ...(downloadUrl ? { download_url: downloadUrl } : {}),
+        }}
+        extraProps={{ filename }}
+      />
+    );
+  }
 
   return (
     <div className="flex max-w-full flex-col items-start gap-2">

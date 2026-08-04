@@ -30,7 +30,7 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from argon2.low_level import Type
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .redaction import redact_payload, redact_text
+from .redaction import redact_payload, redact_text, sanitize_artifact_content
 
 logger = logging.getLogger(__name__)
 
@@ -1168,6 +1168,12 @@ class ProductionStore:
 
     @staticmethod
     def _insert_artifact(conn: Any, *, conversation_id: str, message_id: str | None, run_id: str | None, filename: str, media_type: str, language: str, content: str, now: int | None = None, renderer: str | None = None, version: int = 1, provenance: str | None = None, preview_url: str | None = None, download_url: str | None = None) -> dict[str, Any]:
+        # PR-5B — media-type-aware artifact guard (sandboxed-html pre-check
+        # lives in the redaction module; see ``sanitize_artifact_content``).
+        # Runs BEFORE credential redaction so an external script import is
+        # rejected on the real payload, and is never bypassable by
+        # ``MUNIN_REDACTION_MODE=off``.
+        content = sanitize_artifact_content(media_type, content)
         safe_content = redact_text(content)
         if not safe_content or len(safe_content.encode()) > 1_000_000:
             raise ValueError("artifact content is empty or exceeds maximum size")

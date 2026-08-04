@@ -27,4 +27,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# playwright (PR-5C lab)
+/playwright-report/
+/test-results/
+/blob-report/
 ```
+
