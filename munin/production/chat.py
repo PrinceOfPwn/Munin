@@ -1,4 +1,4 @@
-# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key]
+# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, memory-scoping, actor_id]
 """Deep Agents supervisor → SSE bridge (Fase 1a of issue #9 migration).
 
 This module owns ``POST /api/chat``, ``GET /api/chat/{conversation_id}/stream``
@@ -982,6 +982,7 @@ async def _stream_chat(
         resume_from_checkpoint=resume_from_checkpoint,
         mode=mode,
         goal=goal,
+        actor_id=str(actor_info.get("id") or ""),
     )
     try:
         async for envelope in runner_stream:

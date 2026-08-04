@@ -1,4 +1,4 @@
-# tags: [coordination, runtime, core, subagent, hitl-approval, presence, shared-intel, discord.py, DiscordAdapter, on_message, _resolve_actor, DISCORD_FLUSH_INTERVAL, virtual-actor, rate-limiting, bot-integration, commands, /approve, /reject, /cancel, /status, /conversations, /history, /artifacts, /tools, /tool]
+# tags: [coordination, runtime, core, subagent, hitl-approval, presence, shared-intel, discord.py, DiscordAdapter, on_message, _resolve_actor, DISCORD_FLUSH_INTERVAL, virtual-actor, rate-limiting, bot-integration, commands, /approve, /reject, /cancel, /status, /conversations, /history, /artifacts, /tools, /tool, memory-scoping, actor_id]
 """Discord chat + command adapter (community-channel redesign).
 
 This module is the inbound Discord surface of the Munin runtime.  It runs
@@ -955,6 +955,7 @@ async def _handle_message(
             conversation_history=list(exec_ctx.get("history") or []),
             assistant_message_id=assistant_message_id,
             lease_token=lease_token,
+            actor_id=str(actor["id"]),
         )
     finally:
         publisher.unmap_run(run_id=run_id)
@@ -1006,6 +1007,7 @@ async def _stream_run(
     assistant_message_id: str,
     lease_token: str,
     resume_decisions: list[dict[str, Any]] | None = None,
+    actor_id: str = "",
 ) -> None:
     from ..core.llm_client import LLMClient  # noqa: PLC0415
     from ..core.runtime_adapter import supervisor_runner  # noqa: PLC0415
@@ -1089,6 +1091,7 @@ async def _stream_run(
         thread_id=conversation_id or run_id,
         human_request_store=store,
         resume_decisions=resume_decisions,
+        actor_id=actor_id,
     )
     try:
         async for envelope in runner_stream:

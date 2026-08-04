@@ -4,6 +4,43 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-04 — 3-tier memory scoping for cognitive tables
+
+`shared_intel`, `semantic`, `episodic` were GLOBAL (no `conversation_id`/
+`actor_id`), so the soul prompt's "recall first" caused every new conversation
+to read every past conversation's data. Added three memory tiers:
+per-conversation (default), per-user (ChatGPT-like cross-conversation), and
+global (opt-in, HITL-gated via the LLM-visible `scope` parameter).
+
+- `munin/core/autonomy/context.py`: new `ACTIVE_CONVERSATION_ID` and
+  `ACTIVE_ACTOR_ID` contextvars (added to `__all__`).
+- `munin/core/runtime_adapter.py`: `supervisor_runner` accepts `actor_id`
+  and sets/resets both new contextvars per invocation.
+- `munin/mcp/shared_state.py`: `shared_intel`/`episodic`/`semantic` gain
+  `conversation_id` + `actor_id` columns (idempotent `ALTER TABLE` with
+  `DEFAULT ''` backfill; `try/except` race guard). Scoped indexes added.
+  `semantic` keeps `UNIQUE(key)` for now (table-rebuild deferred as risky).
+  All read methods filter `(conversation_id=? OR conversation_id='')` so
+  legacy `''` rows stay visible to all conversations; new scoped rows are
+  only visible to their own conversation + legacy fallback.
+- `munin/core/tool_gateway.py`: `conversation_id`/`actor_id` added to
+  `_HIDDEN_PARAMS`; `_bind_runtime_run_id` generalized to
+  `_bind_runtime_context` injecting all three operator params from
+  contextvars when the handler declares them.
+- `munin/subagents/base.py` + `munin/mcp/tools/munin_tools.py`: memory and
+  intel tool handlers accept hidden `conversation_id`/`actor_id` and an
+  LLM-visible `scope` ("conversation" | "user" | "global").
+- `munin/production/chat.py` + `discord_adapter.py`: plumb `actor_id`
+  from the authenticated actor into `supervisor_runner`.
+- `munin/core/supervisor.py`: explicit `SummarizationMiddleware`
+  (trigger `[("tokens", 60_000), ("messages", 80)]`, keep `("messages", 12)`)
+  overrides the framework default; import/construct failures fall back
+  silently so the build never breaks.
+
+`procedural`, `generated_graphs`, `agent_presence`, `agent_messages`,
+`active_tasks` stay deliberately global. When contextvars are empty the
+behavior is identical to before (legacy global namespace).
+
 ## 2026-08-03 — Discord community adapter: session isolation, command surface, autonomous outbound
 
 Redesigned the Discord surface so it behaves like the Web GUI: a community

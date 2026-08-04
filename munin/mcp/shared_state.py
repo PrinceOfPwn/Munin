@@ -1,4 +1,4 @@
-# tags: [mcp, database, sqlite, turso, persistence, store, SharedStateStore, get_instance_id, presence_metadata, publish_intel, claim_task, upsert_presence, try_claim_spawn_slot, episodic, procedural]
+# tags: [mcp, database, sqlite, turso, persistence, store, SharedStateStore, get_instance_id, presence_metadata, publish_intel, claim_task, upsert_presence, try_claim_spawn_slot, episodic, procedural, memory-scoping, conversation_id, actor_id]
 from __future__ import annotations
 
 import json
@@ -180,7 +180,9 @@ class SharedStateStore:
                     tags TEXT NOT NULL DEFAULT '[]',
                     fingerprint TEXT NOT NULL DEFAULT '',
                     timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    actor_id TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS active_tasks (
@@ -231,14 +233,18 @@ class SharedStateStore:
                     action TEXT NOT NULL,
                     input_json TEXT NOT NULL DEFAULT '{}',
                     output_json TEXT NOT NULL DEFAULT '{}',
-                    tags TEXT NOT NULL DEFAULT '[]'
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    actor_id TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS semantic (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     key TEXT NOT NULL UNIQUE,
                     value_json TEXT NOT NULL DEFAULT '{}',
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    conversation_id TEXT NOT NULL DEFAULT '',
+                    actor_id TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS procedural (
@@ -393,6 +399,95 @@ class SharedStateStore:
                     if "duplicate column" not in str(exc).lower():
                         raise
 
+            # 3-tier memory scoping: shared_intel / episodic / semantic gain
+            # ``conversation_id`` + ``actor_id`` columns so each conversation
+            # owns its own cognitive namespace. Legacy rows (DEFAULT '') stay
+            # visible to everyone via the ``(conversation_id=? OR
+            # conversation_id='')`` filter pattern used in the query methods.
+            # ``procedural`` / ``generated_graphs`` / mesh tables stay global.
+            intel_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(shared_intel)").fetchall()
+            }
+            if "conversation_id" not in intel_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE shared_intel "
+                        "ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            if "actor_id" not in intel_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE shared_intel "
+                        "ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+
+            episodic_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(episodic)").fetchall()
+            }
+            if "conversation_id" not in episodic_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE episodic "
+                        "ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            if "actor_id" not in episodic_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE episodic "
+                        "ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+
+            semantic_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(semantic)").fetchall()
+            }
+            if "conversation_id" not in semantic_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE semantic "
+                        "ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            if "actor_id" not in semantic_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE semantic "
+                        "ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            # The semantic table keeps its existing UNIQUE(key) constraint.
+            # Rebuilding the UNIQUE constraint to (key, conversation_id,
+            # actor_id) requires a table swap that is risky against a live
+            # Turso replica with foreign references; the global uniqueness of
+            # ``key`` is acceptable until a dedicated off-line migration is
+            # scheduled. Scoping is enforced by the read filters below.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_episodic_conv_ts "
+                "ON episodic(conversation_id, ts DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_shared_intel_scope "
+                "ON shared_intel(conversation_id, actor_id, finding_type)"
+            )
+
     # ------------------------------------------------------------------
     # shared_intel (unchanged)
     # ------------------------------------------------------------------
@@ -409,6 +504,8 @@ class SharedStateStore:
         status: str,
         tags: str,
         fingerprint: str,
+        conversation_id: str = "",
+        actor_id: str = "",
     ) -> dict[str, Any]:
         now = _utc_now_db()
         details = _normalize_jsonish(details_json)
@@ -418,8 +515,9 @@ class SharedStateStore:
                 """
                 INSERT INTO shared_intel (
                     target_ip, port, service, finding_type, severity, details,
-                    source_agent, status, tags, fingerprint, timestamp, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_agent, status, tags, fingerprint, timestamp, updated_at,
+                    conversation_id, actor_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target_ip.strip(),
@@ -434,6 +532,8 @@ class SharedStateStore:
                     fingerprint.strip(),
                     now,
                     now,
+                    str(conversation_id or ""),
+                    str(actor_id or ""),
                 ),
             )
             intel_id = int(cursor.lastrowid)
@@ -458,9 +558,11 @@ class SharedStateStore:
         severity: str = "",
         status: str = "",
         limit: int = 50,
+        conversation_id: str = "",
+        actor_id: str = "",
     ) -> list[dict[str, Any]]:
-        query = "SELECT * FROM shared_intel WHERE 1=1"
-        params: list[Any] = []
+        query = "SELECT * FROM shared_intel WHERE (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
+        params: list[Any] = [str(conversation_id or ""), str(actor_id or "")]
         if target_ip.strip():
             query += " AND target_ip = ?"
             params.append(target_ip.strip())
@@ -1268,23 +1370,27 @@ class SharedStateStore:
         input_data: Any = None,
         output_data: Any = None,
         tags: list[str] | None = None,
+        conversation_id: str = "",
+        actor_id: str = "",
     ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO episodic (agent, action, input_json, output_json, tags) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO episodic (agent, action, input_json, output_json, tags, conversation_id, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     agent.strip(),
                     action.strip(),
                     json.dumps(input_data if input_data is not None else {}, ensure_ascii=True, default=str),
                     json.dumps(output_data if output_data is not None else {}, ensure_ascii=True, default=str),
                     json.dumps(tags or [], ensure_ascii=True),
+                    str(conversation_id or ""),
+                    str(actor_id or ""),
                 ),
             )
             return int(cursor.lastrowid)
 
-    def episodic_query(self, *, agent: str = "", action: str = "", limit: int = 100) -> list[dict[str, Any]]:
-        query = "SELECT * FROM episodic WHERE 1=1"
-        params: list[Any] = []
+    def episodic_query(self, *, agent: str = "", action: str = "", limit: int = 100, conversation_id: str = "", actor_id: str = "") -> list[dict[str, Any]]:
+        query = "SELECT * FROM episodic WHERE (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
+        params: list[Any] = [str(conversation_id or ""), str(actor_id or "")]
         if agent.strip():
             query += " AND agent = ?"
             params.append(agent.strip())
@@ -1314,6 +1420,8 @@ class SharedStateStore:
         agent: str = "",
         since_id: int = 0,
         limit: int = 200,
+        conversation_id: str = "",
+        actor_id: str = "",
     ) -> list[dict[str, Any]]:
         """Return every episodic event with id > since_id, ordered id ASC.
 
@@ -1326,8 +1434,8 @@ class SharedStateStore:
         Callers pass the largest ``id`` they've seen; they get everything
         newer, oldest first, so append-only concatenation works.
         """
-        query = "SELECT * FROM episodic WHERE id > ?"
-        params: list[Any] = [max(0, _coerce_int(since_id, 0))]
+        query = "SELECT * FROM episodic WHERE id > ? AND (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
+        params: list[Any] = [max(0, _coerce_int(since_id, 0)), str(conversation_id or ""), str(actor_id or "")]
         if agent.strip():
             query += " AND agent = ?"
             params.append(agent.strip())
@@ -1349,28 +1457,31 @@ class SharedStateStore:
         ]
 
     # ---- semantic ----
-    def semantic_remember(self, key: str, value: Any) -> dict[str, Any]:
+    def semantic_remember(self, key: str, value: Any, *, conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
         now = _utc_now_db()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO semantic (key, value_json, updated_at) VALUES (?, ?, ?)
+                INSERT INTO semantic (key, value_json, updated_at, conversation_id, actor_id) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
                 """,
-                (key.strip(), json.dumps(value, ensure_ascii=True, default=str), now),
+                (key.strip(), json.dumps(value, ensure_ascii=True, default=str), now, str(conversation_id or ""), str(actor_id or "")),
             )
         return {"key": key.strip(), "updated_at": now}
 
-    def semantic_recall(self, key: str) -> Any:
+    def semantic_recall(self, key: str, *, conversation_id: str = "", actor_id: str = "") -> Any:
         with self._connect() as conn:
-            row = conn.execute("SELECT value_json FROM semantic WHERE key = ?", (key.strip(),)).fetchone()
+            row = conn.execute(
+                "SELECT value_json FROM semantic WHERE key = ? AND (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))",
+                (key.strip(), str(conversation_id or ""), str(actor_id or "")),
+            ).fetchone()
         return _normalize_jsonish(row["value_json"]) if row else None
 
-    def semantic_list(self, *, prefix: str = "", limit: int = 200) -> list[dict[str, Any]]:
-        query = "SELECT * FROM semantic"
-        params: list[Any] = []
+    def semantic_list(self, *, prefix: str = "", limit: int = 200, conversation_id: str = "", actor_id: str = "") -> list[dict[str, Any]]:
+        query = "SELECT * FROM semantic WHERE (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
+        params: list[Any] = [str(conversation_id or ""), str(actor_id or "")]
         if prefix.strip():
-            query += " WHERE key LIKE ?"
+            query += " AND key LIKE ?"
             params.append(f"{prefix.strip()}%")
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(max(1, min(_coerce_int(limit, 200), 1000)))

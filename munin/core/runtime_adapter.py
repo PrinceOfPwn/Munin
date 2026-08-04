@@ -1,4 +1,4 @@
-# tags: [runtime, supervisor, orchestrator, core, langgraph, supervisor_runner, _split_think_tags, UNLIMITED_RECURSION_LIMIT, astream_events, _history_to_messages, _trailing_tag_prefix, DEFAULT_RECURSION_LIMIT, progress-envelopes, checkpoint-config, thread_id]
+# tags: [runtime, supervisor, orchestrator, core, langgraph, supervisor_runner, _split_think_tags, UNLIMITED_RECURSION_LIMIT, astream_events, _history_to_messages, _trailing_tag_prefix, DEFAULT_RECURSION_LIMIT, progress-envelopes, checkpoint-config, thread_id, ACTIVE_CONVERSATION_ID, ACTIVE_ACTOR_ID, memory-scoping]
 """
 Runtime adapter — the single execution path into the Deep Agents supervisor.
 
@@ -335,6 +335,7 @@ async def supervisor_runner(
     resume_from_checkpoint: bool = False,
     mode: Any = None,
     goal: dict[str, Any] | None = None,
+    actor_id: str = "",
 ) -> AsyncIterator[dict]:
     """Run one Munin turn through the Deep Agents supervisor.
 
@@ -350,6 +351,8 @@ async def supervisor_runner(
     from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
     from .autonomy.context import (  # noqa: PLC0415
+        ACTIVE_ACTOR_ID,
+        ACTIVE_CONVERSATION_ID,
         ACTIVE_EMITTER,
         ACTIVE_GOAL,
         ACTIVE_MODE,
@@ -420,6 +423,8 @@ async def supervisor_runner(
     tok_mode = ACTIVE_MODE.set(str(mode or "standard").lower())
     tok_goal = ACTIVE_GOAL.set(goal)
     tok_emit = ACTIVE_EMITTER.set(wrapped_progress_sink)
+    tok_conv = ACTIVE_CONVERSATION_ID.set(str(conversation_id or ""))
+    tok_actor = ACTIVE_ACTOR_ID.set(str(actor_id or ""))
     plan_snapshot: dict[str, Any] | None = None
     try:
         plan_snapshot_provider = getattr(store, "plan_snapshot", None)
@@ -545,6 +550,8 @@ async def supervisor_runner(
             (ACTIVE_GOAL, tok_goal),
             (ACTIVE_EMITTER, tok_emit),
             (ACTIVE_PLAN_SNAPSHOT, tok_plan),
+            (ACTIVE_CONVERSATION_ID, tok_conv),
+            (ACTIVE_ACTOR_ID, tok_actor),
         ):
             try:
                 variable.reset(token)

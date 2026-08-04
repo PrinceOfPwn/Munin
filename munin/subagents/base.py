@@ -1,4 +1,4 @@
-# tags: [subagent, workflow, runtime, coordination, memory, mcp-tool, capabilities, ReActSubagentBase, build_tool_catalog, SUBAGENT_TOOL_REGISTRY, list_subagent_tools, react-loop, state-bound-tools, task-claim, wake-queue]
+# tags: [subagent, workflow, runtime, coordination, memory, mcp-tool, capabilities, ReActSubagentBase, build_tool_catalog, SUBAGENT_TOOL_REGISTRY, list_subagent_tools, react-loop, state-bound-tools, task-claim, wake-queue, memory-scoping, conversation_id, actor_id, scope]
 """Base class for Munin ReAct subagents.
 
 Every concrete subagent declares:
@@ -58,8 +58,12 @@ def _signature_to_openai(fn: Callable[..., Any]) -> dict[str, Any]:
     sig = inspect.signature(fn)
     properties: dict[str, Any] = {}
     required: list[str] = []
+    # Operator-injected params, never model-supplied. Mirrors ``_HIDDEN_PARAMS``
+    # in ``tool_gateway`` so the subagent ReAct path doesn't leak memory-scope
+    # plumbing into the LLM tool schema.
+    _hidden = frozenset({"run_id", "conversation_id", "actor_id"})
     for name, param in sig.parameters.items():
-        if name == "run_id":
+        if name in _hidden:
             continue
         annotation = param.annotation if param.annotation is not inspect._empty else str
         json_type = "string"
@@ -106,30 +110,48 @@ def _tool_specs(catalog: dict[str, Callable[..., Any]]) -> list[dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_memory_tools(state: SharedStateStore) -> dict[str, Callable]:
-    def memory_remember(key: str, value_json: str, run_id: str = "") -> dict[str, Any]:
-        """Persist a semantic fact to shared_state.sqlite."""
+    def memory_remember(
+        key: str,
+        value_json: str,
+        scope: str = "conversation",
+        run_id: str = "",
+        conversation_id: str = "",
+        actor_id: str = "",
+    ) -> dict[str, Any]:
+        """Persist a semantic fact to shared_state.sqlite.
+
+        scope controls the memory tier: "conversation" (default, this
+        conversation only), "user" (shared across this operator's
+        conversations) or "global" (visible to every conversation).
+        """
         try:
             value = json.loads(value_json)
         except Exception as exc:
             return {"ok": False, "tool": "memory_remember", "error": {"code": "bad_input", "message": str(exc)}}
-        row = state.semantic_remember(key, value)
+        if scope == "global":
+            eff_conv, eff_actor = "", ""
+        elif scope == "user":
+            eff_conv, eff_actor = "", actor_id
+        else:
+            eff_conv, eff_actor = conversation_id, actor_id
+        row = state.semantic_remember(key, value, conversation_id=eff_conv, actor_id=eff_actor)
         return {"ok": True, "tool": "memory_remember", "summary": f"remembered {key}", "data": row}
 
-    def memory_recall(key: str, run_id: str = "") -> dict[str, Any]:
-        """Recall a semantic fact by key."""
-        value = state.semantic_recall(key)
+    def memory_recall(key: str, run_id: str = "", conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
+        """Recall a semantic fact by key (this conversation + legacy/global rows)."""
+        value = state.semantic_recall(key, conversation_id=conversation_id, actor_id=actor_id)
         if value is None:
             return {"ok": False, "tool": "memory_recall", "error": {"code": "not_found", "message": key}}
         return {"ok": True, "tool": "memory_recall", "summary": f"recalled {key}", "data": {"key": key, "value": value}}
 
-    def memory_list(prefix: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
-        """List semantic facts, optionally filtered by key prefix."""
-        rows = state.semantic_list(prefix=prefix, limit=limit)
+    def memory_list(prefix: str = "", limit: int = 100, run_id: str = "", conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
+        """List semantic facts, optionally filtered by key prefix (this conversation + legacy/global rows)."""
+        rows = state.semantic_list(prefix=prefix, limit=limit, conversation_id=conversation_id, actor_id=actor_id)
         return {"ok": True, "tool": "memory_list", "summary": f"{len(rows)} facts", "data": {"facts": rows, "count": len(rows)}}
 
-    def episodic_query(agent: str = "", action: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
+    def episodic_query(agent: str = "", action: str = "", limit: int = 100, run_id: str = "", conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
         """Recent episodic events (tool calls, ReAct steps, agent decisions)."""
-        rows = state.episodic_query(agent=agent, action=action, limit=limit)
+        rows = state.episodic_query(agent=agent, action=action, limit=limit, conversation_id=conversation_id, actor_id=actor_id)
         return {"ok": True, "tool": "episodic_query", "summary": f"{len(rows)} events", "data": {"events": rows, "count": len(rows)}}
 
     return {
@@ -242,9 +264,17 @@ def _make_intel_tools(state: SharedStateStore) -> dict[str, Callable]:
         status: str = "NEW",
         tags: str = "",
         fingerprint: str = "",
+        scope: str = "conversation",
         run_id: str = "",
+        conversation_id: str = "",
+        actor_id: str = "",
     ) -> dict[str, Any]:
-        """Publish a finding to the shared intel SQLite store. Accessible by all agents."""
+        """Publish a finding to the shared intel SQLite store.
+
+        scope controls the intel tier: "conversation" (default, this
+        conversation only) or "global" (visible to every conversation).
+        """
+        eff_conv = "" if scope == "global" else conversation_id
         record = state.publish_intel(
             target_ip=target_ip,
             port=port or None,
@@ -256,6 +286,8 @@ def _make_intel_tools(state: SharedStateStore) -> dict[str, Callable]:
             status=status,
             tags=tags,
             fingerprint=fingerprint,
+            conversation_id=eff_conv,
+            actor_id=actor_id,
         )
         return {"ok": True, "tool": "publish_shared_intel", "summary": f"intel stored for {record['target_ip']}", "data": record}
 
@@ -266,9 +298,18 @@ def _make_intel_tools(state: SharedStateStore) -> dict[str, Callable]:
         severity: str = "",
         status: str = "",
         limit: int = 50,
+        scope: str = "conversation",
         run_id: str = "",
+        conversation_id: str = "",
+        actor_id: str = "",
     ) -> dict[str, Any]:
-        """Query the shared intel store. Filter by IP, service, finding type, severity, or status."""
+        """Query the shared intel store. Filter by IP, service, finding type, severity, or status.
+
+        scope="conversation" (default) reads this conversation + legacy/global
+        rows; scope="global" reads everything regardless of conversation.
+        """
+        eff_conv = "" if scope == "global" else conversation_id
+        eff_actor = "" if scope == "global" else actor_id
         matches = state.query_intel(
             target_ip=target_ip,
             service=service,
@@ -276,6 +317,8 @@ def _make_intel_tools(state: SharedStateStore) -> dict[str, Callable]:
             severity=severity,
             status=status,
             limit=limit,
+            conversation_id=eff_conv,
+            actor_id=eff_actor,
         )
         return {"ok": True, "tool": "query_shared_intel", "summary": f"{len(matches)} intel rows", "data": {"matches": matches, "count": len(matches)}}
 
