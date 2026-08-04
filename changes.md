@@ -41,6 +41,81 @@ global (opt-in, HITL-gated via the LLM-visible `scope` parameter).
 `active_tasks` stay deliberately global. When contextvars are empty the
 behavior is identical to before (legacy global namespace).
 
+## 2026-08-04 — HITL resume amnesia fix (hybrid: deepagents checkpoint + opencode history reload) + compaction 170K
+
+### Problem
+
+After an operator approved a pending tool via the web/Discord HITL surface,
+the resumed run lost thread: MiMo V2.5 saw the checkpoint state (the
+interrupted `AIMessage(tool_calls)` + the resolved `ToolMessage(result)`)
+but, with no new `HumanMessage` telling it to continue, it fell back to
+the Soul's "standing by for orders" posture and asked the operator to
+re-issue the objective — the "空命令已收到" hallucination.
+
+DeepWiki research confirmed two reference implementations:
+
+- **deepagents (LangGraph)**: the checkpointer preserves the full graph
+  state. `Command(resume={"decisions": [...]})` loads it and the model is
+  expected to continue from there. **No explicit continuation message is
+  injected** — it trusts the model.
+- **opencode (sst/opencode)**: does NOT use LangGraph. After tool
+  settlement, it **reloads the projected history** and explicitly feeds
+  the full conversation flow back to the model. More robust for weaker
+  models.
+
+MiMo V2.5 is not Claude; the deepagents "trust the model" contract does
+not hold. Munin now uses a **hybrid**: keep the checkpointer (deepagents)
+but ALSO inject a continuation `HumanMessage` via `Command(update=...)`
+(opencode-style history reload), so the model sees:
+
+  [full checkpoint messages] + [ToolMessage(result)] + 
+  [HumanMessage(name="operator", "approved… original objective: X… proceed")]
+
+### Fix
+
+- `munin/core/runtime_adapter.py::supervisor_runner` — when
+  `resume_decisions is not None` and `prompt` is non-empty, build
+  `Command(resume={"decisions": [...]}, update={"messages": [HumanMessage(...)]})`
+  instead of a bare `Command(resume=...)`. The `update` carries an
+  explicit continuation directive naming the original objective and
+  forbidding the model from asking the operator to repeat it. Verified
+  `Command` supports `resume` + `update` simultaneously in the installed
+  langgraph (`inspect.signature(Command)` shows both kwargs).
+- `munin/production/chat.py` resolve endpoint — pass
+  `prompt=original_prompt` (was `prompt=""`) to `_launch_chat_run` so the
+  `Command.update` has the real objective text, fetched from
+  `store.run_execution_context(run_id=...)`.
+- `munin/production/discord_adapter.py::_resume_approved_run` — same:
+  `prompt=original_prompt` to `_stream_run`.
+
+The `resume_from_checkpoint=True` path (process-restart recovery) is
+unchanged: it still sends `input_value = None` so LangGraph continues
+the saved thread without appending input. The two recovery tests
+(`test_runtime_checkpoint_recovery_uses_no_new_human_message`,
+`test_resolved_hitl_recovery_uses_persisted_command_not_fresh_prompt`)
+still pass — they assert the recovery path's contract, not the
+approve-via-API path.
+
+Also in this batch: compaction trigger raised to 170K tokens
+(`SummarizationMiddleware` explicit in `munin/core/supervisor.py`),
+vs the 60K framework default — so Munin keeps full long-context runs
+instead of compacting aggressively and losing tool evidence mid-campaign.
+
+### Validation
+
+- `py_compile` clean on all three files.
+- `tests/test_discord_adapter.py`: 25 passed, 1 skipped.
+- `tests/test_chat_recovery.py` + `test_conversations.py` +
+  `test_production_foundation.py`: 22 passed.
+- `ruff check --select F`: clean.
+
+### Files
+
+- `munin/core/runtime_adapter.py` — hybrid `Command(resume=..., update=...)`.
+- `munin/production/chat.py` — `prompt=original_prompt` on resolve.
+- `munin/production/discord_adapter.py` — `prompt=original_prompt` on resume.
+- `munin/core/supervisor.py` — `SummarizationMiddleware` explicit, 170K token trigger.
+
 ## 2026-08-03 — Discord community adapter: session isolation, command surface, autonomous outbound
 
 Redesigned the Discord surface so it behaves like the Web GUI: a community

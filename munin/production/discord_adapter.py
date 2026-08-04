@@ -540,20 +540,35 @@ async def _resume_approved_run(
         with contextlib.suppress(Exception):
             await message.reply(f"[failed] could not claim run for resume: {exc}")
         return
-    # Inject a continuation directive so the model knows to proceed with
-    # the approved tool work instead of hallucinating "standing by".
-    # OperatorGuidanceMiddleware drains this before the first post-resume
-    # model call and delivers it as HumanMessage(name="operator").
+    # Fetch the original prompt + conversation history so the guidance
+    # message can remind the model WHAT it was doing before the interrupt.
+    # Without this the model has amnesia — it doesn't know what tool was
+    # approved or what the original objective was.
+    original_prompt = ""
+    conversation_history: list[Any] = []
+    with contextlib.suppress(Exception):
+        exec_ctx = store.run_execution_context(run_id=run_id)
+        original_prompt = str(exec_ctx.get("message") or "")
+        conversation_history = list(exec_ctx.get("history") or [])
+    guidance_body = (
+        "Operator approved the pending tool execution. "
+        "Resume the approved action, incorporate its result, "
+        "and continue the workflow toward the original objective."
+    )
+    if original_prompt:
+        guidance_body = (
+            f"Operator approved the pending tool execution. "
+            f"Your original objective was: \"{original_prompt[:500]}\". "
+            f"Resume the approved action, incorporate its result, "
+            f"and continue the workflow toward that objective. "
+            f"Do NOT ask the operator to repeat the objective — proceed now."
+        )
     with contextlib.suppress(Exception):
         store.enqueue_guidance(
             run_id=run_id,
             actor_id=str(getattr(message.author, "id", "") or ""),
             actor_username=str(getattr(message.author, "name", "operator")),
-            body=(
-                "Operator approved the pending tool execution. "
-                "Resume the approved action, incorporate its result, "
-                "and continue the workflow toward the original objective."
-            ),
+            body=guidance_body,
         )
     await _stream_run(
         message=message,
@@ -562,8 +577,8 @@ async def _resume_approved_run(
         settings=None,
         run_id=run_id,
         conversation_id=conversation_id,
-        prompt="",
-        conversation_history=[],
+        prompt=original_prompt,
+        conversation_history=conversation_history,
         assistant_message_id=assistant_message_id,
         lease_token=lease_token,
         resume_decisions=[{"type": "approve"}] * max(1, decision_count),

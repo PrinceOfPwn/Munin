@@ -447,7 +447,36 @@ async def supervisor_runner(
         if resume_decisions is not None:
             from langgraph.types import Command  # noqa: PLC0415
 
-            input_value = Command(resume={"decisions": resume_decisions})
+            # Hybrid resume: deepagents checkpoint + opencode-style history
+            # reload. The checkpointer preserves the graph state (all prior
+            # messages, the interrupted AIMessage with tool_calls, etc.).
+            # But weaker models (MiMo V2.5) lose thread after an interrupt
+            # because there's no new HumanMessage telling them to continue.
+            #
+            # opencode solves this by reloading the "projected history" after
+            # tool settlement. We do the same via Command(resume=..., update=...)
+            # which BOTH resumes the interrupt AND injects a continuation
+            # HumanMessage into the graph state. The model sees:
+            #   [full checkpoint history] + [ToolMessage(result)] + [HumanMessage("continue")]
+            # instead of just the checkpoint with no new directive.
+            update_messages: list[Any] = []
+            if prompt and prompt.strip():
+                update_messages.append(
+                    HumanMessage(
+                        content=(
+                            f"[System] Operator approved the pending tool execution. "
+                            f"Your original objective: \"{prompt.strip()[:800]}\". "
+                            f"Resume the approved action, process its result, and "
+                            f"continue the workflow toward that objective. "
+                            f"Do NOT ask the operator to repeat or rephrase — proceed now."
+                        ),
+                        name="operator",
+                    )
+                )
+            input_value = Command(
+                resume={"decisions": resume_decisions},
+                update={"messages": update_messages} if update_messages else None,
+            )
         elif not resume_from_checkpoint:
             messages = _history_to_messages(conversation_history)
             messages.append(HumanMessage(content=prompt))

@@ -1590,7 +1590,29 @@ def register_chat_routes(
                 lease_token, assistant_message_id = _claim_direct(
                     store, run_id=str(result["run_id"])
                 )
-                # Inject a continuation directive so the model proceeds
+                # Fetch the original prompt + history so the guidance
+                # message can remind the model WHAT it was doing before
+                # the interrupt. Without this the model has amnesia.
+                original_prompt = ""
+                resume_history: list = []
+                with suppress(Exception):
+                    exec_ctx = store.run_execution_context(run_id=str(result["run_id"]))
+                    original_prompt = str(exec_ctx.get("message") or "")
+                    resume_history = list(exec_ctx.get("history") or [])
+                guidance_body = (
+                    "Operator approved the pending tool execution. "
+                    "Resume the approved action, incorporate its result, "
+                    "and continue the workflow toward the original objective."
+                )
+                if original_prompt:
+                    guidance_body = (
+                        f"Operator approved the pending tool execution. "
+                        f"Your original objective was: \"{original_prompt[:500]}\". "
+                        f"Resume the approved action, incorporate its result, "
+                        f"and continue the workflow toward that objective. "
+                        f"Do NOT ask the operator to repeat the objective — proceed now."
+                    )
+                # Inject the continuation directive so the model proceeds
                 # with the approved tool work instead of hallucinating
                 # "standing by" — OperatorGuidanceMiddleware drains this
                 # before the first post-resume model call.
@@ -1599,11 +1621,7 @@ def register_chat_routes(
                         run_id=str(result["run_id"]),
                         actor_id=str(current["id"]),
                         actor_username=str(current.get("username") or "operator"),
-                        body=(
-                            "Operator approved the pending tool execution. "
-                            "Resume the approved action, incorporate its result, "
-                            "and continue the workflow toward the original objective."
-                        ),
+                        body=guidance_body,
                     )
                 _launch_chat_run(
                     store=store,
@@ -1611,8 +1629,8 @@ def register_chat_routes(
                     actor_info=current,
                     run_id=str(result["run_id"]),
                     conversation_id=str(run["conversation_id"]),
-                    prompt="",
-                    conversation_history=[],
+                    prompt=original_prompt,
+                    conversation_history=resume_history,
                     assistant_message_id=assistant_message_id,
                     lease_token=lease_token,
                     resume_decisions=[{"type": "approve"}]
