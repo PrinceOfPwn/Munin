@@ -1,13 +1,16 @@
-// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui, typed-renderer-registry, RendererFor, guidance-lifecycle, PR-2D, PR-2G]
+// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui, typed-renderer-registry, RendererFor, guidance-lifecycle, PR-2D, PR-2G, stable-keys, PR-4D, react-memo, PR-4A, error-boundary, PR-4B, virtualization, PR-4F, tanstack-virtual]
 "use client";
 
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import type { FormEvent } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive,
   Bot,
@@ -85,6 +88,8 @@ import { cn, formatDuration, isTerminalRun } from "@/lib/utils";
 // annotated fallback card instead of crashing the whole console tree. The
 // legacy direct renderers remain for parts outside the v1 allow-list.
 import { RendererFor } from "@/lib/rendererRegistry";
+// PR-4B — per-part render isolation around ``<PartRenderer>`` call sites.
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 // ---------------------------------------------------------------------------
 // Custom data part shapes emitted by the Munin BFF translator
@@ -193,6 +198,14 @@ type AnyUIPart =
   | StepStartUIPart
   | DataUIPart<Record<string, unknown>>;
 
+// PR-4D — stable part keys. Array indexes are replaced by the AI SDK part id
+// when present; otherwise a deterministic ``kind``/``sequence`` fallback so a
+// streamed chunk update never re-mounts an unchanged part's DOM node.
+function stablePartKey(part: AnyUIPart, messageId: string, idx: number): string {
+  const p = part as AnyUIPart & { id?: string; kind?: string; sequence?: number };
+  return p.id ?? `${messageId}-kind-${p.kind ?? part.type}-seq-${p.sequence ?? idx}`;
+}
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
@@ -253,7 +266,10 @@ function StatusBadge({ status }: { status: ChatStatus }) {
 // Message bubble shell
 // ---------------------------------------------------------------------------
 
-function MessageBubble({
+// PR-4A — memoized shell so an unchanged message (same role + children) is
+// never re-rendered when a sibling message receives a stream chunk. The part
+// tree inside is additionally protected by the memoized MessagePartList.
+const MessageBubble = memo(function MessageBubble({
   role,
   children,
 }: {
@@ -295,28 +311,45 @@ function MessageBubble({
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Per-part renderer
 // ---------------------------------------------------------------------------
 
-function PartRenderer({
-  part,
-  messageId,
-  idx,
-  role,
-  hitlApprove,
-  hitlReject,
-}: {
+interface PartRendererProps {
   part: AnyUIPart;
   messageId: string;
   idx: number;
   role: string;
   hitlApprove: HitlRequestPartProps["onApprove"];
   hitlReject: HitlRequestPartProps["onReject"];
-}) {
-  const key = `${messageId}-part-${idx}`;
+}
+
+// PR-4A — the parent (MessagePartList) recreates the hitlApprove/hitlReject
+// closures on every message update, so the comparator deliberately ignores
+// callback identity: an unchanged part (same immutable part object) must not
+// re-render when a sibling chunk lands. The captured callbacks stay correct
+// because they close over the stable message id and the stable
+// ``onHitlResolved`` wrapper.
+function partRendererPropsEqual(prev: PartRendererProps, next: PartRendererProps): boolean {
+  return (
+    prev.part === next.part &&
+    prev.messageId === next.messageId &&
+    prev.idx === next.idx &&
+    prev.role === next.role
+  );
+}
+
+const PartRenderer = memo(function PartRenderer({
+  part,
+  messageId,
+  idx,
+  role,
+  hitlApprove,
+  hitlReject,
+}: PartRendererProps) {
+  const key = stablePartKey(part, messageId, idx);
 
   // Text part
   if (part.type === "text") {
@@ -626,13 +659,17 @@ function PartRenderer({
 
   // Unknown part — ignore silently.
   return null;
-}
+}, partRendererPropsEqual);
 
 // ---------------------------------------------------------------------------
 // Message part list
 // ---------------------------------------------------------------------------
 
-function MessagePartList({
+// PR-4A — memoized part list: the `message` prop keeps its identity for
+// unchanged messages (the AI SDK updates messages immutably), so a stream
+// chunk that touches a sibling message never re-renders this subtree. The
+// `onHitlResolved` prop is referentially stable (see LiveConsole).
+const MessagePartList = memo(function MessagePartList({
   message,
   onHitlResolved,
 }: {
@@ -664,20 +701,27 @@ function MessagePartList({
 
   return (
     <>
-      {(message.parts as AnyUIPart[]).map((part, idx) => (
-        <PartRenderer
-          key={`${message.id}-part-${idx}`}
-          part={part}
-          messageId={message.id}
-          idx={idx}
-          role={message.role}
-          hitlApprove={hitlApprove}
-          hitlReject={hitlReject}
-        />
-      ))}
+      {(message.parts as AnyUIPart[]).map((part, idx) => {
+        // PR-4D — the key is the same stable string the part renderer
+        // computes internally, so the per-part ErrorBoundary (PR-4B) and the
+        // memoized PartRenderer share one identity across stream updates.
+        const partKey = stablePartKey(part, message.id, idx);
+        return (
+          <ErrorBoundary key={partKey} messageId={message.id} partId={partKey}>
+            <PartRenderer
+              part={part}
+              messageId={message.id}
+              idx={idx}
+              role={message.role}
+              hitlApprove={hitlApprove}
+              hitlReject={hitlReject}
+            />
+          </ErrorBoundary>
+        );
+      })}
     </>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Extract active run metadata + last tool call from the message stream
@@ -993,6 +1037,15 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
     conversationId,
   });
 
+  // PR-4A — useChat re-creates `resumeStream` on every render. The memoized
+  // part tree must not re-render just because the callback identity changed,
+  // so the part list receives a referentially stable wrapper whose ref always
+  // points at the latest closure (function declarations hoist, so referencing
+  // `resumeAfterHitl` here is safe).
+  const resumeAfterHitlRef = useRef<() => Promise<void>>(async () => {});
+  resumeAfterHitlRef.current = resumeAfterHitl;
+  const onHitlResolved = useCallback(() => resumeAfterHitlRef.current(), []);
+
   // Conversation metadata is read from the cached list (staleTime 30s, no
   // polling). Fetching a single conversation would require the legacy
   // detail endpoint which is scheduled for deletion in Fase 2.
@@ -1108,19 +1161,50 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD;
   }
 
+  // PR-4F — virtualized message list. Only the rows in the viewport plus
+  // overscan are mounted; `measureElement` captures the real (variable)
+  // bubble heights after paint. While streaming, the "Munin is working…"
+  // indicator counts as the final row so the pin-to-bottom target is stable.
+  const isStreaming = status === "streaming" || status === "submitted";
+  const virtualRowCount = messages.length + (isStreaming ? 1 : 0);
+  const rowVirtualizer = useVirtualizer({
+    count: virtualRowCount,
+    getScrollElement: () => viewportRef.current,
+    estimateSize: () => 128,
+    overscan: 8,
+    getItemKey: (index) =>
+      index >= messages.length ? "stream-indicator" : messages[index].id,
+  });
+
+  // Auto-scroll: only follow the stream while the operator is reading near
+  // the bottom (within STICK_THRESHOLD px). If they scrolled up to inspect
+  // earlier content, an in-progress stream must not drag the view down.
+  // `pendingJump` forces a jump to the bottom right after sending a turn so
+  // the new response is visible even if the operator was scrolled up. With
+  // virtualization this maps to scrollToIndex(…, {align: "end"}) so the
+  // newest row pins to the viewport bottom without jitter.
   useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
+    if (messages.length === 0) return;
     if (pendingJumpRef.current) {
       pendingJumpRef.current = false;
       stickToBottomRef.current = true;
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    } else if (stickToBottomRef.current) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
     }
-  }, [messages]);
+    if (!stickToBottomRef.current) return;
+    rowVirtualizer.scrollToIndex(virtualRowCount - 1, { align: "end" });
+  }, [messages, rowVirtualizer, virtualRowCount]);
 
-  const isStreaming = status === "streaming" || status === "submitted";
+  // Correct measurement drift while pinned to the bottom: rows are measured
+  // after paint, so the first scrollToIndex can land short; re-pin whenever
+  // the virtual total height changes while we are still near the bottom.
+  const virtualTotalSize = rowVirtualizer.getTotalSize();
+  useEffect(() => {
+    if (!stickToBottomRef.current || messages.length === 0) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > STICK_THRESHOLD + 16) {
+      rowVirtualizer.scrollToIndex(virtualRowCount - 1, { align: "end" });
+    }
+  }, [messages.length, rowVirtualizer, virtualRowCount, virtualTotalSize]);
   const insight = useStreamInsight(messages);
   const runIsActive = Boolean(
     insight.activeRunId && !isTerminalRun(insight.runState ?? ""),
@@ -1365,13 +1449,13 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         </div>
       )}
 
-      {/* Message stream */}
+      {/* Message stream — PR-4F: virtualized rows (viewport + overscan only) */}
       <ScrollArea
         className="min-h-0 flex-1"
         viewportRef={viewportRef}
         onViewportScroll={handleViewportScroll}
       >
-        <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8">
+        <div className="mx-auto max-w-4xl px-4 py-6 md:px-8">
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent/10 text-accent">
@@ -1391,19 +1475,37 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
             </div>
           )}
 
-          {messages.map((message) => (
-            <MessageBubble key={message.id} role={message.role}>
-              <MessagePartList message={message} onHitlResolved={resumeAfterHitl} />
-            </MessageBubble>
-          ))}
-
-          {/* Streaming indicator */}
-          {isStreaming && (
-            <div className="flex items-center gap-2 pl-10 text-xs text-muted">
-              <LoaderCircle className="h-3 w-3 animate-spin text-accent" />
-              <span>Munin is working…</span>
-            </div>
-          )}
+          <div
+            className="relative"
+            style={{ height: rowVirtualizer.getTotalSize() }}
+          >
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const isIndicator = virtualRow.index >= messages.length;
+              return (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full pb-4"
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  {isIndicator ? (
+                    <div className="flex items-center gap-2 pl-10 text-xs text-muted">
+                      <LoaderCircle className="h-3 w-3 animate-spin text-accent" />
+                      <span>Munin is working…</span>
+                    </div>
+                  ) : (
+                    <MessageBubble role={messages[virtualRow.index].role}>
+                      <MessagePartList
+                        message={messages[virtualRow.index]}
+                        onHitlResolved={onHitlResolved}
+                      />
+                    </MessageBubble>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </ScrollArea>
 

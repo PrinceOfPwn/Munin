@@ -1,7 +1,7 @@
-// tags: [ui-component, data-part, chat-stream-part, client-component, use-effect, use-state, heartbeat-part]
+// tags: [ui-component, data-part, chat-stream-part, client-component, use-effect, use-state, heartbeat-part, react-memo, PR-4A]
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ function formatRelative(ts: number): string {
  * Compact heartbeat indicator showing "last active: X seconds ago".
  * The relative time refreshes every second while the component is mounted.
  */
-export function HeartbeatPart({ ts }: HeartbeatPartProps) {
+export const HeartbeatPart = memo(function HeartbeatPart({ ts }: HeartbeatPartProps) {
   const [label, setLabel] = useState(() => formatRelative(ts));
 
   useEffect(() => {
@@ -62,4 +62,4 @@ export function HeartbeatPart({ ts }: HeartbeatPartProps) {
       <span>last active: {label}</span>
     </div>
   );
-}
+});

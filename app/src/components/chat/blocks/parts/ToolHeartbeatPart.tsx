@@ -1,6 +1,7 @@
-// tags: [ui-component, data-part, chat-stream-part, lucide-icons, client-component, tool-heartbeat-part]
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, client-component, tool-heartbeat-part, react-memo, PR-4A]
 "use client";
 
+import { memo } from "react";
 import { LoaderCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -16,7 +17,7 @@ function seconds(ms: number): string {
 }
 
 /** Visible liveness marker for a quiet command; avoids a frozen-looking UI. */
-export function ToolHeartbeatPart({
+export const ToolHeartbeatPart = memo(function ToolHeartbeatPart({
   toolName,
   elapsedMs = 0,
   lastOutputMs = 0,
@@ -37,4 +38,4 @@ export function ToolHeartbeatPart({
       </span>
     </div>
   );
-}
+});
