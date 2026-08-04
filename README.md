@@ -430,6 +430,23 @@ Potentially. However, the verified v1.0.0 configuration is the GUI on GitHub Act
 
 No. It preserves evidence, state and decisions so analysts can review and govern the operation more effectively.
 
+## Active development
+
+The `v1.0.0` contract above is the verified baseline. Work in progress lives
+on the `feat/discord-community-adapter` branch ([PR #52](https://github.com/PrinceOfPwn/Munin/pull/52)),
+which adds a Discord community/DM control surface alongside the web GUI and
+ships a hotfix for post-approval resume amnesia:
+
+- **HITL resume amnesia fix** (commit `f686766`): MiMo V2.5 lost thread after
+  an operator approved a tool via the HITL surface. Munin now uses a hybrid
+  resume — `Command(resume={"decisions": [...]}, update={"messages": [HumanMessage(...)]})`
+  — so the model sees both the checkpointed graph state (deepagents way)
+  and an explicit continuation directive naming the original objective
+  (opencode-style projected-history reload). See `changes.md`.
+- **Compaction raised to 170K tokens** (commit `69af42f`): Munin keeps full
+  long-context runs instead of compacting at the 60K framework default and
+  losing tool evidence mid-campaign.
+
 ## License
 
 Munin is distributed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
