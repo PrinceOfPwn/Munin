@@ -1,4 +1,4 @@
-// tags: [ui-component, console-surface, lucide-icons, client-component, use-conversations, use-effect, use-create-conversation, use-state, conversation-sidebar]
+// tags: [ui-component, console-surface, lucide-icons, client-component, use-conversations, use-effect, use-create-conversation, use-state, conversation-sidebar, mobile-drawer, PR-3B]
 "use client";
 
 import Image from "next/image";
@@ -29,6 +29,12 @@ interface ConversationSidebarProps {
   activeConversationId: string | null;
   onSelect: (id: string) => void;
   onLogout: () => Promise<void>;
+  /**
+   * PR-3B: render as a full-height flex column inside the mobile drawer
+   * (Radix Dialog side-sheet) instead of the desktop rail. The desktop rail
+   * stays `hidden lg:flex`.
+   */
+  embedded?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +55,7 @@ export default function ConversationSidebar({
   activeConversationId,
   onSelect,
   onLogout,
+  embedded = false,
 }: ConversationSidebarProps) {
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -85,7 +92,12 @@ export default function ConversationSidebar({
   }
 
   return (
-    <aside className="hidden min-h-0 flex-col gap-3 border-r border-border bg-surface p-3 lg:flex">
+    <aside
+      className={cn(
+        "min-h-0 flex-col gap-3 border-border bg-surface p-3",
+        embedded ? "flex h-full border-r-0" : "hidden border-r lg:flex",
+      )}
+    >
       <div className="flex items-center gap-2 px-1">
         <Image
           src="/raven-mark.png"
