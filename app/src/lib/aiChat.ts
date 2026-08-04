@@ -1,4 +1,4 @@
-// tags: [utility-library, ai-sdk-v5, stream-hydration, use-chat, ai-sdk, vercel-ai, indexeddb, use-ref, use-browser-cache, use-memo, use-effect, use-munin-chat]
+// tags: [utility-library, ai-sdk-v5, stream-hydration, use-chat, ai-sdk, vercel-ai, indexeddb, use-ref, use-browser-cache, use-memo, use-effect, use-munin-chat, hydrate-fence]
 ﻿import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "ai";
 import { DefaultChatTransport } from "ai";
@@ -72,6 +72,16 @@ function uiMessageText(message: UIMessage): string {
 export function useMuninChat({ conversationId }: UseMuninChatOptions) {
   const cache = useBrowserCache();
   const hydratedConversation = useRef<string | null>(null);
+  // Hydrate ↔ onFinish race guard (P2.1). `hydratingRef` is true while the
+  // cold-hydrate async IIFE is in flight; `pendingOnFinishRef` holds a fresh
+  // `onFinish` payload that landed during hydration so we can apply it AFTER
+  // the hydrate completes — guaranteeing the live-stream payload wins over a
+  // stale cache read instead of being overwritten by it.
+  const hydratingRef = useRef(false);
+  const pendingOnFinishRef = useRef<{
+    conversationId: string;
+    messages: UIMessage[];
+  } | null>(null);
 
   const transport = useMemo(
     () =>
@@ -99,11 +109,19 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
       console.error(`[useMuninChat] conversation=${conversationId}:`, err);
     },
     onFinish: ({ messages }) => {
+      const ui = messages as UIMessage[];
+      // If the cold-hydrate IIFE is still in flight, do NOT write to the cache
+      // yet — its stale cache read could overwrite this fresh payload after we
+      // return. Stash it and let the hydrate tail apply it (it wins).
+      if (hydratingRef.current) {
+        pendingOnFinishRef.current = { conversationId, messages: ui };
+        return;
+      }
       // Cache the rendered timeline, but derive lifecycle from the durable
       // server event rather than treating an SSE close (including a HITL
       // pause or a browser disconnect) as a completed operation.
-      cache.setMessages(conversationId, messages as UIMessage[]);
-      const run = latestRunState(messages as UIMessage[]);
+      cache.setMessages(conversationId, ui);
+      const run = latestRunState(ui);
       if (run) {
         cache.setRunMarker(conversationId, {
           runId: run.runId,
@@ -133,7 +151,13 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
   // a refresh/new tab never loses the operator's original prompt.
   useEffect(() => {
     if (hydratedConversation.current === conversationId) return;
+    // Clear any pending onFinish stashed for a different conversation so it
+    // can never leak across a conversation switch.
+    if (pendingOnFinishRef.current?.conversationId !== conversationId) {
+      pendingOnFinishRef.current = null;
+    }
     hydratedConversation.current = conversationId;
+    hydratingRef.current = true;
     let cancelled = false;
 
     void (async () => {
@@ -145,17 +169,32 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
           role: message.role,
           parts: message.parts,
         }));
-      } catch {
+      } catch (error) {
         // IndexedDB is optional; the server aggregate below is authoritative.
+        console.error({
+          context: "useMuninChat.cache.read",
+          error,
+          meta: { conversationId },
+          ts: Date.now(),
+        });
       }
 
       if (initial.length === 0) {
         try {
           const aggregate = await productionApi.conversation(conversationId);
           initial = aggregate.messages.map(serverMessageToUiMessage);
-        } catch {
+          if (initial.length > 0) {
+            cache.setMessages(conversationId, initial);
+          }
+        } catch (error) {
           // The live stream remains usable even if the initial timeline fetch
           // races authentication or a transient backend restart.
+          console.error({
+            context: "useMuninChat.aggregate.fetch",
+            error,
+            meta: { conversationId },
+            ts: Date.now(),
+          });
         }
       }
 
@@ -182,7 +221,31 @@ export function useMuninChat({ conversationId }: UseMuninChatOptions) {
           }
         }
       }
-    })();
+
+      // Race resolution (P2.1): if a live `onFinish` landed while we were
+      // hydrating, it stashed its fresh payload instead of writing the cache.
+      // Apply it now — AFTER the hydrate's own `setMessages`/`setMessages`
+      // calls — so the fresh stream payload wins over the stale cache read.
+      const pending = pendingOnFinishRef.current;
+      if (pending && pending.conversationId === conversationId && !cancelled) {
+        cache.setMessages(pending.conversationId, pending.messages);
+        const run = latestRunState(pending.messages);
+        if (run) {
+          cache.setRunMarker(pending.conversationId, {
+            runId: run.runId,
+            state: run.state,
+            startedAt: Date.now(),
+          });
+        }
+      }
+      if (pending?.conversationId === conversationId) {
+        pendingOnFinishRef.current = null;
+      }
+    })().finally(() => {
+      if (hydratedConversation.current === conversationId) {
+        hydratingRef.current = false;
+      }
+    });
 
     return () => {
       cancelled = true;

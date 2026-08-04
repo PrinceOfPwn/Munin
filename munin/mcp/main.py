@@ -1393,6 +1393,7 @@ from .tools import (  # noqa: E402
     ldap_tools,  # noqa: E402,F401
     munin_tools,  # noqa: E402,F401
     tavily_tool,  # noqa: E402,F401
+    valravn_tool,  # noqa: E402,F401
 )
 
 # Modules with state-free functions register explicitly so the same functions

@@ -1,4 +1,4 @@
-# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance]
+# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance, plan18-indexes]
 """Durable production aggregate for conversations, operations, and identity.
 
 The existing ``SharedStateStore`` remains compatible with legacy MCP tools.
@@ -328,6 +328,17 @@ _FASE3_DDL: tuple[str, ...] = (
 _FASE3_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("agent_runs", "mode", "TEXT"),
     ("agent_runs", "goal_id", "TEXT"),
+)
+
+_PLAN18_DDL: tuple[str, ...] = (
+    """CREATE INDEX IF NOT EXISTS idx_conversation_participants_user ON conversation_participants(user_id, removed_at_ms)""",
+    """CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation ON agent_runs(conversation_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_reasoning_events_run ON reasoning_events(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_human_requests_run ON human_requests(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_run ON conversation_artifacts(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_conversation_summaries_conv ON conversation_summaries(conversation_id)""",
 )
 
 # ---------------------------------------------------------------------------
@@ -675,6 +686,13 @@ class ProductionStore:
         # so they can evolve without breaking every existing deployment.
         self._install_fase2_essentials()
         self._install_fase3_essentials()
+        self._install_plan18_indexes()
+
+    def _install_plan18_indexes(self) -> None:
+        """Idempotently install Plan 18 query optimization indexes."""
+        with self._transaction() as conn:
+            for ddl in _PLAN18_DDL:
+                conn.execute(ddl)
 
     def _install_fase3_essentials(self) -> None:
         """Idempotently install the Fase 3 (autonomous modes) schema."""

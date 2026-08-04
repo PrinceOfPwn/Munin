@@ -1,4 +1,5 @@
 # tags: [subagent, workflow, runtime, coordination, memory, mcp-tool, capabilities, ReActSubagentBase, build_tool_catalog, SUBAGENT_TOOL_REGISTRY, list_subagent_tools, react-loop, state-bound-tools, task-claim, wake-queue]
+# DEPRECATED: legacy coordination retained for characterization tests; do not extend. Prefer supervisor_v2 presence/wake path.
 """Base class for Munin ReAct subagents.
 
 Every concrete subagent declares:

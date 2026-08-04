@@ -1,4 +1,9 @@
-"""Swarm handoff tool creation tests."""
+"""Swarm handoff tool creation tests — LEGACY characterization.
+
+Anchors the deprecated ``munin.core.coordination`` swarm handoff builders
+(retained for characterization; do not extend). Prefer the supervisor_v2
+presence/wake path (see ``tests/test_orchestrator_wake_contract.py``).
+"""
 import pytest
 pytest.importorskip("munin.core.coordination")
 from munin.core.coordination.handoff_tools import make_handoff_tool, make_handoff_tools_for_agents

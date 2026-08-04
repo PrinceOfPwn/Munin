@@ -1,4 +1,5 @@
 # tags: [coordination, subagent, langgraph, core, capabilities, make_handoff_tool, langgraph_swarm, transfer_to_agent, StructuredTool, make_handoff_tools_for_agents, HandoffInput, peer-specialist, control-transfer, langgraph-command, active_agent]
+# DEPRECATED: legacy coordination retained for characterization tests; do not extend. Prefer supervisor_v2 presence/wake path.
 """Handoff tools for peer specialist transfer via LangGraph Command."""
 from __future__ import annotations
 from typing import Any
