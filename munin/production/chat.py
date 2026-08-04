@@ -1589,6 +1589,21 @@ def register_chat_routes(
                 lease_token, assistant_message_id = _claim_direct(
                     store, run_id=str(result["run_id"])
                 )
+                # Inject a continuation directive so the model proceeds
+                # with the approved tool work instead of hallucinating
+                # "standing by" — OperatorGuidanceMiddleware drains this
+                # before the first post-resume model call.
+                with suppress(Exception):
+                    store.enqueue_guidance(
+                        run_id=str(result["run_id"]),
+                        actor_id=str(current["id"]),
+                        actor_username=str(current.get("username") or "operator"),
+                        body=(
+                            "Operator approved the pending tool execution. "
+                            "Resume the approved action, incorporate its result, "
+                            "and continue the workflow toward the original objective."
+                        ),
+                    )
                 _launch_chat_run(
                     store=store,
                     shared_state=shared_state,

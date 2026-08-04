@@ -503,6 +503,21 @@ async def _resume_approved_run(
         with contextlib.suppress(Exception):
             await message.reply(f"[failed] could not claim run for resume: {exc}")
         return
+    # Inject a continuation directive so the model knows to proceed with
+    # the approved tool work instead of hallucinating "standing by".
+    # OperatorGuidanceMiddleware drains this before the first post-resume
+    # model call and delivers it as HumanMessage(name="operator").
+    with contextlib.suppress(Exception):
+        store.enqueue_guidance(
+            run_id=run_id,
+            actor_id=str(getattr(message.author, "id", "") or ""),
+            actor_username=str(getattr(message.author, "name", "operator")),
+            body=(
+                "Operator approved the pending tool execution. "
+                "Resume the approved action, incorporate its result, "
+                "and continue the workflow toward the original objective."
+            ),
+        )
     await _stream_run(
         message=message,
         store=store,
