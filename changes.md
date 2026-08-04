@@ -4,6 +4,54 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-03 — Discord community adapter: session isolation, command surface, autonomous outbound
+
+Redesigned the Discord surface so it behaves like the Web GUI: a community
+channel with the bot and other users, or a DM, where anyone can talk to the
+agent, issue commands, and the agent can post on its own (finished runs,
+reports, approvals).
+
+Session isolation (one graph per scope, nothing mixes, survives restarts):
+
+- DM chat → `dm:{author_id}` graph keyed on the author.
+- Guild channel → ONE `channel:{channel_id}` shared graph for the whole
+  community; each new speaker is added as a conversation participant via the
+  new `store.add_conversation_participant`.
+- The scope is persisted in `conversations.scope_json` (`"source": "discord"`,
+  `"channel_key"`), so a restarted process resurrects the same graph via
+  `_discover_conversation` instead of forking a new one.
+
+Command surface (`/munin` and `!munin` prefixes, or mention/reply-to-bot in
+channels): `/help`, `/approvals`, `/approve <request_id>`, `/reject <request_id>`,
+`/cancel <run_id>`, `/status`, `/conversations`, `/history [n]`, `/artifacts [run_id]`,
+`/artifact <id>`, `/tools`, `/tool <name> <json-args>` (raw tool output, no
+redaction — Discord is an operator surface). No BYOK, no max iterations.
+
+HITL parity: approval cards carry the durable `request_id`; resolving reissues
+the nonce and resumes the checkpointed graph with `resume_decisions` exactly
+like the web path. Admin bypass added server-side so a request is never
+unresolvable.
+
+Rendering policy: a live status message edited every 2.5s during a run,
+separate spaced posts for reasoning/tool blocks, final answer chunked at 1900
+chars — never one giant message.
+
+Outbound autonomy: new `DiscordPublisher` maps `run_id → channel_id` so any
+server-side component (MCP tool, runtime) can publish into the run's channel
+thread-safely; the MCP `send_discord_message` tool is publisher-first with a
+fallback to the legacy bridge, and no longer redacts.
+
+### Files
+
+- `munin/production/discord_adapter.py` — rewritten (commands, session
+  isolation, rendering, HITL, publisher mapping).
+- `munin/production/discord_publisher.py` — new: thread-safe outbound bridge.
+- `munin/mcp/tools/discord_tool.py` — publisher-first, no redaction.
+- `munin/production/store.py` — admin bypass in `resolve_human_decision` /
+  `reissue_human_decision_nonce`, `add_conversation_participant`,
+  `list_pending_human_requests`, facade delegates (+ `get_artifact`).
+- `tests/test_discord_adapter.py` — rewritten: 22 unit tests.
+
 ## 2026-08-03 — Soul prompt engineering: deliberate load order + separate kernel block
 
 Reworked how the Soul is assembled into the supervisor system prompt so the

@@ -1,89 +1,61 @@
-# tags: [coordination, runtime, core, subagent, hitl-approval, presence, shared-intel, discord.py, DiscordAdapter, on_message, _resolve_actor, DISCORD_FLUSH_INTERVAL, virtual-actor, rate-limiting, bot-integration]
-"""Discord chat adapter (follow-up to Fase 2 of issue #9).
+# tags: [coordination, runtime, core, subagent, hitl-approval, presence, shared-intel, discord.py, DiscordAdapter, on_message, _resolve_actor, DISCORD_FLUSH_INTERVAL, virtual-actor, rate-limiting, bot-integration, commands, /approve, /reject, /cancel, /status, /conversations, /history, /artifacts, /tools, /tool]
+"""Discord chat + command adapter (community-channel redesign).
 
-Historically Munin shipped a ``discord_adapter.py`` whose only job was to
-spawn a ``threading.Thread(target=dispatcher.run_once)`` per inbound
-message.  Fase 2 deleted the dispatcher (and with it the adapter) because
-``ProductionDispatcher.run_once`` no longer exists — the whole run path
-is Deep Agents + :func:`munin.core.runtime_adapter.supervisor_runner`
-now.
+This module is the inbound Discord surface of the Munin runtime.  It runs
+**in the same process** as :mod:`munin.server` (uvicorn ASGI): a single
+``asyncio.Task`` runs ``discord.Client.start(token)`` and every
+supervisor run streams directly on that event loop — no daemon thread,
+no queue, no second process.
 
-This module reintroduces the Discord bridge on top of the new
-architecture:
+Session isolation
+-----------------
 
-* Lives **in the same process** as :mod:`munin.server` (uvicorn ASGI).
-  There is no daemon thread, no second process, and no shared queue.
-  A single ``asyncio.Task`` runs ``discord.Client.start(token)`` and the
-  supervisor runs directly on that event loop.
+* **DM** — each Discord user gets their own graph: the conversation is
+  keyed by ``dm:{author_id}``.  Private chat is private.
+* **Guild channel** — the channel is a *community* surface: ONE graph per
+  channel, shared by every member who talks to the bot.  Everyone is
+  resolved to their own virtual actor (``discord:{id}``) for the audit
+  trail, but they all stream into the same conversation/thread, so the
+  operation stays coherent and nothing leaks between channels.
 
-* Uses the async ``discord.py >= 2.4`` client library (already declared
-  in ``pyproject.toml``); no self-bot forks.
+Surface
+-------
 
-* Reuses the exact same store composition Fase 3 wired up for the HTTP
-  ``/api/chat`` path: :class:`SharedStateStore` (tools/soul/settings)
-  with :meth:`ProductionStore.consume_pending_guidance` attribute-bound
-  onto it, so :class:`OperatorGuidanceMiddleware` finds guidance without
-  an adapter class.
+1. Natural language (DM, bot mention, ``/munin`` / ``!munin`` prefix):
+   a full supervisor turn exactly like the web GUI path.
+2. Slash commands for operator control:
+   ``/help``, ``/approvals``, ``/approve <id>``, ``/reject <id>``,
+   ``/cancel <run_id>``, ``/status``, ``/conversations``,
+   ``/history [n]``, ``/artifacts [run_id]``, ``/artifact <id>``,
+   ``/tools``, ``/tool <name> <json args>``.
+3. Outbound: the agent itself can speak into the channel via the MCP
+   ``send_discord_message`` tool — the publisher maps the active
+   ``run_id`` to the channel it is streaming into
+   (:mod:`munin.production.discord_publisher`).
 
-Message flow
-------------
+Rendering policy
+----------------
 
-1. ``on_message`` fires for every message the bot can see.  We filter
-   out messages authored by bots (including self) and require either
-   a DM channel, an explicit mention of the bot, or a ``/munin <text>``
-   / ``!munin <text>`` prefix.  A configurable channel-ID and user-ID
-   allowlist is applied on top of that.
+We deliberately do **not** shove the whole run into one message:
 
-2. The Discord author is mapped to a Munin actor via
-   :func:`_resolve_actor`.  We look up ``username='discord:{author.id}'``
-   in the users table; if absent, we call ``store.create_user(...)`` with
-   a random 64-byte password (Munin's password policy demands >= 12
-   chars; this user never logs in via HTTP so the password is
-   deliberately unreachable).  Rationale is documented in the README —
-   the Discord bearer *is* the auth boundary, so a virtual actor keeps
-   the audit trail honest without opening a password login path.
+* A single *status* message is edited in place at most every
+  ``DISCORD_FLUSH_INTERVAL`` (2.5 s) — live progress, tools tail.
+* Reasoning and tool output are posted as **separate** short messages
+  when they complete (spaced by ``DISCORD_POST_INTERVAL`` so we stay
+  under the 5 msg / 5 s per-channel cap).
+* The final assistant content is posted last, chunked at the 1900-char
+  cap.
+* HITL pauses post a dedicated approval card containing the durable
+  ``request_id`` so the operator can act with ``/approve <id>``.
 
-3. Conversations are keyed by ``(channel_id, author_id)``.  A first
-   message from a given (channel, author) pair creates a new
-   conversation; subsequent messages reuse the same conversation id, so
-   the multi-turn thread stays coherent even if the operator interleaves
-   messages with other Discord activity.  The mapping is process-local
-   — a restart starts fresh conversations (documented limitation).
-
-4. ``store.create_turn(...)`` creates the durable ``agent_runs`` row,
-   assistant placeholder, and idempotency key.  We then run
-   ``supervisor_runner`` directly and consume its envelope stream in the
-   same event loop — no thread hop.
-
-5. Streaming envelopes are collected into an in-flight buffer keyed by
-   Discord message.  A per-run flush task edits a *single* bot message
-   at most every ``DISCORD_FLUSH_INTERVAL`` seconds so we stay within
-   the 5-msg / 5-sec / channel rate limit.  Reasoning tokens are
-   concatenated; ``tool_intent`` / ``tool_result`` / ``tool_failed``
-   become bullet lines under a "Tools" section.  On terminal
-   ``run_state`` we post a final message containing the completed
-   ``content`` (broken into 2000-char chunks — Discord's per-message
-   cap).
-
-Interface with the server
--------------------------
-
-:mod:`munin.server` calls :func:`create_discord_task` in its startup
-hook.  When ``MUNIN_DISCORD_BOT_TOKEN`` is unset the function is a
-no-op and returns ``None``; when the token is set it spawns an
-``asyncio.Task`` running the client and returns it.  Startup does not
-block on Discord readiness — a bad token surfaces as a background task
-failure that is logged but does not fail-fast the uvicorn process (the
-HTTP API is the primary interface; Discord is opt-in gravy).
-
-The adapter deliberately does **not** import from
-:mod:`munin.production.chat` or :mod:`munin.production.asgi` — the
-request-handler stack is untouched.
+Per operator decision there is **no redaction** on the Discord surface
+and no ``max_iterations`` cap for Discord-triggered runs.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 import time
@@ -92,17 +64,31 @@ from typing import Any
 log = logging.getLogger("munin.production.discord_adapter")
 
 # --- Rate-limit tunables ----------------------------------------------------
-#
-# Discord enforces 5 messages / 5 seconds / channel and even stricter caps on
-# per-message edits.  Editing a single "status" message every 2.5s buys us
-# a comfortable margin without blocking the run loop.
-DISCORD_FLUSH_INTERVAL = 2.5
-DISCORD_MAX_MESSAGE_CHARS = 1900  # 2000-char hard cap, keep headroom for markdown
+DISCORD_FLUSH_INTERVAL = 2.5       # status message edit cadence
+DISCORD_POST_INTERVAL = 1.15       # min spacing between separate posts (5 msg/5s cap)
+DISCORD_MAX_MESSAGE_CHARS = 1900   # 2000-char hard cap, headroom for markdown
 DISCORD_STATUS_MAX_CHARS = 1800
-DISCORD_TOOL_TAIL = 8            # last N tool events shown in the status message
+DISCORD_TOOL_TAIL = 6              # last N tool events in the status message
+DISCORD_TOOL_POST_CHARS = 900      # separate tool posts are kept short
+DISCORD_REASONING_POST_CHARS = 1400
 
 # --- Command surface --------------------------------------------------------
 COMMAND_PREFIXES = ("/munin ", "!munin ")
+COMMAND_NAMES = {
+    "help", "approvals", "approve", "reject", "cancel", "status",
+    "conversations", "history", "artifacts", "artifact", "tools", "tool",
+}
+HELP_TEXT = """**Munin Discord surface**
+- Natural language: just talk (DM, mention, or `/munin` / `!munin` prefix)
+- `/approvals` — list pending approvals with their `request_id`
+- `/approve <request_id>` / `/reject <request_id>` — resolve a request
+- `/cancel <run_id>` — cancel a run
+- `/status` — state of the current conversation's runs
+- `/conversations` — your conversations
+- `/history [n]` — last n events of this session's graph
+- `/artifacts [run_id]` — list artifacts; `/artifact <id>` — fetch one
+- `/tools` — list runtime capabilities
+- `/tool <name> <json-args>` — invoke a runtime tool and get raw output"""
 
 
 def _parse_id_list(raw: str) -> set[str]:
@@ -114,17 +100,12 @@ def _parse_id_list(raw: str) -> set[str]:
 def _resolve_actor(store: Any, *, discord_user_id: int, display_name: str) -> dict[str, Any]:
     """Return the Munin actor row for a Discord user, creating it lazily.
 
-    We look up ``discord:{id}`` in the durable users table via the store's
-    read-only cursor.  When absent, we mint a fresh user with a strong
-    random password (>= 12 chars per policy).  The password is *never*
-    stored anywhere — the Discord bearer authenticates the request, so
-    HTTP login for this virtual user is intentionally impossible.
+    The Discord bearer is the auth boundary: we mint ``discord:{id}``
+    virtual actors with a strong random password so HTTP login for them
+    is intentionally impossible while the audit trail stays honest.
     """
     username = f"discord:{discord_user_id}"
 
-    # The MuninStore façade routes ``users`` reads through the durable
-    # backend; ``ProductionStore._read_only`` gives us a cursor without a
-    # transaction which is what we want for a pure lookup.
     durable = getattr(store, "_durable", None) or store
     try:
         with durable._read_only() as conn:  # noqa: SLF001 - documented probe
@@ -144,10 +125,35 @@ def _resolve_actor(store: Any, *, discord_user_id: int, display_name: str) -> di
             "display_name": display_name,
         }
 
-    password = secrets.token_urlsafe(48)  # 64+ chars, satisfies policy
+    password = secrets.token_urlsafe(48)
     user = store.create_user(username=username, password=password, role="operator")
     log.info("discord: created virtual actor username=%s id=%s", username, user["id"])
     return {**user, "display_name": display_name}
+
+
+def _discover_conversation(
+    store: Any, *, actor_id: str, channel_key: str
+) -> str | None:
+    """Find a durable conversation previously created for this channel_key.
+
+    This makes the (DM|channel) → graph mapping survive a process restart:
+    the scope JSON stores ``{"source": "discord", "channel_key": ...}`` so
+    we can resurrect the same conversation instead of starting fresh.
+    """
+    durable = getattr(store, "_durable", None) or store
+    try:
+        with durable._read_only() as conn:  # noqa: SLF001 - documented probe
+            row = conn.execute(
+                "SELECT id FROM conversations"
+                " WHERE scope_json LIKE ? AND deleted_at_ms IS NULL"
+                " ORDER BY last_activity_at_ms DESC LIMIT 1",
+                (f'%"channel_key": "{channel_key}"%',),
+            ).fetchone()
+        if row:
+            return row["id"] if hasattr(row, "keys") else row[0]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: conversation discovery failed for %s: %s", channel_key, exc)
+    return None
 
 
 def _get_or_create_conversation(
@@ -155,29 +161,48 @@ def _get_or_create_conversation(
     *,
     actor_id: str,
     channel_key: str,
-    cache: dict[tuple[str, str], str],
+    cache: dict[str, str],
     title: str,
+    is_dm: bool,
 ) -> str:
-    """Return the conversation id used for a (channel, actor) pair.
+    """Return the conversation id for a session key.
 
-    A process-local cache maps ``(actor_id, channel_key)`` to the
-    conversation id.  On cache miss we allocate a new conversation
-    through the store.  We intentionally do *not* try to discover a
-    prior conversation on disk — a Munin restart starts a fresh
-    Discord conversation to avoid mis-associating threads across
-    deployments (documented limitation).
+    Keying rules:
+    * DM → ``dm:{author_id}`` (per-user graph).
+    * Guild channel → ``channel:{channel_id}`` (ONE shared community graph).
+
+    A cache miss first probes the durable store (restart resilience) and
+    only then allocates a new conversation.  For shared channel graphs
+    every new speaker is added as a participant so ``create_turn`` and
+    approval resolution work for the whole channel.
     """
-    key = (actor_id, channel_key)
-    conv_id = cache.get(key)
+    conv_id = cache.get(channel_key)
     if conv_id:
+        # Community channel: make sure this speaker is a participant too.
+        if not is_dm:
+            with contextlib.suppress(Exception):
+                store.add_conversation_participant(
+                    conversation_id=conv_id, user_id=actor_id, role="member"
+                )
         return conv_id
+
+    existing = _discover_conversation(store, actor_id=actor_id, channel_key=channel_key)
+    if existing:
+        cache[channel_key] = existing
+        if not is_dm:
+            with contextlib.suppress(Exception):
+                store.add_conversation_participant(
+                    conversation_id=existing, user_id=actor_id, role="member"
+                )
+        return existing
+
     conversation = store.create_conversation(
         owner_id=actor_id,
         title=title[:160] or "Discord conversation",
         tags=["discord"],
         scope={"source": "discord", "channel_key": channel_key},
     )
-    cache[key] = conversation["id"]
+    cache[channel_key] = conversation["id"]
     return conversation["id"]
 
 
@@ -188,39 +213,72 @@ def _chunk_message(text: str, *, size: int = DISCORD_MAX_MESSAGE_CHARS) -> list[
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
+class _RateLimitedPoster:
+    """Spaced sender so separate posts respect the 5 msg / 5 s channel cap."""
+
+    def __init__(self, channel: Any, *, interval: float = DISCORD_POST_INTERVAL) -> None:
+        self.channel = channel
+        self.interval = interval
+        self._last = 0.0
+
+    async def post(self, content: str) -> None:
+        now = time.monotonic()
+        wait = self._last + self.interval - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._last = time.monotonic()
+        for chunk in _chunk_message(content):
+            with contextlib.suppress(Exception):
+                await self.channel.send(chunk)
+
+
 class _RunSession:
     """State for a single in-flight Discord-triggered run.
 
-    Owns the buffer of reasoning tokens, the rolling list of tool
-    events, and the "status message" that gets edited in-place while
-    the run streams.  A per-session flush task edits at most every
-    ``DISCORD_FLUSH_INTERVAL`` seconds so we stay under the Discord
-    edit-rate ceiling.
+    Renders the live run as: one editable status message (progress +
+    tools tail), separate short posts for completed reasoning/tool
+    blocks, a dedicated HITL approval card, and a final assistant
+    message.  Nothing is concatenated into a single megapost.
     """
 
     def __init__(self, *, channel: Any, run_id: str) -> None:
         self.channel = channel
         self.run_id = run_id
-        self.reasoning: list[str] = []
+        self.reasoning_buffer = ""
         self.tools: list[str] = []
         self.status_message: Any = None
+        self.last_request_id: str | None = None
         self._dirty = False
         self._closed = False
         self._flush_task: asyncio.Task | None = None
-        self._last_flush = 0.0
+        self._poster = _RateLimitedPoster(channel)
 
     def add_reasoning(self, text: str) -> None:
         if text:
-            self.reasoning.append(text)
+            self.reasoning_buffer += text
             self._dirty = True
+            # Long reasoning is posted separately so the status message
+            # stays small; keep the tail in the status buffer.
+            if len(self.reasoning_buffer) >= DISCORD_REASONING_POST_CHARS:
+                self._post_reasoning_block()
+
+    def _post_reasoning_block(self) -> None:
+        block = self.reasoning_buffer[: DISCORD_REASONING_POST_CHARS]
+        if not block.strip():
+            return
+        self.reasoning_buffer = self.reasoning_buffer[len(block):]
+        asyncio.create_task(self._poster.post(f"💭 {block.strip()}"))
 
     def add_tool_event(self, line: str) -> None:
         if line:
             self.tools.append(line)
             self._dirty = True
+            # Post each completed tool as its own short message — the
+            # operator sees the operation as it happens, not buried.
+            asyncio.create_task(self._poster.post(f"🔧 {line[:DISCORD_TOOL_POST_CHARS]}"))
 
     def _render_status(self) -> str:
-        body = "".join(self.reasoning).strip()
+        body = self.reasoning_buffer.strip()
         if len(body) > DISCORD_STATUS_MAX_CHARS:
             body = "..." + body[-DISCORD_STATUS_MAX_CHARS:]
         parts: list[str] = []
@@ -241,7 +299,6 @@ class _RunSession:
 
     async def _flush(self) -> None:
         self._dirty = False
-        self._last_flush = time.monotonic()
         content = self._render_status()
         try:
             if self.status_message is None:
@@ -251,16 +308,27 @@ class _RunSession:
         except Exception as exc:  # noqa: BLE001
             log.debug("discord: flush failed run_id=%s: %s", self.run_id, exc)
 
-    async def close(self, *, final_content: str, ok: bool) -> None:
+    async def post_approval_card(self, request_id: str, action: str, risk: str) -> None:
+        """Dedicated, visible HITL card with the durable request id."""
+        self.last_request_id = request_id
+        await self._poster.post(
+            f"⚠️ **Approval required** — `{request_id}`\n"
+            f"Action: {action}\nRisk: {risk}\n\n"
+            f"Reply `/approve {request_id}` or `/reject {request_id}`. "
+            f"(Admins can resolve any pending request; expiry is enforced server-side.)"
+        )
+
+    async def close(self, *, final_content: str, ok: bool, paused: bool = False) -> None:
         self._closed = True
         if self._flush_task is not None:
             self._flush_task.cancel()
             with contextlib.suppress(BaseException):
                 await self._flush_task
-        # One last edit so the status message reflects the run just before
-        # we post the final content.
+        # One last status edit before the final message.
         with contextlib.suppress(Exception):
             await self._flush()
+        if paused:
+            return
         prefix = "[completed]" if ok else "[failed]"
         for chunk in _chunk_message(f"{prefix} {final_content}".rstrip()):
             with contextlib.suppress(Exception):
@@ -271,32 +339,441 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
     """Return the trimmed prompt text, or ``None`` if the message should be ignored.
 
     Rules:
-    * DMs → whole content.
-    * Guild channel → require either a mention of the bot OR one of the
-      ``COMMAND_PREFIXES``.  This keeps the bot from replying to every
-      chit-chat in a busy channel where it happens to be present.
+    * DMs → whole content (including slash commands).
+    * Guild channel → require a mention of the bot, a reply to the bot,
+      or one of the ``COMMAND_PREFIXES``.  This keeps the bot out of
+      unrelated channel chatter while letting the whole community talk
+      to it deliberately.
     """
     content = (message.content or "").strip()
     if not content:
         return None
 
-    # DM channel — treat as an implicit invocation.
     is_dm = getattr(message, "guild", None) is None
     if is_dm:
         return content
 
+    # Reply-to-bot counts as an invocation (community convenience).
+    reference = getattr(message, "reference", None)
+    if reference is not None:
+        resolved = getattr(reference, "resolved", None)
+        if resolved is not None and getattr(resolved, "author", None) is not None:
+            if int(getattr(resolved.author, "id", 0) or 0) == int(bot_user_id or 0):
+                return content
+
     if bot_user_id is not None:
-        mention_tag = f"<@{bot_user_id}>"
-        role_mention_tag = f"<@!{bot_user_id}>"
-        for tag in (mention_tag, role_mention_tag):
+        for tag in (f"<@{bot_user_id}>", f"<@!{bot_user_id}>"):
             if tag in content:
                 return content.replace(tag, "", 1).strip()
 
     for prefix in COMMAND_PREFIXES:
         if content.startswith(prefix):
-            return content[len(prefix) :].strip()
+            return content[len(prefix):].strip()
 
     return None
+
+
+def _parse_command(content: str) -> tuple[str, list[str]] | None:
+    """Split ``/name arg1 arg2``; returns (name, args) or None for chat."""
+    stripped = content.strip()
+    if not stripped.startswith("/"):
+        return None
+    parts = stripped[1:].split()
+    if not parts:
+        return None
+    name = parts[0].lower()
+    if name not in COMMAND_NAMES:
+        return None
+    return name, parts[1:]
+
+
+async def _cmd_approvals(*, store: Any, actor: dict[str, Any], message: Any) -> None:
+    pending = store.list_pending_human_requests(actor_id=actor["id"], limit=20)
+    if not pending:
+        with contextlib.suppress(Exception):
+            await message.reply("No pending approvals.")
+        return
+    lines = [f"**{len(pending)} pending approval(s)**"]
+    for req in pending:
+        lines.append(f"- `{req['id']}` · {req['action']} · risk={req['risk']}")
+    lines.append("Resolve with `/approve <request_id>` or `/reject <request_id>`.")
+    for chunk in _chunk_message("\n".join(lines)):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_resolve(
+    *,
+    store: Any,
+    actor: dict[str, Any],
+    message: Any,
+    request_id: str,
+    choice: str,
+) -> None:
+    request_id = request_id.strip()
+    if not request_id:
+        with contextlib.suppress(Exception):
+            await message.reply(f"Usage: `/{'approve' if choice == 'approve' else 'reject'} <request_id>`")
+        return
+    try:
+        nonce = store.reissue_human_decision_nonce(
+            actor_id=actor["id"], request_id=request_id
+        )["nonce"]
+        result = store.resolve_human_decision(
+            actor_id=actor["id"],
+            request_id=request_id,
+            choice=choice,
+            nonce=nonce,
+        )
+    except PermissionError as exc:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[denied] {exc}")
+        return
+    except KeyError:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[not_found] no human request `{request_id}`")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("discord: %s failed request_id=%s", choice, request_id)
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not {choice} `{request_id}`: {exc}")
+        return
+
+    state = result.get("state")
+    if state == "queued":
+        with contextlib.suppress(Exception):
+            await message.reply(f"✅ Approved `{request_id}` — resuming run {result.get('run_id')}")
+        # Resume the checkpointed graph exactly like the web path.
+        await _resume_approved_run(
+            store=store,
+            message=message,
+            run_id=str(result["run_id"]),
+            decision_count=int(result.get("decision_count") or 1),
+        )
+    else:
+        with contextlib.suppress(Exception):
+            await message.reply(f"`{request_id}` → {state} ({choice})")
+
+
+async def _resume_approved_run(
+    *, store: Any, message: Any, run_id: str, decision_count: int
+) -> None:
+    """Claim and resume a run whose HITL request was just approved."""
+    try:
+        run = store.get_run(run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: resume lookup failed run_id=%s: %s", run_id, exc)
+        return
+    conversation_id = str(run.get("conversation_id") or "")
+    try:
+        lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: resume claim failed run_id=%s: %s", run_id, exc)
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not claim run for resume: {exc}")
+        return
+    await _stream_run(
+        message=message,
+        store=store,
+        shared_state=None,
+        settings=None,
+        run_id=run_id,
+        conversation_id=conversation_id,
+        prompt="",
+        conversation_history=[],
+        assistant_message_id=assistant_message_id,
+        lease_token=lease_token,
+        resume_decisions=[{"type": "approve"}] * max(1, decision_count),
+    )
+
+
+async def _cmd_cancel(*, store: Any, actor: dict[str, Any], message: Any, run_id: str) -> None:
+    run_id = run_id.strip()
+    if not run_id:
+        with contextlib.suppress(Exception):
+            await message.reply("Usage: `/cancel <run_id>`")
+        return
+    try:
+        result = store.request_run_cancellation(actor_id=actor["id"], run_id=run_id)
+    except PermissionError as exc:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[denied] {exc}")
+        return
+    except KeyError:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[not_found] no run `{run_id}`")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("discord: cancel failed run_id=%s", run_id)
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not cancel `{run_id}`: {exc}")
+        return
+    state = result.get("state") or "cancelled"
+    with contextlib.suppress(Exception):
+        await message.reply(f"`{run_id}` → {state}")
+
+
+async def _cmd_status(*, store: Any, actor: dict[str, Any], message: Any) -> None:
+    convs = store.list_conversations(actor_id=actor["id"], limit=5)
+    convs = convs.get("conversations") or []
+    if not convs:
+        with contextlib.suppress(Exception):
+            await message.reply("No conversations yet. Talk to the bot to start one.")
+        return
+    lines = ["**Recent runs**"]
+    for conv in convs:
+        try:
+            detail = store.get_conversation(actor_id=actor["id"], conversation_id=conv["id"])
+        except Exception:  # noqa: BLE001
+            continue
+        runs = detail.get("runs") or []
+        for run in runs[-3:]:
+            lines.append(
+                f"- `{run.get('id')}` · {run.get('state')} · {run.get('mode') or ''}"
+            )
+    for chunk in _chunk_message("\n".join(lines)):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_conversations(*, store: Any, actor: dict[str, Any], message: Any) -> None:
+    convs = store.list_conversations(actor_id=actor["id"], limit=10)
+    convs = convs.get("conversations") or []
+    if not convs:
+        with contextlib.suppress(Exception):
+            await message.reply("No conversations yet.")
+        return
+    lines = [f"**{len(convs)} conversation(s)**"]
+    for conv in convs:
+        lines.append(
+            f"- `{conv['id']}` · {conv['title'][:60]} · msgs={conv.get('message_count', '?')}"
+        )
+    for chunk in _chunk_message("\n".join(lines)):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_history(*, store: Any, actor: dict[str, Any], message: Any, count: str) -> None:
+    limit = 10
+    if count.strip().isdigit():
+        limit = max(1, min(int(count), 50))
+    convs = store.list_conversations(actor_id=actor["id"], limit=1)
+    convs = convs.get("conversations") or []
+    if not convs:
+        with contextlib.suppress(Exception):
+            await message.reply("No conversation yet in this session.")
+        return
+    conv_id = convs[0]["id"]
+    detail = store.get_conversation(actor_id=actor["id"], conversation_id=conv_id)
+    runs = detail.get("runs") or []
+    if not runs:
+        with contextlib.suppress(Exception):
+            await message.reply("No runs yet in this session.")
+        return
+    run_id = str(runs[-1]["id"])
+    try:
+        events = store.run_events_after(run_id=run_id, after_sequence=0)
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not read history: {exc}")
+        return
+    lines = [f"**Graph events for `{run_id}`**"]
+    for event in events[-limit:]:
+        kind = event.get("kind") or "?"
+        payload = event.get("payload") or {}
+        text = str(payload.get("message") or payload.get("content") or payload.get("state") or "")
+        if len(text) > 120:
+            text = text[:117] + "..."
+        lines.append(f"- `{kind}` {text}")
+    for chunk in _chunk_message("\n".join(lines)):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_artifacts(*, store: Any, actor: dict[str, Any], message: Any, run_id: str) -> None:
+    run_id = run_id.strip()
+    if not run_id:
+        convs = store.list_conversations(actor_id=actor["id"], limit=1)
+        convs = convs.get("conversations") or []
+        if not convs:
+            with contextlib.suppress(Exception):
+                await message.reply("No conversation yet.")
+            return
+        detail = store.get_conversation(actor_id=actor["id"], conversation_id=convs[0]["id"])
+        runs = detail.get("runs") or []
+        if not runs:
+            with contextlib.suppress(Exception):
+                await message.reply("No runs yet.")
+            return
+        run_id = str(runs[-1]["id"])
+    try:
+        detail = store.get_run_detail_for_actor(actor_id=actor["id"], run_id=run_id)
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not read run: {exc}")
+        return
+    artifacts = detail.get("artifacts") or []
+    if not artifacts:
+        with contextlib.suppress(Exception):
+            await message.reply(f"No artifacts for `{run_id}`.")
+        return
+    lines = [f"**Artifacts for `{run_id}`**"]
+    for art in artifacts:
+        lines.append(f"- `{art['id']}` · {art.get('filename') or '?'} · {art.get('media_type') or '?'}")
+    lines.append("Fetch with `/artifact <artifact_id>`.")
+    for chunk in _chunk_message("\n".join(lines)):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_artifact(*, store: Any, actor: dict[str, Any], message: Any, artifact_id: str) -> None:
+    artifact_id = artifact_id.strip()
+    if not artifact_id:
+        with contextlib.suppress(Exception):
+            await message.reply("Usage: `/artifact <artifact_id>`")
+        return
+    try:
+        artifact = store.get_artifact(actor_id=actor["id"], artifact_id=artifact_id)
+    except PermissionError as exc:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[denied] {exc}")
+        return
+    except KeyError:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[not_found] no artifact `{artifact_id}`")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("discord: artifact fetch failed %s", artifact_id)
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not fetch artifact: {exc}")
+        return
+    try:
+        content = json.dumps(artifact, default=str)
+    except Exception:  # noqa: BLE001
+        content = str(artifact)
+    for chunk in _chunk_message(f"**Artifact `{artifact_id}`**\n{content}"):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_tools(*, shared_state: Any, message: Any) -> None:
+    from ..core.tool_gateway import catalog_names  # noqa: PLC0415
+    try:
+        names = sorted(catalog_names(shared_state))
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not list tools: {exc}")
+        return
+    lines = [f"**{len(names)} runtime capability(-ies)**"]
+    lines.append(", ".join(f"`{name}`" for name in names))
+    lines.append("Invoke with `/tool <name> <json-args>`.")
+    for chunk in _chunk_message("\n".join(lines)):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _cmd_tool(*, shared_state: Any, message: Any, name: str, args_raw: str) -> None:
+    """Invoke a runtime tool directly and return the raw output."""
+    name = name.strip()
+    if not name:
+        with contextlib.suppress(Exception):
+            await message.reply("Usage: `/tool <name> <json-args>`")
+        return
+    from ..core.tool_gateway import gateway_tools  # noqa: PLC0415
+    try:
+        tools = gateway_tools(shared_state, allowed={name})
+    except Exception as exc:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            await message.reply(f"[failed] could not build tool `{name}`: {exc}")
+        return
+    if not tools:
+        with contextlib.suppress(Exception):
+            await message.reply(f"[not_found] unknown tool `{name}`")
+        return
+    tool = tools[0]
+    args: dict[str, Any] = {}
+    if args_raw.strip():
+        try:
+            parsed = json.loads(args_raw)
+            if isinstance(parsed, dict):
+                args = parsed
+            else:
+                with contextlib.suppress(Exception):
+                    await message.reply("[invalid_args] JSON args must be an object")
+                return
+        except json.JSONDecodeError as exc:
+            with contextlib.suppress(Exception):
+                await message.reply(f"[invalid_args] could not parse JSON: {exc}")
+            return
+    try:
+        if asyncio.iscoroutinefunction(tool.coroutine):
+            result = await tool.coroutine(**args)
+        else:
+            result = tool.func(**args)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("discord: /tool %s failed", name)
+        with contextlib.suppress(Exception):
+            await message.reply(f"❌ `{name}` failed: {exc}")
+        return
+    try:
+        raw = json.dumps(result, default=str)
+    except Exception:  # noqa: BLE001
+        raw = str(result)
+    for chunk in _chunk_message(f"**`{name}` raw output**\n{raw}"):
+        with contextlib.suppress(Exception):
+            await message.channel.send(chunk)
+
+
+async def _handle_command(
+    message: Any,
+    *,
+    store: Any,
+    shared_state: Any,
+    actor: dict[str, Any],
+    content: str,
+) -> None:
+    parsed = _parse_command(content)
+    if parsed is None:
+        return
+    name, args = parsed
+
+    if name == "help":
+        with contextlib.suppress(Exception):
+            await message.reply(HELP_TEXT)
+        return
+    if name == "approvals":
+        await _cmd_approvals(store=store, actor=actor, message=message)
+        return
+    if name == "approve":
+        await _cmd_resolve(store=store, actor=actor, message=message, request_id=args[0] if args else "", choice="approve")
+        return
+    if name == "reject":
+        await _cmd_resolve(store=store, actor=actor, message=message, request_id=args[0] if args else "", choice="reject")
+        return
+    if name == "cancel":
+        await _cmd_cancel(store=store, actor=actor, message=message, run_id=args[0] if args else "")
+        return
+    if name == "status":
+        await _cmd_status(store=store, actor=actor, message=message)
+        return
+    if name == "conversations":
+        await _cmd_conversations(store=store, actor=actor, message=message)
+        return
+    if name == "history":
+        await _cmd_history(store=store, actor=actor, message=message, count=args[0] if args else "10")
+        return
+    if name == "artifacts":
+        await _cmd_artifacts(store=store, actor=actor, message=message, run_id=args[0] if args else "")
+        return
+    if name == "artifact":
+        await _cmd_artifact(store=store, actor=actor, message=message, artifact_id=args[0] if args else "")
+        return
+    if name == "tools":
+        await _cmd_tools(shared_state=shared_state, message=message)
+        return
+    if name == "tool":
+        await _cmd_tool(shared_state=shared_state, message=message, name=args[0] if args else "", args_raw=" ".join(args[1:]))
+        return
 
 
 async def _handle_message(
@@ -305,10 +782,11 @@ async def _handle_message(
     settings: Any,
     store: Any,
     shared_state: Any,
-    conversation_cache: dict[tuple[str, str], str],
+    conversation_cache: dict[str, str],
     bot_user_id: int | None,
     allowed_channels: set[str],
     allowed_users: set[str],
+    publisher: Any,
 ) -> None:
     if getattr(message.author, "bot", False):
         return
@@ -342,13 +820,24 @@ async def _handle_message(
             await message.reply(f"[failed] could not resolve actor: {exc}")
         return
 
+    is_dm = getattr(message, "guild", None) is None
+    channel_key = f"dm:{author_id}" if is_dm else f"channel:{channel_id}"
+
+    # Slash commands are handled without creating a graph turn.
+    if _parse_command(prompt) is not None:
+        await _handle_command(
+            message, store=store, shared_state=shared_state, actor=actor, content=prompt,
+        )
+        return
+
     try:
         conversation_id = _get_or_create_conversation(
             store,
             actor_id=actor["id"],
-            channel_key=channel_id,
+            channel_key=channel_key,
             cache=conversation_cache,
             title=f"discord:{message.author}",
+            is_dm=is_dm,
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("discord: conversation bootstrap failed: %s", exc)
@@ -370,6 +859,7 @@ async def _handle_message(
         return
 
     run_id = turn["run"]["id"]
+    publisher.map_run(run_id=run_id, channel_id=channel_id)
 
     # Idempotent replay (Discord retry / duplicate message id): don't
     # re-run, just acknowledge.
@@ -378,8 +868,6 @@ async def _handle_message(
             await message.reply(f"[replay] run {run_id} already exists")
         return
 
-    # Claim the run so it moves to 'running' — we own it end-to-end in
-    # this coroutine, no worker will steal it.
     try:
         lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
     except Exception as exc:  # noqa: BLE001
@@ -393,18 +881,21 @@ async def _handle_message(
     except Exception:  # noqa: BLE001
         exec_ctx = {"message": prompt, "history": []}
 
-    await _stream_run(
-        message=message,
-        store=store,
-        shared_state=shared_state,
-        settings=settings,
-        run_id=run_id,
-        conversation_id=conversation_id,
-        prompt=str(exec_ctx.get("message") or prompt),
-        conversation_history=list(exec_ctx.get("history") or []),
-        assistant_message_id=assistant_message_id,
-        lease_token=lease_token,
-    )
+    try:
+        await _stream_run(
+            message=message,
+            store=store,
+            shared_state=shared_state,
+            settings=settings,
+            run_id=run_id,
+            conversation_id=conversation_id,
+            prompt=str(exec_ctx.get("message") or prompt),
+            conversation_history=list(exec_ctx.get("history") or []),
+            assistant_message_id=assistant_message_id,
+            lease_token=lease_token,
+        )
+    finally:
+        publisher.unmap_run(run_id=run_id)
 
 
 def _claim_direct(store: Any, *, run_id: str) -> tuple[str, str]:
@@ -452,9 +943,27 @@ async def _stream_run(
     conversation_history: list[dict],
     assistant_message_id: str,
     lease_token: str,
+    resume_decisions: list[dict[str, Any]] | None = None,
 ) -> None:
     from ..core.llm_client import LLMClient  # noqa: PLC0415
     from ..core.runtime_adapter import supervisor_runner  # noqa: PLC0415
+
+    if settings is None:
+        # Resume path: borrow the durable settings through the shared state.
+        settings = getattr(shared_state, "settings", None) if shared_state is not None else None
+    if settings is None:
+        from ..mcp.config import get_settings  # noqa: PLC0415
+        settings = get_settings()
+
+    # The resume path (approved HITL) has no shared_state; build the same
+    # composition chat.py uses so guidance/tool-authorization still resolve.
+    if shared_state is None:
+        from ..mcp.shared_state import SharedStateStore  # noqa: PLC0415
+        shared_state = SharedStateStore(settings)
+        with contextlib.suppress(Exception):
+            shared_state.consume_pending_guidance = store.consume_pending_guidance  # type: ignore[assignment]
+        with contextlib.suppress(Exception):
+            shared_state.authorize_approved_tool_call = store.authorize_approved_tool_call  # type: ignore[assignment]
 
     try:
         model = LLMClient(settings).make_langchain()
@@ -487,6 +996,7 @@ async def _stream_run(
             conversation_history=conversation_history,
             thread_id=conversation_id or run_id,
             human_request_store=store,
+            resume_decisions=resume_decisions,
         ):
             kind = envelope.get("kind")
             if kind == "assistant_text":
@@ -495,30 +1005,33 @@ async def _stream_run(
                 paused_for_human = True
                 outcome = "waiting_for_human"
                 ok = False
-                final_content = "Approval is required in the authenticated Munin console before this action can run."
-                with contextlib.suppress(Exception):
-                    await message.reply(final_content)
+                request_id = str(envelope.get("request_id") or "")
+                action = str(envelope.get("tool_name") or "tool execution")
+                risk = str(envelope.get("risk") or "high")
+                await session.post_approval_card(
+                    request_id=request_id, action=action, risk=risk,
+                )
                 break
             elif kind == "tool_intent":
                 session.add_tool_event(
-                    f"- calling `{envelope.get('tool_name') or 'unknown'}`"
+                    f"calling `{envelope.get('tool_name') or 'unknown'}`"
                 )
             elif kind == "tool_result":
                 out = str(envelope.get("output") or "")[:140]
                 session.add_tool_event(
-                    f"- ok `{envelope.get('tool_name') or 'unknown'}` — {out}"
+                    f"ok `{envelope.get('tool_name') or 'unknown'}` — {out}"
                 )
             elif kind == "tool_failed":
                 err = str(envelope.get("error") or "")[:140]
                 session.add_tool_event(
-                    f"- failed `{envelope.get('tool_name') or 'unknown'}` — {err}"
+                    f"failed `{envelope.get('tool_name') or 'unknown'}` — {err}"
                 )
             elif kind == "run_state":
                 state = str(envelope.get("state") or "")
                 if state in {"completed", "failed", "cancelled", "interrupted"}:
                     outcome = state
                     ok = state == "completed"
-                    final_content = str(envelope.get("content") or "") or "".join(session.reasoning)
+                    final_content = str(envelope.get("content") or "") or session.reasoning_buffer
                     break
     except Exception as exc:  # noqa: BLE001
         log.exception("discord: supervisor_runner failed run_id=%s", run_id)
@@ -527,7 +1040,7 @@ async def _stream_run(
         final_content = f"Operation failed: {exc}"
     finally:
         if not final_content:
-            final_content = "".join(session.reasoning) or "(no response)"
+            final_content = session.reasoning_buffer or "(no response)"
         if not paused_for_human:
             _finalize(
                 store,
@@ -535,21 +1048,25 @@ async def _stream_run(
                 content=final_content or "(no response)", outcome=outcome,
                 conversation_id=conversation_id,
             )
-        await session.close(final_content=final_content or "(no response)", ok=ok)
+        await session.close(
+            final_content=final_content or "(no response)",
+            ok=ok,
+            paused=paused_for_human,
+        )
 
 
 def create_discord_task(
     settings: Any,
     store: Any,
     shared_state: Any,
+    publisher: Any = None,
 ) -> asyncio.Task | None:
     """Build and schedule the Discord adapter task.
 
     Returns ``None`` when ``settings.discord_bot_token`` is empty — this
     is the default and keeps existing deployments unaffected.  When the
-    token is present we import ``discord.py`` lazily (so environments
-    without the extra do not pay the import cost) and schedule a single
-    ``client.start(token)`` coroutine on the running loop.
+    token is present we import ``discord.py`` lazily and schedule a
+    single ``client.start(token)`` coroutine on the running loop.
     """
     token = (getattr(settings, "discord_bot_token", "") or "").strip()
     if not token:
@@ -562,6 +1079,9 @@ def create_discord_task(
         log.warning("discord: discord.py unavailable (%s) — adapter disabled", exc)
         return None
 
+    if publisher is None:
+        from .discord_publisher import PUBLISHER as publisher  # noqa: PLC0415
+
     allowed_channels = _parse_id_list(getattr(settings, "discord_allowed_channels", "") or "")
     allowed_users = _parse_id_list(getattr(settings, "discord_allowed_user_ids", "") or "")
 
@@ -572,12 +1092,17 @@ def create_discord_task(
 
     client = discord.Client(intents=intents)
 
-    # Process-local state.  A restart wipes the conversation cache; that
-    # is intentional — see module docstring.
-    conversation_cache: dict[tuple[str, str], str] = {}
+    # Process-local accelerator for the (dm|channel) → conversation map.
+    # Durable discovery on miss keeps the graph stable across restarts.
+    conversation_cache: dict[str, str] = {}
 
     @client.event
     async def on_ready() -> None:  # noqa: D401
+        publisher.attach(
+            loop=asyncio.get_running_loop(),
+            client=client,
+            default_channel_id=next(iter(allowed_channels), None),
+        )
         log.info(
             "discord: bot ready as %s (allowed_channels=%d allowed_users=%d)",
             getattr(client, "user", "?"),
@@ -598,6 +1123,7 @@ def create_discord_task(
                 bot_user_id=bot_user_id,
                 allowed_channels=allowed_channels,
                 allowed_users=allowed_users,
+                publisher=publisher,
             )
         except Exception:  # noqa: BLE001
             log.exception("discord: on_message dispatch failed")
@@ -607,11 +1133,13 @@ def create_discord_task(
             await client.start(token)
         except asyncio.CancelledError:
             log.info("discord: shutdown requested, closing client")
+            publisher.detach()
             with contextlib.suppress(Exception):
                 await client.close()
             raise
         except Exception:  # noqa: BLE001
             log.exception("discord: client crashed")
+            publisher.detach()
 
     task = asyncio.create_task(_runner(), name="munin-discord-adapter")
     log.info("discord: adapter task scheduled")
