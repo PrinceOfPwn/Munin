@@ -139,18 +139,27 @@ def _discover_conversation(
     This makes the (DM|channel) → graph mapping survive a process restart:
     the scope JSON stores ``{"source": "discord", "channel_key": ...}`` so
     we can resurrect the same conversation instead of starting fresh.
+
+    Note: Munin serialises JSON with ``separators=(",", ":")`` (no spaces),
+    so the candidate filter parses ``scope_json`` and matches in Python
+    rather than relying on a brittle SQL ``LIKE`` pattern.
     """
     durable = getattr(store, "_durable", None) or store
     try:
         with durable._read_only() as conn:  # noqa: SLF001 - documented probe
-            row = conn.execute(
-                "SELECT id FROM conversations"
+            rows = conn.execute(
+                "SELECT id, scope_json FROM conversations"
                 " WHERE scope_json LIKE ? AND deleted_at_ms IS NULL"
-                " ORDER BY last_activity_at_ms DESC LIMIT 1",
-                (f'%"channel_key": "{channel_key}"%',),
-            ).fetchone()
-        if row:
-            return row["id"] if hasattr(row, "keys") else row[0]
+                " ORDER BY last_activity_at_ms DESC LIMIT 50",
+                ('%"channel_key"%',),
+            ).fetchall()
+        for row in rows:
+            try:
+                scope = json.loads((row["scope_json"] if hasattr(row, "keys") else row[1]) or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(scope, dict) and scope.get("channel_key") == channel_key:
+                return row["id"] if hasattr(row, "keys") else row[0]
     except Exception as exc:  # noqa: BLE001
         log.warning("discord: conversation discovery failed for %s: %s", channel_key, exc)
     return None
@@ -672,8 +681,24 @@ async def _cmd_tools(*, shared_state: Any, message: Any) -> None:
             await message.channel.send(chunk)
 
 
-async def _cmd_tool(*, shared_state: Any, message: Any, name: str, args_raw: str) -> None:
-    """Invoke a runtime tool directly and return the raw output."""
+async def _cmd_tool(*, shared_state: Any, message: Any, actor: dict[str, Any], name: str, args_raw: str) -> None:
+    """Invoke a runtime tool directly and return the raw output.
+
+    SECURITY: this bypasses the supervisor graph (and thus the approval
+    interrupts / OPSEC pre-post-flight / run-id audit binding) — it is a
+    deliberately server-side-restricted operator shortcut. Only actors
+    whose server-side role is ``admin`` may use it; Discord-resolved
+    virtual actors default to ``operator`` so this is *denied* unless a
+    human operator promotes the account in the store.
+    """
+    if str(actor.get("role") or "") != "admin":
+        with contextlib.suppress(Exception):
+            await message.reply(
+                "[denied] `/tool` is an admin-only shortcut that bypasses the "
+                "supervisor. Ask the bot in natural language instead, or have "
+                "an operator promote your account."
+            )
+        return
     name = name.strip()
     if not name:
         with contextlib.suppress(Exception):
@@ -772,7 +797,7 @@ async def _handle_command(
         await _cmd_tools(shared_state=shared_state, message=message)
         return
     if name == "tool":
-        await _cmd_tool(shared_state=shared_state, message=message, name=args[0] if args else "", args_raw=" ".join(args[1:]))
+        await _cmd_tool(shared_state=shared_state, message=message, actor=actor, name=args[0] if args else "", args_raw=" ".join(args[1:]))
         return
 
 
@@ -986,18 +1011,56 @@ async def _stream_run(
     outcome = "completed"
     ok = True
     paused_for_human = False
+    lease_lost: asyncio.Event | None = None
+    lease_heartbeat: asyncio.Task[None] | None = None
+    lease_heartbeat_stop: asyncio.Event | None = None
+    # Mirror the web path (chat._renew_chat_lease): keep the lease alive
+    # while we stream so chat_recovery_loop cannot fence+double-stream a
+    # long-running turn. Falls back to "no heartbeat" only when the store
+    # facade cannot renew leases (e.g. unit-test fakes).
+    renew = getattr(store, "renew_run_lease", None)
+    if callable(renew):
+        try:
+            from .chat import _renew_chat_lease, CHAT_LEASE_SECONDS, CHAT_LEASE_RENEW_SECONDS  # noqa: PLC0415
+            lease_heartbeat_stop = asyncio.Event()
+            lease_lost = asyncio.Event()
+            lease_heartbeat = asyncio.create_task(
+                _renew_chat_lease(
+                    store=store, run_id=run_id, lease_token=lease_token,
+                    stop=lease_heartbeat_stop, lease_lost=lease_lost,
+                ),
+                name=f"munin-discord-lease-{run_id}",
+            )
+        except Exception:  # noqa: BLE001 - heartbeat is best-effort, not mandatory
+            lease_heartbeat = None
+            lease_lost = None
+    # Register with chat._ACTIVE_RUN_TASKS so recover_persisted_chat_runs'
+    # idempotency guard sees this in-flight run and does not relaunch it.
     try:
-        async for envelope in supervisor_runner(
-            prompt,
-            run_id=run_id,
-            conversation_id=conversation_id,
-            store=shared_state,
-            model=model,
-            conversation_history=conversation_history,
-            thread_id=conversation_id or run_id,
-            human_request_store=store,
-            resume_decisions=resume_decisions,
-        ):
+        from . import chat as _chat_mod  # noqa: PLC0415
+        _chat_mod._ACTIVE_RUN_TASKS[run_id] = asyncio.current_task()  # type: ignore[assignment]
+    except Exception:  # noqa: BLE001
+        pass
+
+    runner_stream = supervisor_runner(
+        prompt,
+        run_id=run_id,
+        conversation_id=conversation_id,
+        store=shared_state,
+        model=model,
+        conversation_history=conversation_history,
+        thread_id=conversation_id or run_id,
+        human_request_store=store,
+        resume_decisions=resume_decisions,
+    )
+    try:
+        async for envelope in runner_stream:
+            if lease_lost is not None and lease_lost.is_set():
+                # Another executor now owns the run; stop streaming.
+                outcome = "lease_lost"
+                ok = False
+                paused_for_human = False
+                break
             kind = envelope.get("kind")
             if kind == "assistant_text":
                 session.add_reasoning(str(envelope.get("text") or ""))
@@ -1039,9 +1102,25 @@ async def _stream_run(
         ok = False
         final_content = f"Operation failed: {exc}"
     finally:
+        # Close the generator explicitly so supervisor_runner's finally
+        # resets its ContextVars on THIS task, not on a deferred GC finaliser.
+        with contextlib.suppress(Exception):
+            await runner_stream.aclose()
+        if lease_heartbeat_stop is not None:
+            lease_heartbeat_stop.set()
+        if lease_heartbeat is not None:
+            lease_heartbeat.cancel()
+            with contextlib.suppress(BaseException):
+                await lease_heartbeat
+        try:
+            from . import chat as _chat_mod2  # noqa: PLC0415
+            if _chat_mod2._ACTIVE_RUN_TASKS.get(run_id) is asyncio.current_task():
+                _chat_mod2._ACTIVE_RUN_TASKS.pop(run_id, None)
+        except Exception:  # noqa: BLE001
+            pass
         if not final_content:
             final_content = session.reasoning_buffer or "(no response)"
-        if not paused_for_human:
+        if not paused_for_human and outcome != "lease_lost":
             _finalize(
                 store,
                 run_id=run_id, lease_token=lease_token,

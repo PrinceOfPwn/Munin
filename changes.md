@@ -41,16 +41,33 @@ server-side component (MCP tool, runtime) can publish into the run's channel
 thread-safely; the MCP `send_discord_message` tool is publisher-first with a
 fallback to the legacy bridge, and no longer redacts.
 
+Note on `/tool`: it invokes a runtime capability **outside** the supervisor
+graph, so approval interrupts, OPSEC pre/post-flight and the `ACTIVE_RUN_ID`
+audit binding do NOT apply to it. For that reason it is restricted to actors
+whose server-side role is `admin` (Discord-resolved virtual actors default to
+`operator`, so `/tool` is denied by default; a human operator must promote
+the account in the store to use it). It is a deliberate operator shortcut,
+not a general capability surface.
+
 ### Files
 
 - `munin/production/discord_adapter.py` — rewritten (commands, session
-  isolation, rendering, HITL, publisher mapping).
+  isolation, rendering, HITL, publisher mapping); `_discover_conversation`
+  parses `scope_json` in Python (the durable store serialises JSON compactly
+  with no spaces, so a SQL `LIKE` pattern with a space never matched);
+  `_stream_run` now heartbeats the chat lease (so long runs are not fenced
+  and double-streamed by `chat_recovery_loop`), explicitly `.aclose()`s the
+  supervisor async generator (so ContextVars reset on the streaming task), and
+  registers the run in `chat._ACTIVE_RUN_TASKS` for recovery's idempotency
+  guard.
 - `munin/production/discord_publisher.py` — new: thread-safe outbound bridge.
 - `munin/mcp/tools/discord_tool.py` — publisher-first, no redaction.
 - `munin/production/store.py` — admin bypass in `resolve_human_decision` /
   `reissue_human_decision_nonce`, `add_conversation_participant`,
   `list_pending_human_requests`, facade delegates (+ `get_artifact`).
-- `tests/test_discord_adapter.py` — rewritten: 22 unit tests.
+- `tests/test_discord_adapter.py` — rewritten: 25 unit tests (incl. a
+  real-SQLite round-trip for `_discover_conversation` and the `/tool`
+  admin gate).
 
 ## 2026-08-03 — Soul prompt engineering: deliberate load order + separate kernel block
 

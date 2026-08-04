@@ -97,6 +97,7 @@ def test_extract_prompt_empty_returns_none() -> None:
 class _FakeConn:
     def __init__(self, existing: dict[str, Any] | None) -> None:
         self._existing = existing
+        self._existing_all: list[dict[str, Any]] | None = None
         self.queries: list[str] = []
 
     def execute(self, sql: str, params: tuple) -> "_FakeConn":
@@ -106,6 +107,11 @@ class _FakeConn:
 
     def fetchone(self) -> Any:
         return self._existing
+
+    def fetchall(self) -> list[Any]:
+        return list(self._existing_all) if self._existing_all is not None else (
+            [self._existing] if self._existing is not None else []
+        )
 
 
 class _FakeDurable:
@@ -239,20 +245,26 @@ def test_conversation_dm_and_channel_do_not_mix() -> None:
 
 
 def test_conversation_discover_on_restart() -> None:
-    from munin.production.discord_adapter import _get_or_create_conversation
+    from munin.production.discord_adapter import (
+        _discover_conversation,
+        _get_or_create_conversation,
+    )
 
     # Simulates a fresh process (empty cache) after a restart: durable
     # probe resurrects the previous conversation for the same channel_key.
+    # The row carries scope_json the same way Munin's _json serialiser
+    # writes it (separators=(",",":") — NO space after the colon).
     store = _FakeStore()
     store._durable._existing = None  # noqa: SLF001
-    # A conversation row with the right scope exists in the durable store.
-    from munin.production.discord_adapter import _discover_conversation
 
     class _Row2(dict):
         def keys(self):  # noqa: D401
             return list(super().keys())
 
-    store._durable.conn._existing = _Row2({"id": "conv-restored"})  # noqa: SLF001
+    store._durable.conn._existing_all = [  # noqa: SLF001
+        _Row2({"id": "conv-restored", "scope_json": '{"source":"discord","channel_key":"dm:111"}'}),
+        _Row2({"id": "conv-other", "scope_json": '{"source":"discord","channel_key":"channel:555"}'}),
+    ]
     found = _discover_conversation(store, actor_id="usr-1", channel_key="dm:111")
     assert found == "conv-restored"
 
@@ -263,6 +275,47 @@ def test_conversation_discover_on_restart() -> None:
     )
     assert conv == "conv-restored"
     assert "dm:111" in cache
+
+
+def test_conversation_discover_handles_real_sqlite_round_trip() -> None:
+    """End-to-end check that _discover_conversation matches the row that
+    ProductionStore's create_conversation would actually persist.
+
+    Guards against the regression where a LIKE pattern with a space after
+    the colon never matched Munin's compact JSON serialisation.
+    """
+    import sqlite3
+    from munin.production.discord_adapter import _discover_conversation
+    from munin.production.store import _json
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE conversations (id TEXT PRIMARY KEY, scope_json TEXT, "
+        "last_activity_at_ms INTEGER, deleted_at_ms INTEGER)"
+    )
+    # Write exactly the way store._json does (compact separators, no spaces).
+    conn.execute(
+        "INSERT INTO conversations (id, scope_json, last_activity_at_ms, deleted_at_ms)"
+        " VALUES (?, ?, ?, NULL)",
+        ("conv-real", _json({"source": "discord", "channel_key": "channel:42"}), 1),
+    )
+    conn.commit()
+
+    class _Durable:
+        def _read_only(self) -> Any:  # noqa: D401
+            class _Ctx:
+                def __enter__(self) -> sqlite3.Connection:
+                    return conn
+                def __exit__(self, *_: Any) -> None:
+                    return None
+            return _Ctx()
+
+    store = SimpleNamespace(_durable=_Durable())
+    assert _discover_conversation(store, actor_id="usr-1", channel_key="channel:42") == "conv-real"
+    # Negative: a different channel_key must NOT match the same row.
+    assert _discover_conversation(store, actor_id="usr-1", channel_key="channel:99") is None
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +438,54 @@ def test_command_approvals_lists_pending() -> None:
     joined = "\n".join(channel.sent)
     assert "hitl_1" in joined
     assert "nmap_scan" in joined
+
+
+# ---------------------------------------------------------------------------
+# /tool admin gate — /tool bypasses the supervisor graph, so it is
+# restricted to actors whose server-side role is "admin". Discord-resolved
+# virtual actors default to "operator" → denied by default.
+# ---------------------------------------------------------------------------
+
+
+def test_command_tool_denied_for_operator() -> None:
+    from munin.production.discord_adapter import _cmd_tool
+
+    channel = _ReplyChannel()
+    msg = SimpleNamespace(channel=channel, reply=channel.send)
+
+    async def _run() -> None:
+        await _cmd_tool(
+            shared_state=None, message=msg,
+            actor={"id": "usr-1", "username": "discord:42", "role": "operator"},
+            name="nmap_scan", args_raw='{"host":"x"}',
+        )
+
+    asyncio.run(_run())
+    assert any("[denied]" in t and "admin" in t for t in channel.sent)
+
+
+def test_command_tool_admitted_for_admin_then_not_found() -> None:
+    """An admin passes the gate; an unknown tool yields [not_found]."""
+    from munin.production.discord_adapter import _cmd_tool
+    import munin.core.tool_gateway as gw
+
+    channel = _ReplyChannel()
+    msg = SimpleNamespace(channel=channel, reply=channel.send)
+
+    original = gw.gateway_tools
+    gw.gateway_tools = lambda *a, **k: []  # noqa: E731 - unknown tool
+    try:
+        async def _run() -> None:
+            await _cmd_tool(
+                shared_state=SimpleNamespace(), message=msg,
+                actor={"id": "usr-1", "username": "discord:42", "role": "admin"},
+                name="nonexistent_tool", args_raw="{}",
+            )
+
+        asyncio.run(_run())
+    finally:
+        gw.gateway_tools = original
+    assert any("[not_found]" in t for t in channel.sent)
 
 
 # ---------------------------------------------------------------------------
