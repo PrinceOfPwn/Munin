@@ -241,7 +241,7 @@ def build_supervisor(
             SummarizationMiddleware(
                 model=model,
                 backend=skill_binding.backend,
-                trigger=[("tokens", 60_000), ("messages", 80)],
+                trigger=[("tokens", 170_000), ("messages", 80)],
                 keep=("messages", 12),
             )
         )
