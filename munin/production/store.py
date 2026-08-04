@@ -1,4 +1,4 @@
-# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance, plan18-indexes]
+# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance, plan18-indexes, cancel-fence, request_cancel_fence, reject_human_requests_for_run, run.cancelling, guidance-lifecycle, GUIDANCE_STATES, transition_guidance_state, guidance.queued, guidance.delivered_to_runtime, PR-2D]
 """Durable production aggregate for conversations, operations, and identity.
 
 The existing ``SharedStateStore`` remains compatible with legacy MCP tools.
@@ -254,6 +254,42 @@ _FASE2_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("tool_calls", "parallel_group_id", "TEXT"),
     ("tool_calls", "tool_use_id", "TEXT"),
     ("reasoning_events", "metadata_json", "TEXT"),
+)
+
+# PR-2D — guidance lifecycle columns added to ``run_guidance_queue``.  Most
+# columns are plain ``TEXT``/``INTEGER`` and fit the simple
+# ``_FASE2_OPTIONAL_COLUMNS`` (table, column, coltype) pattern.  The ``state``
+# column carries a ``CHECK`` constraint that SQLite ``ALTER TABLE ADD COLUMN``
+# accepts, so it is expressed as a full column-DDL fragment instead.  The
+# ``DEFAULT`` values keep existing rows (state='queued', ts=0) valid under the
+# CHECK constraint.  All four additions are idempotent (PRAGMA-guarded).
+_FASE2_OPTIONAL_CONSTRAINED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, full_column_ddl) — full DDL so CHECK / DEFAULT survive.
+    (
+        "run_guidance_queue",
+        "state",
+        "TEXT NOT NULL DEFAULT 'queued' "
+        "CHECK(state IN ('queued','delivered_to_runtime','applied_to_model_step',"
+        "'expired','superseded','undelivered'))",
+    ),
+    ("run_guidance_queue", "state_updated_at_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ("run_guidance_queue", "applied_message_id", "TEXT"),
+    ("run_guidance_queue", "superseded_by_id", "TEXT"),
+)
+
+# The set of guidance lifecycle states tracked by the durable ``state`` column
+# above.  Mirrors the CHECK constraint so callers (``transition_guidance_state``)
+# can validate before writing instead of relying on a sqlite ``IntegrityError``
+# for control flow — keeps the audit record clean and the error message useful.
+GUIDANCE_STATES: frozenset[str] = frozenset(
+    {
+        "queued",
+        "delivered_to_runtime",
+        "applied_to_model_step",
+        "expired",
+        "superseded",
+        "undelivered",
+    }
 )
 
 # ---------------------------------------------------------------------------
@@ -715,6 +751,14 @@ class ProductionStore:
                 names = {str(r["name"] if hasattr(r, "keys") else r[1]) for r in rows}
                 if column not in names:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            # PR-2D — guidance lifecycle columns.  Same PRAGMA-guarded ADD
+            # COLUMN pattern as ``_FASE2_OPTIONAL_COLUMNS``, but the column
+            # DDL carries CHECK/DEFAULT so it is stored as a full fragment.
+            for table, column, column_ddl in _FASE2_OPTIONAL_CONSTRAINED_COLUMNS:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                names = {str(r["name"] if hasattr(r, "keys") else r[1]) for r in rows}
+                if column not in names:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_ddl}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS tool_calls_by_parallel_group "
                 "ON tool_calls(parallel_group_id)"
@@ -1062,6 +1106,7 @@ class ProductionStore:
         return {
             "id": row["id"], "conversation_id": row["conversation_id"], "state": row["state"], "attempt": int(row["attempt"]),
             "fencing_epoch": int(row["fencing_epoch"]), "assistant_message_id": row["assistant_message_id"], "updated_at_ms": int(row["updated_at_ms"]),
+            "cancel_requested_at_ms": row["cancel_requested_at_ms"],
         }
 
     # ``claim_next_run`` was removed in Fase 2 (issue #9). The lease-based
@@ -1802,6 +1847,110 @@ class ProductionStore:
             self._audit(conn, actor_id=actor_id, action="run.cancelled", resource_type="run", resource_id=run_id, outcome="success")
             return {**self._run_dict(run), "state": "cancelled", "updated_at_ms": now}
 
+    def reject_human_requests_for_run(self, conn: Any, *, run_id: str, reason: str = "run_cancelling") -> int:
+        """Atomically reject every pending HITL request for one run.
+
+        Used by :meth:`request_cancel_fence` to close out standing
+        ``waiting_for_human`` requests when an operator requests durable
+        cancellation.  HITL rows are transitioned ``waiting`` → ``rejected``
+        with a durable ``human_request.resolved`` event so reconnecting
+        viewers see the rejection in replay.  Intended to be called inside
+        the caller's transaction; never opens its own.
+
+        Returns the number of requests that were rejected.
+        """
+        now = _now_ms()
+        pending = conn.execute(
+            "SELECT * FROM human_requests WHERE run_id=? AND state='waiting'",
+            (run_id,),
+        ).fetchall()
+        rejected = 0
+        for row in pending:
+            request_id = str(row["id"])
+            response = {"choice": "cancel", "guidance": reason, "actor_id": None}
+            conn.execute(
+                "UPDATE human_requests SET state='rejected',response_json=?,resolved_at_ms=? "
+                "WHERE id=? AND state='waiting'",
+                (_json(response), now, request_id),
+            )
+            scope = json.loads(row["scope_json"] or "{}") if isinstance(row["scope_json"], (str, bytes)) else {}
+            actions = scope.get("actions") if isinstance(scope, dict) else []
+            if not isinstance(actions, list):
+                actions = []
+            action_rows = [action for action in actions if isinstance(action, dict)]
+            action_names = [str(action.get("name") or "unknown") for action in action_rows]
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="human_request.resolved",
+                payload={
+                    "human_request_id": request_id,
+                    "request_id": request_id,
+                    "choice": "cancel",
+                    "resolution": "rejected",
+                    "tool_name": action_names[0] if len(action_names) == 1 else "multiple_tools",
+                    "args": {"actions": action_rows},
+                    "guidance": reason,
+                },
+            )
+            rejected += 1
+        return rejected
+
+    def request_cancel_fence(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        """Set the ``cancel_requested_at_ms`` fence marker without a terminal transition.
+
+        Plan PR-2A durable cancellation contract: the operator-or-API request
+        records a fence timestamp on the ``agent_runs`` row and atomically
+        rejects any pending HITL requests for the run, but the run STAYS in its
+        current non-terminal state.  The detached executor observes the fence
+        at its next step boundary and performs the terminal ``run.cancelled``
+        transition itself (PR-2B), which keeps the durable event log as the
+        single source of truth and avoids racing the live supervisor loop.
+
+        Returns the run row with ``cancel_requested_at_ms`` populated.  For a
+        run already in a terminal state the row is returned unchanged and no
+        fence marker is written (``POST /api/chat/{run_id}/cancel`` maps that
+        case to a 200 response).
+        """
+        with self._transaction() as conn:
+            run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+            if str(run["state"]) in FINAL_RUN_STATES:
+                # Already terminal — return the snapshot WITHOUT touching the
+                # fence marker so a reconnecting client sees the real state.
+                return {**self._run_dict(run), "cancel_requested_at_ms": run["cancel_requested_at_ms"]}
+            now = _now_ms()
+            conn.execute(
+                "UPDATE agent_runs SET cancel_requested_at_ms=?,state_version=state_version+1,updated_at_ms=? "
+                "WHERE id=? AND state NOT IN ('completed','failed','interrupted','cancelled')",
+                (now, now, run_id),
+            )
+            self.reject_human_requests_for_run(conn, run_id=run_id, reason="run_cancelling")
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="run.cancelling",
+                payload={"reason": "operator_request", "requested_at_ms": now},
+                actor_id=actor_id,
+            )
+            self._audit(
+                conn,
+                actor_id=actor_id,
+                action="run.cancel_requested",
+                resource_type="run",
+                resource_id=run_id,
+                outcome="success",
+                metadata={"cancel_requested_at_ms": now},
+            )
+            return {
+                **self._run_dict(run),
+                "state": "cancelling",
+                "cancel_requested_at_ms": now,
+                "updated_at_ms": now,
+            }
+
     def retry_run(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         """Create a new attempt without mutating the original run or its events."""
         with self._transaction() as conn:
@@ -2050,13 +2199,20 @@ class ProductionStore:
             "consumed_at_ms": None,
             "delivered_at_step": None,
             "budget_extension_seconds": int(budget_extension_seconds or 0),
+            # PR-2D — lifecycle fields mirror the durable ``state`` column.
+            "state": "queued",
+            "state_updated_at_ms": 0,
+            "applied_message_id": None,
+            "superseded_by_id": None,
         }
+        entry["state_updated_at_ms"] = entry["created_at_ms"]
         with self._transaction() as conn:
             conn.execute(
                 """INSERT INTO run_guidance_queue
                     (id, run_id, actor_id, actor_username, body, target_agent_id,
-                     created_at_ms, budget_extension_seconds)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                     created_at_ms, budget_extension_seconds,
+                     state, state_updated_at_ms, applied_message_id, superseded_by_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL, NULL)""",
                 (
                     entry["id"],
                     run_id,
@@ -2066,9 +2222,101 @@ class ProductionStore:
                     target_agent_id,
                     entry["created_at_ms"],
                     entry["budget_extension_seconds"],
+                    entry["state_updated_at_ms"],
                 ),
             )
+            # PR-2D — durable ``guidance.queued`` lifecycle event so the SSE
+            # replay path surfaces a "operator guidance accepted" marker to
+            # every connected client (mirrors the ``run.cancelling`` fence
+            # event from PR-2B that introduced this family).
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="guidance.queued",
+                payload={
+                    "guidance_id": entry["id"],
+                    "actor_id": actor_id,
+                    "target_agent_id": target_agent_id,
+                },
+                actor_id=actor_id,
+            )
         return entry
+
+    def transition_guidance_state(
+        self,
+        guidance_id: str,
+        new_state: str,
+        *,
+        applied_message_id: str | None = None,
+        superseded_by_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Move a ``run_guidance_queue`` row to ``new_state`` and emit a durable
+        ``guidance.<new_state>`` event.
+
+        PR-2D guidance lifecycle contract:
+
+        * ``queued``            — set on ``enqueue_guidance`` (no transition call).
+        * ``delivered_to_runtime`` — middleware drained the row into the model
+          input (replaces a bare ``consumed_at_ms`` write).
+        * ``applied_to_model_step`` — the model step consumed the
+          ``HumanMessage(name='operator')`` call (``applied_message_id``).
+        * ``expired``           — TTL elapsed before delivery.
+        * ``superseded``        — a newer guidance replaced it (``superseded_by_id``).
+        * ``undelivered``       — the run terminated before the row was drained.
+
+        The transition is validated against :data:`GUIDANCE_STATES` BEFORE the
+        write so an invalid state raises ``ValueError`` with a useful message
+        instead of an opaque sqlite ``IntegrityError``.  ``state_updated_at_ms``
+        is refreshed on every transition and read-model callers must update
+        the column atomically through this method (no direct UPDATE).
+        """
+        if new_state not in GUIDANCE_STATES:
+            raise ValueError(f"invalid guidance state: {new_state}")
+        now = _now_ms()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_guidance_queue WHERE id=?",
+                (guidance_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(guidance_id)
+            run_id = str(row["run_id"])
+            actor_id = str(row["actor_id"]) if row["actor_id"] else None
+            update_pieces = ["state=?", "state_updated_at_ms=?"]
+            update_values: list[Any] = [new_state, now]
+            if applied_message_id is not None:
+                update_pieces.append("applied_message_id=?")
+                update_values.append(str(applied_message_id))
+            if superseded_by_id is not None:
+                update_pieces.append("superseded_by_id=?")
+                update_values.append(str(superseded_by_id))
+            update_values.append(guidance_id)
+            conn.execute(
+                f"UPDATE run_guidance_queue SET {', '.join(update_pieces)} "
+                f"WHERE id=?",
+                tuple(update_values),
+            )
+            payload: dict[str, Any] = {"guidance_id": guidance_id, "state": new_state}
+            if applied_message_id is not None:
+                payload["applied_message_id"] = str(applied_message_id)
+            if superseded_by_id is not None:
+                payload["superseded_by_id"] = str(superseded_by_id)
+            event = self._append_event(
+                conn,
+                run_id=run_id,
+                kind=f"guidance.{new_state}",
+                payload=payload,
+                actor_id=actor_id,
+            )
+            return {
+                "id": guidance_id,
+                "run_id": run_id,
+                "state": new_state,
+                "state_updated_at_ms": now,
+                "applied_message_id": applied_message_id,
+                "superseded_by_id": superseded_by_id,
+                "event_id": event["id"],
+            }
 
     def consume_pending_guidance(
         self,
@@ -2099,11 +2347,26 @@ class ProductionStore:
             for row in rows:
                 entry = _row(row)
                 conn.execute(
-                    "UPDATE run_guidance_queue SET consumed_at_ms=?, delivered_at_step=? WHERE id=?",
-                    (now, delivered_at_step, entry["id"]),
+                    "UPDATE run_guidance_queue SET consumed_at_ms=?, delivered_at_step=?, "
+                    "state='delivered_to_runtime', state_updated_at_ms=? WHERE id=?",
+                    (now, delivered_at_step, now, entry["id"]),
                 )
                 entry["consumed_at_ms"] = now
                 entry["delivered_at_step"] = delivered_at_step
+                entry["state"] = "delivered_to_runtime"
+                entry["state_updated_at_ms"] = now
+                # PR-2D — durable ``guidance.delivered_to_runtime`` event so
+                # the SSE replay path surfaces the exact moment the middleware
+                # drained the operator hint into a ``HumanMessage(name=
+                # 'operator')``.  ``guidance.queued`` was already emitted by
+                # :meth:`enqueue_guidance`; this is the second lifecycle tick.
+                self._append_event(
+                    conn,
+                    run_id=str(entry["run_id"]),
+                    kind="guidance.delivered_to_runtime",
+                    payload={"guidance_id": entry["id"], "delivered_at_step": delivered_at_step},
+                    actor_id=str(entry.get("actor_id") or "") or None,
+                )
                 results.append(entry)
             return results
 
@@ -3021,6 +3284,13 @@ class MuninStore:
     def list_run_guidance(self, **kwargs: Any) -> list[dict[str, Any]]:
         return self._hot.list_run_guidance(**kwargs)
 
+    # PR-2D — guidance lifecycle pass-through.  The hot SQLite store owns the
+    # ``run_guidance_queue`` row and the ``guidance.<state>`` durable events;
+    # ``MuninStore`` only forwards so the supervisor / middleware keeps a
+    # single store handle.
+    def transition_guidance_state(self, guidance_id: str, new_state: str, **kwargs: Any) -> dict[str, Any]:
+        return self._hot.transition_guidance_state(guidance_id, new_state, **kwargs)
+
     # ------------------------------------------------------------------
     # Fase 3 (autonomous modes) — goals / plan / timers (durable)
     # ------------------------------------------------------------------
@@ -3374,6 +3644,25 @@ class MuninStore:
             return self._hot.request_run_cancellation(**kwargs)
         # Already migrated — return the durable snapshot.
         return self._durable.request_run_cancellation(**kwargs)
+
+    def request_cancel_fence(self, **kwargs: Any) -> dict[str, Any]:
+        """Fence-route a durable cancel request to the backend that owns the run.
+
+        Active (non-terminal) runs live in the hot backend; runs already
+        migrated to durable are returned unchanged (PR-2A returns 200 for an
+        already-terminal run without writing the fence marker).  Participant
+        hydration mirrors the legacy :meth:`request_run_cancellation` path so
+        the underlying auth check succeeds against the hot mirror.
+        """
+        actor_id = kwargs.get("actor_id")
+        run_id = kwargs.get("run_id")
+        with self._hot._read_only() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT conversation_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if row and actor_id:
+                self._hydrate_hot_participant(actor_id=actor_id, conversation_id=str(row["conversation_id"]))
+        if row:
+            return self._hot.request_cancel_fence(**kwargs)
+        return self._durable.request_cancel_fence(**kwargs)
 
     def retry_run(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         # Look up the source run in either backend; migrated runs live in

@@ -1,4 +1,4 @@
-# tags: [runtime, core, web-ui, database, persistence, Starlette, SecurityHeaders, create_production_app, MUNIN_ALLOWED_ORIGINS, byok-encryption, session-auth, csrf-protection, asgi-boundary, cookie-security, provider-profiles]
+# tags: [runtime, core, web-ui, database, persistence, Starlette, SecurityHeaders, create_production_app, MUNIN_ALLOWED_ORIGINS, byok-encryption, session-auth, csrf-protection, asgi-boundary, cookie-security, provider-profiles, cancel-endpoint, register_run_routes]
 """Authenticated ASGI boundary for the Munin Production Suite.
 
 Fase 2 of the issue-#9 migration (Arch A → Arch B) removed the vast bulk of
@@ -37,6 +37,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .chat import register_chat_routes
+from .runs import register_run_routes
 from .store import MuninStore, ProductionStore
 
 
@@ -386,6 +387,16 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         error_response=_error,
         payload_reader=_payload,
         shared_state=shared_state,
+    )
+
+    # PR-2A (Issue #32): durable run-level mutating endpoints.  Currently
+    # only the cancel fence; lives in :mod:`munin.production.runs` to keep
+    # the supervisor SSE bridge in ``chat.py`` focused.
+    register_run_routes(
+        routes,
+        store=store,
+        actor_dependency=actor,
+        error_response=_error,
     )
 
     return SecurityHeaders(Starlette(debug=False, routes=routes))  # type: ignore[return-value]

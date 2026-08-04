@@ -1,4 +1,4 @@
-// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon]
+// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui, typed-renderer-registry, RendererFor, guidance-lifecycle, PR-2D, PR-2G]
 "use client";
 
 import {
@@ -18,9 +18,10 @@ import {
   Pencil,
   Send,
   Sparkles,
-  Square,
   TerminalSquare,
+  Unplug,
   WifiOff,
+  XCircle,
   Zap,
 } from "lucide-react";
 import type {
@@ -76,8 +77,14 @@ import {
   useMuninChat,
 } from "@/lib/aiChat";
 import { useConversations } from "@/lib/queries";
-import { productionApi, type ProviderProfile } from "@/lib/production-api";
+import { cancelRun, productionApi, type ProviderProfile } from "@/lib/production-api";
+import { logError } from "@/lib/logError";
 import { cn, formatDuration, isTerminalRun } from "@/lib/utils";
+// PR-2G — typed renderer registry delegates the eight munin-ui/v1 renderer
+// keys (PR-2F) through ``<RendererFor>`` so an unknown payload degrades to an
+// annotated fallback card instead of crashing the whole console tree. The
+// legacy direct renderers remain for parts outside the v1 allow-list.
+import { RendererFor } from "@/lib/rendererRegistry";
 
 // ---------------------------------------------------------------------------
 // Custom data part shapes emitted by the Munin BFF translator
@@ -163,6 +170,7 @@ interface CommandOutputData {
   toolName: string;
   stream: "stdout" | "stderr" | "meta";
   text: string;
+  sequence?: number;
   elapsedMs?: number;
   final?: boolean;
 }
@@ -336,10 +344,14 @@ function PartRenderer({
   // Dynamic tool part — emitted when translator writes tool-input-start /
   // tool-input-available / tool-output-available / tool-output-error chunks.
   if (part.type === "dynamic-tool") {
+    // PR-2G — typed registry delegation. Map the AI SDK normalized tool
+    // invocation onto the v1 ``tool-invocation`` schema shape; the registry's
+    // adapter translates ``input`` → ``args`` and ``errorText`` → ``error``
+    // for the trusted :component:`ToolInvocationPart`.
     const dp = part as DynamicToolUIPart;
-    let invState: ToolInvocationState = "call";
+    let invState: "partial-call" | "call" | "result" = "call";
     let result: unknown = undefined;
-    let error: string | undefined = undefined;
+    let errorText: string | undefined = undefined;
     if (dp.state === "input-streaming" || dp.state === "input-available") {
       invState = dp.state === "input-streaming" ? "partial-call" : "call";
     } else if (dp.state === "output-available") {
@@ -347,17 +359,21 @@ function PartRenderer({
       result = dp.output;
     } else if (dp.state === "output-error") {
       invState = "result";
-      error = dp.errorText;
+      errorText = dp.errorText;
     }
     return (
-      <ToolInvocationPart
+      <RendererFor
         key={key}
-        toolCallId={dp.toolCallId}
-        toolName={dp.toolName}
-        args={dp.state !== "input-streaming" ? (dp.input as Record<string, unknown> | undefined) : undefined}
-        state={invState}
-        result={result}
-        error={error}
+        rendererKey="tool-invocation"
+        dataPart={{
+          type: "tool-invocation",
+          toolCallId: dp.toolCallId,
+          toolName: dp.toolName,
+          state: invState,
+          input: dp.state !== "input-streaming" ? (dp.input as Record<string, unknown> | undefined) : undefined,
+          result,
+          errorText,
+        }}
       />
     );
   }
@@ -382,30 +398,44 @@ function PartRenderer({
   }
 
   if (part.type === "data-hitl-request") {
+    // PR-2G — delegate to the typed registry so an unknown payload degrades
+    // to a fallback card. We pass the AI-SDK data-part under ``dataPart``
+    // with its ``.data`` payload hoisted to the top-level discriminator
+    // field set so the v1 ``hitl-request`` schema validates, and forward the
+    // approve/reject callbacks via ``extraProps``.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as HitlData;
     return (
-      <HitlRequestPart
+      <RendererFor
         key={key}
-        requestId={d.requestId}
-        toolName={d.toolName}
-        args={d.args ?? {}}
-        nonce={d.nonce}
-        choices={d.choices}
-        resolution={d.resolution}
-        onApprove={hitlApprove}
-        onReject={hitlReject}
+        rendererKey="hitl-request"
+        dataPart={{
+          type: "hitl-request",
+          requestId: d.requestId,
+          toolName: d.toolName,
+          args: d.args ?? {},
+          nonce: d.nonce,
+          choices: d.choices,
+          resolved: d.resolution != null,
+          ...(d.resolution != null ? { resolution: d.resolution } : {}),
+        }}
+        extraProps={{ onApprove: hitlApprove, onReject: hitlReject }}
       />
     );
   }
 
   if (part.type === "data-artifact") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ArtifactData;
     return (
-      <ArtifactPart
+      <RendererFor
         key={key}
-        artifactId={d.artifactId}
-        mimeType={d.mimeType}
-        uri={d.uri}
+        rendererKey="artifact"
+        dataPart={{
+          type: "artifact",
+          artifactId: d.artifactId,
+          mimeType: d.mimeType,
+          uri: d.uri,
+        }}
       />
     );
   }
@@ -416,15 +446,23 @@ function PartRenderer({
   }
 
   if (part.type === "data-command-output") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as CommandOutputData;
     return (
-      <CommandOutputPart
+      <RendererFor
         key={key}
-        toolName={d.toolName ?? "command"}
-        stream={d.stream ?? "stdout"}
-        text={d.text ?? ""}
-        elapsedMs={d.elapsedMs}
-        final={d.final}
+        rendererKey="command-output"
+        dataPart={{
+          type: "command-output",
+          toolName: d.toolName ?? "command",
+          toolCallId: d.toolCallId,
+          jobId: d.jobId,
+          stream: d.stream,
+          text: d.text ?? "",
+          sequence: d.sequence,
+          elapsedMs: d.elapsedMs,
+          final: d.final,
+        }}
       />
     );
   }
@@ -443,13 +481,31 @@ function PartRenderer({
   }
 
   if (part.type === "reasoning") {
+    // PR-2G — typed registry delegation. The AI SDK ``ReasoningUIPart`` is a
+    // top-level part (no ``.data``), so we wrap its ``text`` into a v1
+    // ``reasoning`` schema payload before handing it to the registry. The id
+    // is preserved on the rendered component's ``id`` prop via ``extraProps``.
     const reasoning = part as ReasoningUIPart;
-    return reasoning.text ? <ReasoningPart key={key} id={key} text={reasoning.text} /> : null;
+    if (!reasoning.text) return null;
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="reasoning"
+        dataPart={{ type: "reasoning", text: reasoning.text, id: key }}
+      />
+    );
   }
 
   if (part.type === "data-activity") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ActivityData;
-    return <OperationalTracePart key={key} stage={d.stage ?? "working"} text={d.text ?? "Working"} />;
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="operational-trace"
+        dataPart={{ type: "operational-trace", stage: d.stage ?? "working", text: d.text ?? "Working" }}
+      />
+    );
   }
 
   if (part.type === "data-note") {
@@ -462,15 +518,51 @@ function PartRenderer({
     return <GuidancePart key={key} text={d.text} />;
   }
 
+  // PR-2D/2G — durable ``guidance.<state>`` lifecycle tick. Delegated through
+  // the typed registry so a future schema mismatch degrades to a fallback
+  // card instead of crashing the live console tree.
+  if (part.type === "data-guidance-lifecycle") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as {
+      state?: string;
+      guidanceId?: string;
+      appliedMessageId?: string;
+      supersededById?: string;
+      deliveredAtStep?: number;
+      actorId?: string;
+      runId?: string;
+    };
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="guidance-lifecycle"
+        dataPart={{
+          type: "guidance-lifecycle",
+          state: d.state ?? "queued",
+          guidanceId: d.guidanceId ?? "",
+          appliedMessageId: d.appliedMessageId,
+          supersededById: d.supersededById,
+          deliveredAtStep: d.deliveredAtStep,
+          actorId: d.actorId,
+          runId: d.runId,
+        }}
+      />
+    );
+  }
+
   // Fase 3 (autonomous modes): durable plan / goal / timer visibility.
   if (part.type === "data-plan") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as PlanData;
     return (
-      <PlanSnapshotPart
+      <RendererFor
         key={key}
-        goal={d.goal ?? null}
-        items={d.items ?? []}
-        updatedAtMs={d.updatedAtMs}
+        rendererKey="plan"
+        dataPart={{
+          type: "plan",
+          goal: d.goal ?? null,
+          items: d.items ?? [],
+          updatedAtMs: d.updatedAtMs,
+        }}
       />
     );
   }
@@ -654,6 +746,68 @@ function useElapsedSeconds(active: boolean): number {
 }
 
 // ---------------------------------------------------------------------------
+// Cancel durable run button (distinct from Detach)
+// ---------------------------------------------------------------------------
+//
+// PR-2C contract:
+//   * Shown whenever a run is active (queued/running/waiting_for_human/
+//     cancelling).  A terminal run hides it.
+//   * ``idle`` → "Cancel", enabled.  Posts ``/api/chat/{run_id}/cancel``;
+//     on 202 ACK the parent flips ``cancelState`` to ``canceling``.
+//   * ``canceling`` → "Canceling…" with a spinner, disabled.  This is the
+//     truthful "we asked the server to cancel; the executor is observing
+//     the fence" state.  We do NOT pretend the run is cancelled until the
+//     durable SSE emits ``state: 'cancelled'``.
+//   * ``canceled`` → "Canceled" with a check, disabled.  Reached only when
+//     the SSE ``run.cancelled`` event arrives.
+//   * ``error`` → "Cancel" re-enabled so the operator can retry after a
+//     4xx/5xx (logged via ``logError`` upstream).
+function CancelButton({
+  state,
+  runActive,
+  onClick,
+}: {
+  state: "idle" | "requested" | "canceling" | "canceled" | "error";
+  runActive: boolean;
+  onClick: () => void;
+}) {
+  if (!runActive && state === "idle") return null;
+
+  const canceling = state === "canceling" || state === "requested";
+  const canceled = state === "canceled";
+
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      disabled={canceling || canceled}
+      title={
+        canceled
+          ? "Run cancelled"
+          : canceling
+            ? "Canceling the durable run; waiting for the executor to observe the fence"
+            : "Cancel the durable run (the operator reader detaches, the server stops the run)"
+      }
+      className={cn(
+        "shrink-0",
+        canceled ? "border-success/40 text-success" : "border-danger/50 text-danger hover:bg-danger/10",
+      )}
+    >
+      {canceling ? (
+        <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+      ) : canceled ? (
+        <CheckCircle className="h-3.5 w-3.5" />
+      ) : (
+        <XCircle className="h-3.5 w-3.5" />
+      )}
+      {canceling ? "Canceling…" : canceled ? "Canceled" : "Cancel"}
+    </Button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Console header (title + status + archive + inline run insight)
 // ---------------------------------------------------------------------------
 
@@ -667,6 +821,8 @@ function ConsoleHeader({
   lastToolName,
   isStreaming,
   onStop,
+  onCancel,
+  cancelState,
   providerProfiles,
   providerBusy,
   onActivateProvider,
@@ -684,6 +840,9 @@ function ConsoleHeader({
   lastToolName: string | null;
   isStreaming: boolean;
   onStop: () => void;
+  onCancel: () => void;
+  /** idle | requested | canceling | canceled | error */
+  cancelState: "idle" | "requested" | "canceling" | "canceled" | "error";
   providerProfiles: ProviderProfile[];
   providerBusy: boolean;
   onActivateProvider: (profileId: string) => Promise<void>;
@@ -793,11 +952,16 @@ function ConsoleHeader({
             variant="outline"
             size="sm"
             onClick={onStop}
-            title="Stop streaming and leave the durable run recoverable"
+            title="Detach the local reader; the durable run keeps running in the background"
           >
-            <Square className="h-3.5 w-3.5" /> Stop
+            <Unplug className="h-3.5 w-3.5" /> Detach
           </Button>
         )}
+        <CancelButton
+          state={cancelState}
+          runActive={isStreaming && runState !== null && !isTerminalRun(runState ?? "")}
+          onClick={onCancel}
+        />
         <ProviderSwitcher
           profiles={providerProfiles}
           busy={providerBusy}
@@ -963,6 +1127,68 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   );
   const elapsedSeconds = useElapsedSeconds(isStreaming);
 
+  // PR-2C durable cancel UI state.  The SSE ``data-run-state`` part is the
+  // source of truth for the terminal transition; we only render "Canceled"
+  // once the server has actually finalised the run (not on the 202 ACK).
+  const [cancelState, setCancelState] = useState<
+    "idle" | "requested" | "canceling" | "canceled" | "error"
+  >("idle");
+
+  // Reset cancel UI when the active run id changes (new turn → fresh button).
+  useEffect(() => {
+    setCancelState("idle");
+  }, [insight.activeRunId]);
+
+  // Flip to ``canceled`` ONLY when the durable SSE emits state: cancelled.
+  // ``cancelling`` (the fence marker ACK) is shown through ``canceling``.
+  useEffect(() => {
+    if (insight.runState === "cancelled") {
+      setCancelState("canceled");
+    } else if (insight.runState === "cancelling" && cancelState === "idle") {
+      // A reconnect arrived mid-cancel (server replayed run.cancelling).
+      setCancelState("canceling");
+    }
+    // Reset the button back to idle if the run terminates a different way
+    // (completed/failed/interrupted) — we never showed "Canceled" anyway.
+    if (
+      insight.runState &&
+      insight.runState !== "cancelled" &&
+      insight.runState !== "cancelling" &&
+      isTerminalRun(insight.runState) &&
+      cancelState !== "idle" &&
+      cancelState !== "canceled"
+    ) {
+      setCancelState("idle");
+    }
+  }, [insight.runState, cancelState]);
+
+  async function handleCancelRun() {
+    const runId = insight.activeRunId;
+    if (!runId) return;
+    setCancelState("requested");
+    try {
+      const result = await cancelRun(runId);
+      if (result.status === "cancelling") {
+        // 202 ACK — the executor is observing the fence; switch to the
+        // truthful ``canceling`` state until the SSE ``cancelled`` lands.
+        setCancelState("canceling");
+        toast.success("Cancel requested; the durable run will stop at the next step");
+      } else {
+        // 200 — the run was already terminal. The SSE already rendered the
+        // terminal state; keep the button truthful.
+        setCancelState(result.status === "cancelled" ? "canceled" : "idle");
+      }
+    } catch (error) {
+      logError({
+        context: "cancel",
+        error,
+        meta: { runId },
+      });
+      setCancelState("error");
+      toast.error(error instanceof Error ? error.message : "Could not cancel the durable run");
+    }
+  }
+
   // Once the stream reveals the durable goal id, keep it so later turns
   // attach to the same goal instead of creating a duplicate.
   useEffect(() => {
@@ -1105,6 +1331,8 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         lastToolName={insight.lastToolName}
         isStreaming={isStreaming}
         onStop={stop}
+        onCancel={handleCancelRun}
+        cancelState={cancelState}
         providerProfiles={providerProfiles}
         providerBusy={providerBusy}
         onActivateProvider={activateProvider}

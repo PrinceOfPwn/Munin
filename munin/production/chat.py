@@ -1,4 +1,4 @@
-# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key]
+# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, cancel-fence, run.cancelling, observe_cancel_fence, guidance-lifecycle, guidance.queued, guidance.delivered_to_runtime, guidance.applied_to_model_step, _envelope_from_event, PR-2A, PR-2B, PR-2D]
 """Deep Agents supervisor → SSE bridge (Fase 1a of issue #9 migration).
 
 This module owns ``POST /api/chat``, ``GET /api/chat/{conversation_id}/stream``
@@ -53,6 +53,8 @@ from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
+
+from .runs import observe_cancel_fence
 
 log = logging.getLogger("munin.production.chat")
 
@@ -465,6 +467,15 @@ def _envelope_from_event(
         state = kind.split(".", 1)[1]
         if state == "claimed":
             return {"kind": "run_state", "run_id": run_id, "state": "running"}
+        if state == "cancelling":
+            # Non-terminal fence marker (PR-2B).  The durable event is
+            # emitted by ``request_cancel_fence`` immediately on cancel
+            # ACK; replay surfaces it so a reconnecting client renders the
+            # truthful ``cancelling`` state instead of a stale ``running``.
+            envelope = {"kind": "run_state", "run_id": run_id, "state": "cancelling"}
+            if isinstance(payload, dict) and payload.get("requested_at_ms"):
+                envelope["requested_at_ms"] = payload["requested_at_ms"]
+            return envelope
         if state in TERMINAL_STATES:
             envelope: dict[str, Any] = {"kind": "run_state", "run_id": run_id, "state": state}
             if isinstance(payload, dict) and payload.get("assistant_message_id"):
@@ -564,6 +575,31 @@ def _envelope_from_event(
         envelope = {"kind": kind, "run_id": run_id}
         if isinstance(payload, dict):
             envelope.update(payload)
+        return envelope
+
+    if kind.startswith("guidance."):
+        # PR-2D — guidance lifecycle events (queued / delivered_to_runtime /
+        # applied_to_model_step / expired / superseded / undelivered).  The
+        # durable ``state`` column on ``run_guidance_queue`` is the source of
+        # truth; these envelopes carry the same data so a connected client can
+        # surface a hyperprecise "operator guidance reached the model" tick
+        # without polling the queue table.  Mirrors the ``run.cancelling``
+        # family introduced by PR-2B.
+        envelope = {"kind": "guidance_lifecycle", "run_id": run_id}
+        if isinstance(payload, dict):
+            envelope["state"] = str(payload.get("state") or kind.split(".", 1)[1])
+            envelope["guidance_id"] = str(payload.get("guidance_id") or "")
+            if payload.get("applied_message_id"):
+                envelope["applied_message_id"] = str(payload["applied_message_id"])
+            if payload.get("superseded_by_id"):
+                envelope["superseded_by_id"] = str(payload["superseded_by_id"])
+            if payload.get("delivered_at_step") is not None:
+                envelope["delivered_at_step"] = int(payload["delivered_at_step"])
+            if payload.get("actor_id"):
+                envelope["actor_id"] = str(payload["actor_id"])
+        else:
+            envelope["state"] = kind.split(".", 1)[1]
+            envelope["guidance_id"] = ""
         return envelope
 
     return None
@@ -1023,18 +1059,34 @@ async def _stream_chat(
                     finalized = True
                     break
 
+            # PR-2B cancel fence: between supervisor steps, observe the durable
+            # ``cancel_requested_at_ms`` marker set by ``POST /api/chat/{run_id}
+            # /cancel``.  When the operator (or a recovery probe) requested
+            # cancellation, stop iterating the graph and finalise the run as
+            # ``cancelled``.  A pending HITL request for this run was already
+            # atomically rejected by ``request_cancel_fence``, so a
+            # ``waiting_for_human`` run that gets cancelled here will not be
+            # resumed by a later approval.
+            if observe_cancel_fence(store, run_id=run_id):
+                log.info("chat: cancel fence observed run_id=%s", run_id)
+                final_state = "cancelled"
+                break
+
             if await request.is_disconnected():
                 log.info("chat: client disconnected, aborting run_id=%s", run_id)
                 break
 
         if not finalized and not paused_for_human and not lease_lost.is_set():
+            cancelled_by_fence = final_state == "cancelled"
             final_content = "".join(assistant_buffer) or "(no response)"
+            outcome = "cancelled" if cancelled_by_fence else "completed"
+            terminal_state = "cancelled" if cancelled_by_fence else "completed"
             _finalize(
                 store,
                 run_id=run_id,
                 lease_token=lease_token,
                 content=final_content,
-                outcome="completed",
+                outcome=outcome,
                 conversation_id=conversation_id,
             )
             sequence += 1
@@ -1042,13 +1094,14 @@ async def _stream_chat(
                 {
                     "kind": "run_state",
                     "run_id": run_id,
-                    "state": "completed",
+                    "state": terminal_state,
                     "content": final_content,
+                    "reason": "cancel_fence" if cancelled_by_fence else None,
                 },
                 sequence=sequence,
             )
             finalized = True
-            final_state = "completed"
+            final_state = terminal_state
     except Exception as exc:  # noqa: BLE001 - durable failure boundary
         log.exception("chat: supervisor run failed run_id=%s", run_id)
         final_error = str(exc)
