@@ -222,6 +222,42 @@ def _chunk_message(text: str, *, size: int = DISCORD_MAX_MESSAGE_CHARS) -> list[
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
+def _extract_tool_summary(output_raw: str) -> str:
+    """Extract a clean human-readable summary from a Munin tool output.
+
+    Munin tools return JSON like ``{"ok": true, "summary": "...", "data": {...}}``.
+    Instead of dumping the raw JSON truncated mid-string, parse it and show
+    the ``summary`` field, with a fallback to a short truncated string.
+    """
+    if not output_raw:
+        return "done"
+    try:
+        parsed = json.loads(output_raw)
+        if isinstance(parsed, dict):
+            summary = str(parsed.get("summary") or "").strip()
+            if summary:
+                return summary[:200]
+            # Fall back to ok status if no summary
+            ok = parsed.get("ok")
+            if ok is True:
+                return "ok"
+            if ok is False:
+                err = str(parsed.get("error") or "failed")[:200]
+                return f"failed: {err}"
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Not JSON — truncate cleanly at a word boundary, not mid-token
+    text = output_raw.strip()
+    if len(text) <= 120:
+        return text
+    cut = text[:120]
+    # Try to cut at a space, not mid-word
+    last_space = cut.rfind(" ")
+    if last_space > 80:
+        cut = cut[:last_space]
+    return cut + "…"
+
+
 class _RateLimitedPoster:
     """Spaced sender so separate posts respect the 5 msg / 5 s channel cap."""
 
@@ -283,9 +319,10 @@ class _RunSession:
         if line:
             self.tools.append(line)
             self._dirty = True
-            # Post each completed tool as its own short message — the
-            # operator sees the operation as it happens, not buried.
-            asyncio.create_task(self._poster.post(f"🔧 {line[:DISCORD_TOOL_POST_CHARS]}"))
+            # Tool events stay in the editable status message tail —
+            # NO separate posts (avoids duplicating each tool in the
+            # channel). The status message is edited every
+            # DISCORD_FLUSH_INTERVAL to show the latest activity.
 
     def _render_status(self) -> str:
         body = self.reasoning_buffer.strip()
@@ -296,7 +333,7 @@ class _RunSession:
             parts.append(body)
         if self.tools:
             tail = self.tools[-DISCORD_TOOL_TAIL:]
-            parts.append("**Tools**\n" + "\n".join(tail))
+            parts.append("**Activity**\n" + "\n".join(tail))
         text = "\n\n".join(parts) if parts else "_working..._"
         return text[:DISCORD_MAX_MESSAGE_CHARS]
 
@@ -1116,19 +1153,19 @@ async def _stream_run(
                 )
                 break
             elif kind == "tool_intent":
-                session.add_tool_event(
-                    f"calling `{envelope.get('tool_name') or 'unknown'}`"
-                )
+                tname = envelope.get('tool_name') or 'unknown'
+                session.add_tool_event(f"→ `{tname}`")
             elif kind == "tool_result":
-                out = str(envelope.get("output") or "")[:140]
-                session.add_tool_event(
-                    f"ok `{envelope.get('tool_name') or 'unknown'}` — {out}"
-                )
+                tname = envelope.get('tool_name') or 'unknown'
+                out = str(envelope.get("output") or "")
+                # Extract the summary field from Munin tool JSON output
+                # instead of dumping raw JSON truncated mid-string.
+                summary = _extract_tool_summary(out)
+                session.add_tool_event(f"✓ `{tname}` — {summary}")
             elif kind == "tool_failed":
-                err = str(envelope.get("error") or "")[:140]
-                session.add_tool_event(
-                    f"failed `{envelope.get('tool_name') or 'unknown'}` — {err}"
-                )
+                tname = envelope.get('tool_name') or 'unknown'
+                err = str(envelope.get("error") or "error")[:200]
+                session.add_tool_event(f"✗ `{tname}` — {err}")
             elif kind == "run_state":
                 state = str(envelope.get("state") or "")
                 if state in {"completed", "failed", "cancelled", "interrupted"}:
