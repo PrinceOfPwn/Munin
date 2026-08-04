@@ -447,36 +447,33 @@ async def supervisor_runner(
         if resume_decisions is not None:
             from langgraph.types import Command  # noqa: PLC0415
 
-            # Hybrid resume: deepagents checkpoint + opencode-style history
-            # reload. The checkpointer preserves the graph state (all prior
-            # messages, the interrupted AIMessage with tool_calls, etc.).
-            # But weaker models (MiMo V2.5) lose thread after an interrupt
-            # because there's no new HumanMessage telling them to continue.
+            # Deep Agents HITL resume: the checkpointer preserves the full
+            # graph state (all prior messages, the interrupted AIMessage with
+            # tool_calls, etc.). ``Command(resume={"decisions": [...]})`` loads
+            # that checkpoint and the HITL middleware's ``after_model`` hook
+            # replays the interrupt with the operator's decisions, muting the
+            # approved tool_calls (or removing rejected ones) and routing to
+            # the tools node. After tools execute, the graph loops back to
+            # ``before_model`` where ``OperatorGuidanceMiddleware`` drains any
+            # guidance the approval path enqueued (e.g. "Operator approved...
+            # your original objective was X... proceed now") and injects it
+            # as a ``HumanMessage`` — that is the opencode-style "projected
+            # history reload" but done INSIDE the graph at the correct point
+            # in the message flow, not via ``Command(update=...)`` which would
+            # corrupt the checkpoint's channel versions and trigger the model
+            # node with stale task_ids (causing the run to terminate silently
+            # after the model responds to the injected HumanMessage without
+            # ever processing the approved tool_calls).
             #
-            # opencode solves this by reloading the "projected history" after
-            # tool settlement. We do the same via Command(resume=..., update=...)
-            # which BOTH resumes the interrupt AND injects a continuation
-            # HumanMessage into the graph state. The model sees:
-            #   [full checkpoint history] + [ToolMessage(result)] + [HumanMessage("continue")]
-            # instead of just the checkpoint with no new directive.
-            update_messages: list[Any] = []
-            if prompt and prompt.strip():
-                update_messages.append(
-                    HumanMessage(
-                        content=(
-                            f"[System] Operator approved the pending tool execution. "
-                            f"Your original objective: \"{prompt.strip()[:800]}\". "
-                            f"Resume the approved action, process its result, and "
-                            f"continue the workflow toward that objective. "
-                            f"Do NOT ask the operator to repeat or rephrase — proceed now."
-                        ),
-                        name="operator",
-                    )
-                )
-            input_value = Command(
-                resume={"decisions": resume_decisions},
-                update={"messages": update_messages} if update_messages else None,
-            )
+            # DO NOT add ``update={"messages": [HumanMessage(...)]}`` here.
+            # The continuation directive must be enqueued via
+            # ``store.enqueue_guidance(run_id=..., body=...)`` by the caller
+            # (chat.py resolve endpoint, discord_adapter._resume_approved_run,
+            # or chat.recover_persisted_chat_runs) so the
+            # ``OperatorGuidanceMiddleware`` injects it at ``before_model``
+            # AFTER the approved tools have run and produced ``ToolMessage``
+            # results — the correct point in the message flow.
+            input_value = Command(resume={"decisions": resume_decisions})
         elif not resume_from_checkpoint:
             messages = _history_to_messages(conversation_history)
             messages.append(HumanMessage(content=prompt))

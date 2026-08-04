@@ -533,12 +533,26 @@ async def _resume_approved_run(
         log.warning("discord: resume lookup failed run_id=%s: %s", run_id, exc)
         return
     conversation_id = str(run.get("conversation_id") or "")
+    run_state = str(run.get("state") or "")
     try:
         lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
     except Exception as exc:  # noqa: BLE001
         log.warning("discord: resume claim failed run_id=%s: %s", run_id, exc)
-        with contextlib.suppress(Exception):
-            await message.reply(f"[failed] could not claim run for resume: {exc}")
+        # If the run is already running (e.g. a prior approval on the same
+        # run is already being processed), don't surface a scary [failed]
+        # error to the operator — the decision is durable in the store and
+        # will be picked up on the next interrupt cycle. Only surface a real
+        # failure if the run is in a terminal state (completed/failed/
+        # cancelled) where the approval is genuinely lost.
+        if run_state in {"running", "waiting_for_human", "queued"}:
+            with contextlib.suppress(Exception):
+                await message.reply(
+                    f"ℹ️ Run `{run_id}` is already `{run_state}` — "
+                    f"decision recorded and will be applied on the next cycle."
+                )
+        else:
+            with contextlib.suppress(Exception):
+                await message.reply(f"[failed] could not claim run for resume: {exc}")
         return
     # Fetch the original prompt + conversation history so the guidance
     # message can remind the model WHAT it was doing before the interrupt.

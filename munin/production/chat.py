@@ -1189,6 +1189,36 @@ async def recover_persisted_chat_runs(*, store: Any, shared_state: Any) -> list[
         if recovery_goal and goal_id and str(recovery_goal.get("id")) != str(goal_id):
             recovery_goal = None
 
+        # When recovering a HITL-approved run after a process restart, inject
+        # a continuation directive via the durable guidance queue so the
+        # OperatorGuidanceMiddleware drains it at the next ``before_model``
+        # hook (AFTER the approved tools execute). This is the opencode-style
+        # "projected history reload" but done inside the graph at the correct
+        # point — NOT via Command(update=...) which would corrupt the
+        # checkpoint's channel versions (see runtime_adapter.py comment).
+        if resume_decisions is not None:
+            recovery_prompt = str(execution.get("message") or "")
+            guidance_body = (
+                "Operator approved the pending tool execution. "
+                "Resume the approved action, incorporate its result, "
+                "and continue the workflow toward the original objective."
+            )
+            if recovery_prompt:
+                guidance_body = (
+                    f"Operator approved the pending tool execution. "
+                    f"Your original objective was: \"{recovery_prompt[:500]}\". "
+                    f"Resume the approved action, incorporate its result, "
+                    f"and continue the workflow toward that objective. "
+                    f"Do NOT ask the operator to repeat the objective — proceed now."
+                )
+            with suppress(Exception):
+                store.enqueue_guidance(
+                    run_id=run_id,
+                    actor_id=str(candidate.get("actor_id") or ""),
+                    actor_username="recovery",
+                    body=guidance_body,
+                )
+
         _launch_chat_run(
             store=store,
             shared_state=shared_state,

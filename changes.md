@@ -41,6 +41,89 @@ global (opt-in, HITL-gated via the LLM-visible `scope` parameter).
 `active_tasks` stay deliberately global. When contextvars are empty the
 behavior is identical to before (legacy global namespace).
 
+## 2026-08-04 — HITL resume: remove Command(update=...) corruption + graceful double-approve + recovery guidance
+
+### Problem (discovered during live Discord testing of PR #52)
+
+The previous "hybrid resume" fix (`f686766`) added
+`Command(resume={"decisions": [...]}, update={"messages": [HumanMessage(...)]})`
+to inject a continuation directive alongside the HITL resume. Live testing
+on the Discord adapter (run `30933750534`) revealed this **corrupts the
+LangGraph checkpoint**:
+
+1. `Command.update` writes to the `messages` channel via the delta reducer,
+   which **increments `channel_versions["messages"]`**.
+2. `prepare_next_tasks` sees the updated channel and **triggers the `model`
+   node** with new task_ids (step N+2) that don't match the checkpoint's
+   pending_writes (step N/N+1).
+3. `_reapply_writes_to_succeeded_nodes` fails to restore writes because the
+   task_ids don't match → all triggered tasks have empty `writes`.
+4. The runner executes `model` with corrupted messages:
+   `[..., AIMessage(tool_calls=[approved]), HumanMessage("continue")]`
+   — **no `ToolMessage` in between**.
+5. The model (MiMo V2.5) responds to the `HumanMessage` directly without
+   processing the pending tool_calls → produces an `AIMessage` without
+   tool_calls → the conditional edge routes to `exit_node` → **the run
+   terminates silently**.
+6. The operator sees `[completed] [System] Operator approved...` (the
+   injected HumanMessage content) as the final output, and the bot goes
+   silent.
+
+Two additional bugs surfaced during the same live session:
+
+- **Double-approve claim failure**: when two HITL requests on the same run
+  are approved in sequence, the second `_claim_direct` fails because the
+  run is already `running`. The adapter posted a scary `[failed] could not
+  claim run for resume` error to the operator.
+- **Recovery path missing guidance**: `recover_persisted_chat_runs` (process
+  restart with a pending HITL approval) launched the run with
+  `resume_decisions` but never enqueued guidance, so the model had no
+  continuation directive after the approved tools ran.
+
+### Fix
+
+**`munin/core/runtime_adapter.py`**: reverted `Command(resume=..., update=...)`
+back to bare `Command(resume={"decisions": [...]})`. The continuation
+directive is NOT injected via `Command.update` — it is enqueued by the
+caller via `store.enqueue_guidance(run_id=..., body=...)` and drained by
+`OperatorGuidanceMiddleware` at the `before_model` hook, **AFTER** the
+approved tools execute and produce `ToolMessage` results. This is the
+opencode-style "projected history reload" done correctly: inside the graph
+at the correct point in the message flow, not via `Command.update` which
+corrupts the checkpoint's channel versions.
+
+**`munin/production/discord_adapter.py`**: `_resume_approved_run` now
+checks `run.state` before reporting a claim failure. If the run is
+`running`/`waiting_for_human`/`queued` (a prior approval is already being
+processed), the operator gets a graceful `ℹ️ Run is already running —
+decision recorded and will be applied on the next cycle` instead of a
+scary `[failed]` error. Only terminal states (completed/failed/cancelled)
+surface the real error.
+
+**`munin/production/chat.py`**: `recover_persisted_chat_runs` now enqueues
+guidance when `resume_decisions is not None`, mirroring what the HTTP
+resolve endpoint and Discord adapter already do. The guidance body
+includes the original objective text fetched from `run_execution_context`,
+so a process-restart recovery also gets the continuation directive.
+
+### Validation
+
+- `py_compile` clean on all three files.
+- `tests/test_discord_adapter.py` + `test_chat_recovery.py` +
+  `test_conversations.py`: 32 passed, 1 skipped.
+- `ruff check --select F`: clean.
+- Both recovery tests (`test_runtime_checkpoint_recovery_uses_no_new_human_message`,
+  `test_resolved_hitl_recovery_uses_persisted_command_not_fresh_prompt`)
+  still pass — the `Command(resume=...)` without `update` is exactly what
+  they assert.
+
+### Files
+
+- `munin/core/runtime_adapter.py` — reverted to `Command(resume=...)` only;
+  expanded comment explaining why `update` must NOT be used.
+- `munin/production/discord_adapter.py` — graceful double-approve handling.
+- `munin/production/chat.py` — recovery path enqueues guidance.
+
 ## 2026-08-04 — HITL resume amnesia fix (hybrid: deepagents checkpoint + opencode history reload) + compaction 170K
 
 ### Problem
