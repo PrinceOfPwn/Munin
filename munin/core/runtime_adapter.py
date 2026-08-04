@@ -476,7 +476,14 @@ async def supervisor_runner(
             input_value = Command(resume={"decisions": resume_decisions})
         elif not resume_from_checkpoint:
             messages = _history_to_messages(conversation_history)
-            messages.append(HumanMessage(content=prompt))
+            # Avoid duplicating the prompt: ``run_execution_context`` already
+            # includes the current run's ``user_message`` in the history it
+            # returns. Appending it again would double the operator's
+            # instruction in the model's context, which confuses weaker
+            # models (MiMo V2.5) into regressing to the previous run's
+            # output instead of processing the new objective.
+            if not messages or getattr(messages[-1], "content", None) != prompt:
+                messages.append(HumanMessage(content=prompt))
             input_value = {"messages": messages}
 
         graph_finished = asyncio.Event()

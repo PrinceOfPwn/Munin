@@ -473,6 +473,7 @@ async def _cmd_approvals(*, store: Any, actor: dict[str, Any], message: Any) -> 
 async def _cmd_resolve(
     *,
     store: Any,
+    shared_state: Any,
     actor: dict[str, Any],
     message: Any,
     request_id: str,
@@ -514,6 +515,7 @@ async def _cmd_resolve(
         # Resume the checkpointed graph exactly like the web path.
         await _resume_approved_run(
             store=store,
+            shared_state=shared_state,
             message=message,
             run_id=str(result["run_id"]),
             decision_count=int(result.get("decision_count") or 1),
@@ -524,7 +526,7 @@ async def _cmd_resolve(
 
 
 async def _resume_approved_run(
-    *, store: Any, message: Any, run_id: str, decision_count: int
+    *, store: Any, shared_state: Any, message: Any, run_id: str, decision_count: int
 ) -> None:
     """Claim and resume a run whose HITL request was just approved."""
     try:
@@ -587,7 +589,7 @@ async def _resume_approved_run(
     await _stream_run(
         message=message,
         store=store,
-        shared_state=None,
+        shared_state=shared_state,
         settings=None,
         run_id=run_id,
         conversation_id=conversation_id,
@@ -873,10 +875,10 @@ async def _handle_command(
         await _cmd_approvals(store=store, actor=actor, message=message)
         return
     if name == "approve":
-        await _cmd_resolve(store=store, actor=actor, message=message, request_id=args[0] if args else "", choice="approve")
+        await _cmd_resolve(store=store, shared_state=shared_state, actor=actor, message=message, request_id=args[0] if args else "", choice="approve")
         return
     if name == "reject":
-        await _cmd_resolve(store=store, actor=actor, message=message, request_id=args[0] if args else "", choice="reject")
+        await _cmd_resolve(store=store, shared_state=shared_state, actor=actor, message=message, request_id=args[0] if args else "", choice="reject")
         return
     if name == "cancel":
         await _cmd_cancel(store=store, actor=actor, message=message, run_id=args[0] if args else "")
