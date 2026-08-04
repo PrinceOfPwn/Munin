@@ -561,8 +561,14 @@ class SharedStateStore:
         conversation_id: str = "",
         actor_id: str = "",
     ) -> list[dict[str, Any]]:
-        query = "SELECT * FROM shared_intel WHERE (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
-        params: list[Any] = [str(conversation_id or ""), str(actor_id or "")]
+        conv = str(conversation_id or "")
+        actor = str(actor_id or "")
+        if conv:
+            query = "SELECT * FROM shared_intel WHERE (conversation_id=? OR (conversation_id='' AND actor_id=?))"
+            params: list[Any] = [conv, actor]
+        else:
+            query = "SELECT * FROM shared_intel WHERE 1=1"
+            params = []
         if target_ip.strip():
             query += " AND target_ip = ?"
             params.append(target_ip.strip())
@@ -1389,8 +1395,14 @@ class SharedStateStore:
             return int(cursor.lastrowid)
 
     def episodic_query(self, *, agent: str = "", action: str = "", limit: int = 100, conversation_id: str = "", actor_id: str = "") -> list[dict[str, Any]]:
-        query = "SELECT * FROM episodic WHERE (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
-        params: list[Any] = [str(conversation_id or ""), str(actor_id or "")]
+        conv = str(conversation_id or "")
+        actor = str(actor_id or "")
+        if conv:
+            query = "SELECT * FROM episodic WHERE (conversation_id=? OR (conversation_id='' AND actor_id=?))"
+            params: list[Any] = [conv, actor]
+        else:
+            query = "SELECT * FROM episodic WHERE 1=1"
+            params = []
         if agent.strip():
             query += " AND agent = ?"
             params.append(agent.strip())
@@ -1434,8 +1446,15 @@ class SharedStateStore:
         Callers pass the largest ``id`` they've seen; they get everything
         newer, oldest first, so append-only concatenation works.
         """
-        query = "SELECT * FROM episodic WHERE id > ? AND (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
-        params: list[Any] = [max(0, _coerce_int(since_id, 0)), str(conversation_id or ""), str(actor_id or "")]
+        query = "SELECT * FROM episodic WHERE id > ?"
+        conv = str(conversation_id or "")
+        actor = str(actor_id or "")
+        if conv:
+            query += " AND (conversation_id=? OR (conversation_id='' AND actor_id=?))"
+            params: list[Any] = [max(0, _coerce_int(since_id, 0)), conv, actor]
+        else:
+            query += " AND 1=1"
+            params = [max(0, _coerce_int(since_id, 0))]
         if agent.strip():
             query += " AND agent = ?"
             params.append(agent.strip())
@@ -1470,16 +1489,33 @@ class SharedStateStore:
         return {"key": key.strip(), "updated_at": now}
 
     def semantic_recall(self, key: str, *, conversation_id: str = "", actor_id: str = "") -> Any:
+        conv = str(conversation_id or "")
+        actor = str(actor_id or "")
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT value_json FROM semantic WHERE key = ? AND (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))",
-                (key.strip(), str(conversation_id or ""), str(actor_id or "")),
-            ).fetchone()
+            if conv:
+                # Live conversation: this conversation's rows + this
+                # user's cross-conversation memories. NOT legacy global.
+                row = conn.execute(
+                    "SELECT value_json FROM semantic WHERE key = ? AND (conversation_id=? OR (conversation_id='' AND actor_id=?))",
+                    (key.strip(), conv, actor),
+                ).fetchone()
+            else:
+                # No conversation context (CI/stdio): legacy behavior.
+                row = conn.execute(
+                    "SELECT value_json FROM semantic WHERE key = ?",
+                    (key.strip(),),
+                ).fetchone()
         return _normalize_jsonish(row["value_json"]) if row else None
 
     def semantic_list(self, *, prefix: str = "", limit: int = 200, conversation_id: str = "", actor_id: str = "") -> list[dict[str, Any]]:
-        query = "SELECT * FROM semantic WHERE (conversation_id=? OR (conversation_id='' AND (actor_id=? OR actor_id='')))"
-        params: list[Any] = [str(conversation_id or ""), str(actor_id or "")]
+        conv = str(conversation_id or "")
+        actor = str(actor_id or "")
+        if conv:
+            query = "SELECT * FROM semantic WHERE (conversation_id=? OR (conversation_id='' AND actor_id=?))"
+            params: list[Any] = [conv, actor]
+        else:
+            query = "SELECT * FROM semantic WHERE 1=1"
+            params = []
         if prefix.strip():
             query += " AND key LIKE ?"
             params.append(f"{prefix.strip()}%")
