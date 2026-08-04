@@ -1021,7 +1021,7 @@ async def _stream_run(
     renew = getattr(store, "renew_run_lease", None)
     if callable(renew):
         try:
-            from .chat import _renew_chat_lease, CHAT_LEASE_SECONDS, CHAT_LEASE_RENEW_SECONDS  # noqa: PLC0415
+            from .chat import _renew_chat_lease  # noqa: PLC0415
             lease_heartbeat_stop = asyncio.Event()
             lease_lost = asyncio.Event()
             lease_heartbeat = asyncio.create_task(
