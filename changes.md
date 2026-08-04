@@ -1,4 +1,4 @@
-﻿# Changes
+# Changes
 
 Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
