@@ -1,5 +1,5 @@
-# tags: [runs, runtime, core, cancel-fence, api, asgi, run.cancelling, cancel-endpoint, request_cancel_fence, FenceProbe]
-"""Durable run-level API surface (cancel, retry, lifecycle probes).
+# tags: [runs, runtime, core, cancel-fence, api, asgi, run.cancelling, cancel-endpoint, request_cancel_fence, FenceProbe, PR-6B, PR-6C, run-detail-readmodel, run-artifacts]
+"""Durable run-level API surface (cancel, retry, lifecycle probes, read-model).
 
 PR-2A of Munin Issue #32 introduces a dedicated ``POST /api/chat/{run_id}/cancel``
 endpoint.  The handler lives here so :mod:`munin.production.chat` can keep
@@ -13,6 +13,13 @@ it only records the ``cancel_requested_at_ms`` fence marker (via
 The detached supervisor observes the fence between steps and performs the
 terminal transition (see :func:`observe_cancel_fence` + the executor loop in
 :mod:`munin.production.chat`).
+
+PR-6 (Issue #32) adds the read-only run surface alongside the mutating
+cancel endpoint:
+
+* ``GET /api/runs/{run_id}/artifacts`` — rich artifact metadata for one run.
+* ``GET /api/runs/{run_id}/detail`` — deterministic composite read-model
+  (ten fixed keys; pure SQL, no provider calls, byte-identical on replay).
 """
 from __future__ import annotations
 
@@ -127,6 +134,54 @@ def register_run_routes(
 
     routes.append(
         Route("/api/chat/{run_id}/cancel", cancel_run, methods=["POST"])
+    )
+
+    async def run_artifacts(request: Request) -> Response:
+        """PR-6B — ``GET /api/runs/{run_id}/artifacts``.
+
+        Rich artifact metadata for one run (oldest first); content bodies are
+        served only by ``GET /api/artifacts/{artifact_id}``.
+        """
+        try:
+            current = await actor_dependency(request)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        run_id = str(request.path_params["run_id"])
+        try:
+            result = store.list_artifacts_for_run(actor_id=current["id"], run_id=run_id)
+        except KeyError:
+            return error_response(404, "not_found", "run not found")
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        return JSONResponse({"ok": True, "data": result})
+
+    async def run_detail(request: Request) -> Response:
+        """PR-6C — ``GET /api/runs/{run_id}/detail``.
+
+        Deterministic composite read-model with EXACTLY the ten contract keys
+        (run_id, state, aggregated_tools, activities, commands, agents,
+        approvals, guidance, artifacts, summaries).  Pure store reads — never
+        invokes the AI provider and never regenerates history, so repeated
+        GETs are byte-identical.
+        """
+        try:
+            current = await actor_dependency(request)
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        run_id = str(request.path_params["run_id"])
+        try:
+            result = store.get_run_detail_readmodel(actor_id=current["id"], run_id=run_id)
+        except KeyError:
+            return error_response(404, "not_found", "run not found")
+        except PermissionError as exc:
+            return error_response(403, "forbidden", str(exc))
+        return JSONResponse({"ok": True, "data": result})
+
+    routes.append(
+        Route("/api/runs/{run_id}/artifacts", run_artifacts, methods=["GET"])
+    )
+    routes.append(
+        Route("/api/runs/{run_id}/detail", run_detail, methods=["GET"])
     )
 
 

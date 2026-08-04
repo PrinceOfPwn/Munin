@@ -9,18 +9,20 @@ new AI SDK v5 client (``AppShell`` + ``AgentConsole``) actually needs:
 
 * Auth: session/login/logout/bootstrap + CSRF + password recovery.
 * Conversations: list, create, GET/PATCH/DELETE aggregate, export.
-* Artifacts: read + inline download.
+* Artifacts: read + inline download, conversation listing (PR-6B).
 * Provider profiles: encrypted HTTPS OpenAI-compatible BYOK metadata and
   active-profile selection; plaintext keys never leave the server boundary.
+* Runs: read-only composite detail + run artifacts (PR-6, wired by
+  :mod:`munin.production.runs`) — pure deterministic reads, no provider.
 * ``POST /api/chat`` and ``POST /api/chat/{run_id}/guidance`` (wired by
   :mod:`munin.production.chat`, which owns the supervisor_runner → SSE
   bridge).
 
-Everything else — ``/api/runs/**``, ``/api/branches/**``, HITL resolve,
-collaborators/notes/presence/broadcasts, agents catalog,
-page-agent actions, dev simulate-forge — was deleted in Fase 2 and will
-either be reintroduced as an AI-SDK data-part flow (HITL resolve, forthcoming)
-or dropped for good.  See the migration kill-list for the full inventory.
+Everything else — legacy branches, HITL resolve, collaborators/notes/presence/
+broadcasts, agents catalog, page-agent actions, dev simulate-forge — was
+deleted in Fase 2 and will either be reintroduced as an AI-SDK data-part flow
+(HITL resolve, forthcoming) or dropped for good.  See the migration kill-list
+for the full inventory.
 """
 
 from __future__ import annotations
@@ -358,6 +360,25 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         except KeyError:
             return _error(404, "not_found", "artifact not found")
 
+    async def conversation_artifacts(request: Request) -> Response:
+        """PR-6B — ``GET /api/chat/{conversation_id}/artifacts``.
+
+        Rich metadata (renderer, version, provenance, preview/download URLs)
+        for every artifact in a conversation, newest first.  Content bodies
+        are served only by ``GET /api/artifacts/{artifact_id}``.
+        """
+        try:
+            current = await actor(request)
+            result = store.list_artifacts_for_conversation(
+                actor_id=current["id"],
+                conversation_id=request.path_params["conversation_id"],
+            )
+            return JSONResponse({"ok": True, "data": result})
+        except PermissionError as exc:
+            return _error(403, "forbidden", str(exc))
+        except KeyError:
+            return _error(404, "not_found", "conversation not found")
+
     routes = [
         Route("/health", health),
         # ── auth ────────────────────────────────────────────────────
@@ -375,6 +396,7 @@ def create_http_app(store: Any, *, shared_state: Any = None) -> Starlette:
         Route("/api/provider-profiles/{profile_id}/activate", provider_profile_activate, methods=["POST"]),
         # ── artifacts (read-only; writes come from run finalisation) ─
         Route("/api/artifacts/{artifact_id}", artifact, methods=["GET"]),
+        Route("/api/chat/{conversation_id}/artifacts", conversation_artifacts, methods=["GET"]),
     ]
 
     # Fase 1a (issue #9): AI SDK v5 chat endpoint that drives supervisor_runner

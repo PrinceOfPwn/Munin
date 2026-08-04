@@ -358,12 +358,28 @@ _FASE3_DDL: tuple[str, ...] = (
     )""",
     """CREATE INDEX IF NOT EXISTS idx_timers_due
         ON timers(state, due_at_ms, lease_expires_at_ms)""",
+    # PR-6 (Issue #32) — artifacts read-model: listing by conversation must be
+    # served off a composite (conversation_id, created_at_ms) index instead of
+    # scanning every artifact row.  Idempotent like the rest of this block.
+    """CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_conv_created
+        ON conversation_artifacts(conversation_id, created_at_ms)""",
 )
 
 # Optional column adds for Fase 3; guarded via PRAGMA at boot.
 _FASE3_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("agent_runs", "mode", "TEXT"),
     ("agent_runs", "goal_id", "TEXT"),
+    # PR-6 (Issue #32) — rich artifact metadata.  ``conversation_artifacts``
+    # already carries ``language`` and ``run_id`` (Fase 1 / Plan 18), so only
+    # the renderer contract fields are added.  ``version`` defaults to 1 so
+    # pre-PR-6 rows (extracted by ``complete_run``) stay valid under the
+    # deterministic read-model without a backfill.  Idempotent PRAGMA-guarded
+    # ADD COLUMN like the rest of this tuple.
+    ("conversation_artifacts", "renderer", "TEXT"),
+    ("conversation_artifacts", "version", "INTEGER NOT NULL DEFAULT 1"),
+    ("conversation_artifacts", "provenance", "TEXT"),
+    ("conversation_artifacts", "preview_url", "TEXT"),
+    ("conversation_artifacts", "download_url", "TEXT"),
 )
 
 _PLAN18_DDL: tuple[str, ...] = (
@@ -1151,21 +1167,21 @@ class ProductionStore:
             return True
 
     @staticmethod
-    def _insert_artifact(conn: Any, *, conversation_id: str, message_id: str | None, run_id: str | None, filename: str, media_type: str, language: str, content: str, now: int | None = None) -> dict[str, Any]:
+    def _insert_artifact(conn: Any, *, conversation_id: str, message_id: str | None, run_id: str | None, filename: str, media_type: str, language: str, content: str, now: int | None = None, renderer: str | None = None, version: int = 1, provenance: str | None = None, preview_url: str | None = None, download_url: str | None = None) -> dict[str, Any]:
         safe_content = redact_text(content)
         if not safe_content or len(safe_content.encode()) > 1_000_000:
             raise ValueError("artifact content is empty or exceeds maximum size")
-        artifact = {"id": _id("artifact"), "conversation_id": conversation_id, "message_id": message_id, "run_id": run_id, "filename": re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:180] or "artifact.txt", "media_type": media_type[:120] or "text/plain", "language": language[:48] or "text", "content": safe_content, "content_hash": hashlib.sha256(safe_content.encode()).hexdigest(), "size_bytes": len(safe_content.encode()), "created_at_ms": now or _now_ms()}
+        artifact = {"id": _id("artifact"), "conversation_id": conversation_id, "message_id": message_id, "run_id": run_id, "filename": re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:180] or "artifact.txt", "media_type": media_type[:120] or "text/plain", "language": language[:48] or "text", "content": safe_content, "content_hash": hashlib.sha256(safe_content.encode()).hexdigest(), "size_bytes": len(safe_content.encode()), "created_at_ms": now or _now_ms(), "renderer": renderer[:80] if renderer else None, "version": max(1, int(version)), "provenance": provenance[:500] if provenance else None, "preview_url": preview_url[:2_000] if preview_url else None, "download_url": download_url[:2_000] if download_url else None}
         conn.execute(
-            "INSERT INTO conversation_artifacts (id,conversation_id,message_id,run_id,filename,media_type,language,content,content_hash,size_bytes,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (artifact["id"], artifact["conversation_id"], artifact["message_id"], artifact["run_id"], artifact["filename"], artifact["media_type"], artifact["language"], artifact["content"], artifact["content_hash"], artifact["size_bytes"], artifact["created_at_ms"]),
+            "INSERT INTO conversation_artifacts (id,conversation_id,message_id,run_id,filename,media_type,language,content,content_hash,size_bytes,created_at_ms,renderer,version,provenance,preview_url,download_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (artifact["id"], artifact["conversation_id"], artifact["message_id"], artifact["run_id"], artifact["filename"], artifact["media_type"], artifact["language"], artifact["content"], artifact["content_hash"], artifact["size_bytes"], artifact["created_at_ms"], artifact["renderer"], artifact["version"], artifact["provenance"], artifact["preview_url"], artifact["download_url"]),
         )
         return artifact
 
-    def add_artifact(self, *, actor_id: str, conversation_id: str, filename: str, media_type: str, language: str, content: str, message_id: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+    def add_artifact(self, *, actor_id: str, conversation_id: str, filename: str, media_type: str, language: str, content: str, message_id: str | None = None, run_id: str | None = None, renderer: str | None = None, version: int = 1, provenance: str | None = None, preview_url: str | None = None, download_url: str | None = None) -> dict[str, Any]:
         with self._transaction() as conn:
             self._require_participant(conn, actor_id=actor_id, conversation_id=conversation_id)
-            artifact = self._insert_artifact(conn, conversation_id=conversation_id, message_id=message_id, run_id=run_id, filename=filename, media_type=media_type, language=language, content=content)
+            artifact = self._insert_artifact(conn, conversation_id=conversation_id, message_id=message_id, run_id=run_id, filename=filename, media_type=media_type, language=language, content=content, renderer=renderer, version=version, provenance=provenance, preview_url=preview_url, download_url=download_url)
             self._audit(conn, actor_id=actor_id, action="artifact.created", resource_type="artifact", resource_id=artifact["id"], outcome="success", metadata={"content_hash": artifact["content_hash"]})
             return {key: value for key, value in artifact.items() if key != "content"}
 
@@ -1176,6 +1192,209 @@ class ProductionStore:
                 raise KeyError(artifact_id)
             self._require_participant(conn, actor_id=actor_id, conversation_id=artifact["conversation_id"])
             return _row(artifact)
+
+    def list_artifacts_for_conversation(self, *, actor_id: str, conversation_id: str) -> list[dict[str, Any]]:
+        """PR-6 — rich artifact metadata for one conversation, chronological.
+
+        Deterministic (``created_at_ms, id`` ascending, per the PR-6B card),
+        read-only, no provider calls.  ``content`` is intentionally omitted —
+        the body is served only by ``GET /api/artifacts/{artifact_id}``.
+        """
+        with self._read_only() as conn:
+            conversation = conn.execute(
+                "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+            ).fetchone()
+            if not conversation:
+                raise KeyError(conversation_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=conversation_id)
+            rows = conn.execute(
+                "SELECT id,message_id,run_id,filename,media_type,language,renderer,version,"
+                "provenance,preview_url,download_url,content_hash,size_bytes,created_at_ms "
+                "FROM conversation_artifacts WHERE conversation_id=? "
+                "ORDER BY created_at_ms ASC,id ASC",
+                (conversation_id,),
+            ).fetchall()
+            return [_row(row) for row in rows]
+
+    def list_artifacts_for_run(self, *, actor_id: str, run_id: str) -> list[dict[str, Any]]:
+        """PR-6 — rich artifact metadata for one run, oldest first.
+
+        Run-level participant check, deterministic ordering, no content body.
+        """
+        with self._read_only() as conn:
+            run = conn.execute("SELECT conversation_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+            rows = conn.execute(
+                "SELECT id,message_id,filename,media_type,language,renderer,version,"
+                "provenance,preview_url,download_url,content_hash,size_bytes,created_at_ms "
+                "FROM conversation_artifacts WHERE run_id=? "
+                "ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            return [_row(row) for row in rows]
+
+    def get_run_detail_readmodel(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        """PR-6C — deterministic composite read-model for ``GET /api/runs/{run_id}/detail``.
+
+        Returns EXACTLY the ten contract keys: ``run_id``, ``state``,
+        ``aggregated_tools``, ``activities``, ``commands``, ``agents``,
+        ``approvals``, ``guidance``, ``artifacts``, ``summaries``.
+
+        Pure SQL over the durable read-model tables — never calls the
+        provider, never regenerates history, and every list is deterministically
+        ordered so repeated GETs produce byte-identical JSON.
+        """
+        with self._read_only() as conn:
+            run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+
+            tool_rows = conn.execute(
+                "SELECT tool_name,state FROM tool_calls WHERE run_id=? ORDER BY started_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            by_tool: dict[str, dict[str, Any]] = {}
+            for row in tool_rows:
+                tool_name = str(row["tool_name"] or "unknown")
+                entry = by_tool.setdefault(tool_name, {"tool_name": tool_name, "call_count": 0, "by_state": {}})
+                entry["call_count"] += 1
+                state = str(row["state"] or "unknown")
+                entry["by_state"][state] = int(entry["by_state"].get(state, 0)) + 1
+            aggregated_tools = sorted(by_tool.values(), key=lambda entry: entry["tool_name"])
+
+            activity_rows = conn.execute(
+                "SELECT id,content,agent_name,created_at_ms FROM reasoning_events "
+                "WHERE run_id=? AND kind='operational_summary' ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            activities = [
+                {"id": row["id"], "content": row["content"], "agent_name": row["agent_name"], "created_at_ms": int(row["created_at_ms"])}
+                for row in activity_rows
+            ]
+
+            output_rows = conn.execute(
+                "SELECT id,payload_json FROM run_events WHERE run_id=? AND kind='tool.output' ORDER BY sequence",
+                (run_id,),
+            ).fetchall()
+            output_by_call: dict[str, dict[str, Any]] = {}
+            for row in output_rows:
+                payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else {}
+                call_id = str(payload.get("tool_call_id") or "")
+                if not call_id:
+                    continue
+                entry = output_by_call.setdefault(call_id, {"tool_call_id": call_id, "tool_name": str(payload.get("tool_name") or "unknown"), "chunk_count": 0, "streams": []})
+                entry["chunk_count"] += 1
+                stream = str(payload.get("stream") or "")
+                if stream and stream not in entry["streams"]:
+                    entry["streams"].append(stream)
+            command_call_ids = sorted(output_by_call)
+            commands: list[dict[str, Any]] = []
+            if command_call_ids:
+                placeholders = ",".join("?" for _ in command_call_ids)
+                command_tool_rows = conn.execute(
+                    f"SELECT id,tool_name,agent_name,state,started_at_ms,finished_at_ms "
+                    f"FROM tool_calls WHERE run_id=? AND id IN ({placeholders}) ORDER BY started_at_ms,id",
+                    [run_id, *command_call_ids],
+                ).fetchall()
+                for row in command_tool_rows:
+                    output = output_by_call[str(row["id"])]
+                    commands.append(
+                        {
+                            "tool_call_id": row["id"],
+                            "tool_name": row["tool_name"],
+                            "agent_name": row["agent_name"],
+                            "state": row["state"],
+                            "started_at_ms": int(row["started_at_ms"]),
+                            "finished_at_ms": row["finished_at_ms"],
+                            "chunk_count": int(output["chunk_count"]),
+                            "streams": output["streams"],
+                        }
+                    )
+
+            subagent_rows = conn.execute(
+                "SELECT id,profile_id,state,objective,started_at_ms,finished_at_ms "
+                "FROM subagent_runs WHERE parent_run_id=? ORDER BY started_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            agents = [
+                {"id": row["id"], "profile_id": row["profile_id"], "state": row["state"], "objective": row["objective"], "started_at_ms": row["started_at_ms"], "finished_at_ms": row["finished_at_ms"]}
+                for row in subagent_rows
+            ]
+
+            request_rows = conn.execute(
+                "SELECT id,action,risk,state,choices_json,response_json,created_at_ms,expires_at_ms,resolved_at_ms "
+                "FROM human_requests WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            approvals: list[dict[str, Any]] = []
+            for row in request_rows:
+                choice = ""
+                try:
+                    response = json.loads(row["response_json"]) if isinstance(row["response_json"], str) else {}
+                except json.JSONDecodeError:
+                    response = {}
+                if isinstance(response, dict):
+                    choice = str(response.get("choice") or "")
+                lowered = choice.strip().lower()
+                resolution = None
+                if row["state"] == "resolved" and lowered:
+                    resolution = "rejected" if lowered.startswith(("reject", "deny", "cancel")) else "approved"
+                approvals.append(
+                    {
+                        "id": row["id"],
+                        "action": row["action"],
+                        "risk": row["risk"],
+                        "state": row["state"],
+                        "choices": json.loads(row["choices_json"]) if isinstance(row["choices_json"], str) else [],
+                        "resolution": resolution,
+                        "created_at_ms": int(row["created_at_ms"]),
+                        "expires_at_ms": int(row["expires_at_ms"]),
+                        "resolved_at_ms": row["resolved_at_ms"],
+                    }
+                )
+
+            guidance_rows = conn.execute(
+                "SELECT id,actor_username,body,state,delivered_at_step,applied_message_id,superseded_by_id,created_at_ms,state_updated_at_ms "
+                "FROM run_guidance_queue WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            guidance = [
+                {"id": row["id"], "actor_username": row["actor_username"], "body": row["body"], "state": row["state"], "delivered_at_step": row["delivered_at_step"], "applied_message_id": row["applied_message_id"], "superseded_by_id": row["superseded_by_id"], "created_at_ms": int(row["created_at_ms"]), "state_updated_at_ms": int(row["state_updated_at_ms"])}
+                for row in guidance_rows
+            ]
+
+            artifact_rows = conn.execute(
+                "SELECT id,message_id,filename,media_type,language,renderer,version,provenance,preview_url,download_url,content_hash,size_bytes,created_at_ms "
+                "FROM conversation_artifacts WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            artifacts = [_row(row) for row in artifact_rows]
+
+            summary_rows = conn.execute(
+                "SELECT id,model,confidence,source_start_sequence,source_end_sequence,content,supersedes_id,created_at_ms "
+                "FROM conversation_summaries WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            summaries = [
+                {"id": row["id"], "model": row["model"], "confidence": float(row["confidence"]), "source_start_sequence": int(row["source_start_sequence"]), "source_end_sequence": int(row["source_end_sequence"]), "content": row["content"], "supersedes_id": row["supersedes_id"], "created_at_ms": int(row["created_at_ms"])}
+                for row in summary_rows
+            ]
+
+            return {
+                "run_id": run_id,
+                "state": str(run["state"]),
+                "aggregated_tools": aggregated_tools,
+                "activities": activities,
+                "commands": commands,
+                "agents": agents,
+                "approvals": approvals,
+                "guidance": guidance,
+                "artifacts": artifacts,
+                "summaries": summaries,
+            }
 
     def renew_run_lease(
         self, *, run_id: str, lease_token: str, lease_seconds: int | None = None
@@ -3787,6 +4006,18 @@ class MuninStore:
         if self._durable is self._hot:
             raise KeyError(run_id)
         return self._durable.get_run_detail_for_actor(actor_id=actor_id, run_id=run_id)
+
+    def get_run_detail_readmodel(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        # PR-6C — same hot-first routing as ``get_run_detail_for_actor`` so an
+        # in-flight (not yet migrated) run still serves the composite read-model.
+        with self._hot._read_only() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+        if row:
+            self._hydrate_hot_participant(actor_id=actor_id, conversation_id=str(row["conversation_id"]))
+            return self._hot.get_run_detail_readmodel(actor_id=actor_id, run_id=run_id)
+        if self._durable is self._hot:
+            raise KeyError(run_id)
+        return self._durable.get_run_detail_readmodel(actor_id=actor_id, run_id=run_id)
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
         with self._hot._read_only() as conn:  # noqa: SLF001
