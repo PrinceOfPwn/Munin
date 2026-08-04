@@ -261,6 +261,7 @@ class _RunSession:
         self._closed = False
         self._flush_task: asyncio.Task | None = None
         self._poster = _RateLimitedPoster(channel)
+        self._final_consumed = False  # run_state provided canonical final text
 
     def add_reasoning(self, text: str) -> None:
         if text:
@@ -333,13 +334,34 @@ class _RunSession:
             self._flush_task.cancel()
             with contextlib.suppress(BaseException):
                 await self._flush_task
-        # One last status edit before the final message.
-        with contextlib.suppress(Exception):
-            await self._flush()
         if paused:
+            with contextlib.suppress(Exception):
+                await self._flush()
             return
         prefix = "[completed]" if ok else "[failed]"
-        for chunk in _chunk_message(f"{prefix} {final_content}".rstrip()):
+        rendered = f"{prefix} {final_content}".rstrip()
+        # Reuse the live status message if we have one: edit it to the
+        # final text so the operator sees ONE message in the channel
+        # (the running status -> final answer), not two. If the final
+        # text exceeds the Discord edit body limit (~2000 chars) or we
+        # never created a status message, fall back to posting new
+        # chunks. The reasoning buffer is already captured in
+        # ``final_content`` when ``_final_consumed`` is set, so we drop
+        # it to avoid duplicating it in the edited body.
+        if self._final_consumed:
+            self.reasoning_buffer = ""
+            self._dirty = True
+        if self.status_message is not None and len(rendered) <= DISCORD_MAX_MESSAGE_CHARS:
+            with contextlib.suppress(Exception):
+                await self.status_message.edit(content=rendered)
+                if self.tools:
+                    # Edit keeps the prefix; append a compact tools tail.
+                    tail = "\n\n**Tools**\n" + "\n".join(self.tools[-DISCORD_TOOL_TAIL:])
+                    if len(rendered) + len(tail) <= DISCORD_MAX_MESSAGE_CHARS:
+                        await self.status_message.edit(content=rendered + tail)
+                return
+        # Fallback: post the final text as new chunk(s).
+        for chunk in _chunk_message(rendered):
             with contextlib.suppress(Exception):
                 await self.channel.send(chunk)
 
@@ -1095,6 +1117,11 @@ async def _stream_run(
                     outcome = state
                     ok = state == "completed"
                     final_content = str(envelope.get("content") or "") or session.reasoning_buffer
+                    # The supervisor's final content already contains the
+                    # complete assistant answer; mark it so close() does
+                    # not duplicate it alongside the reasoning buffer.
+                    if envelope.get("content"):
+                        session._final_consumed = True
                     break
     except Exception as exc:  # noqa: BLE001
         log.exception("discord: supervisor_runner failed run_id=%s", run_id)
