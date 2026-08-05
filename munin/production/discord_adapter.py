@@ -36,20 +36,25 @@ Surface
 Rendering policy
 ----------------
 
-We deliberately do **not** shove the whole run into one message:
+The surface is dark-first, accent-violet and ``discord_ui``-driven:
 
-* A single *status* message is edited in place at most every
+* A single *status* **embed** is sent immediately on start (a visible
+  "processing" signal) and edited in place at most every
   ``DISCORD_FLUSH_INTERVAL`` (2.5 s) — live progress, tools tail.
-* Reasoning and tool output are posted as **separate** short messages
-  when they complete (spaced by ``DISCORD_POST_INTERVAL`` so we stay
-  under the 5 msg / 5 s per-channel cap).
-* The final assistant content is posted last, chunked at the 1900-char
-  cap.
-* HITL pauses post a dedicated approval card containing the durable
-  ``request_id`` so the operator can act with ``/approve <id>``.
-
-Per operator decision there is **no redaction** on the Discord surface
-and no ``max_iterations`` cap for Discord-triggered runs.
+* Reasoning blocks are posted as **separate** short messages when they
+  complete (spaced by ``DISCORD_POST_INTERVAL`` so we stay under the
+  5 msg / 5 s per-channel cap).
+* One investigation = **one thread** (``INV-…``).  On guild channels the
+  run streams inside a dedicated thread with a "Context Utilized" header;
+  the main channel only gets a compact pointer.  DMs stream in-line.
+* HITL pauses post a durable approval card **with Approve/Reject buttons**
+  (``discord_ui.ApprovalView``).  The buttons go through the same
+  server-side authority boundary as ``/approve <id>`` — the button is a
+  surface, not a bypass.
+* Final results are rendered as completion/error **embeds** with an
+  explicit tools summary; overlong bodies are chunked underneath.
+* Per operator decision there is **no redaction** on the Discord surface
+  and no ``max_iterations`` cap for Discord-triggered runs.
 """
 from __future__ import annotations
 
@@ -59,7 +64,10 @@ import json
 import logging
 import secrets
 import time
+from types import SimpleNamespace
 from typing import Any
+
+from . import discord_ui as ui
 
 log = logging.getLogger("munin.production.discord_adapter")
 
@@ -69,8 +77,8 @@ DISCORD_POST_INTERVAL = 1.15       # min spacing between separate posts (5 msg/5
 DISCORD_MAX_MESSAGE_CHARS = 1900   # 2000-char hard cap, headroom for markdown
 DISCORD_STATUS_MAX_CHARS = 1800
 DISCORD_TOOL_TAIL = 6              # last N tool events in the status message
-DISCORD_TOOL_POST_CHARS = 900      # separate tool posts are kept short
 DISCORD_REASONING_POST_CHARS = 1400
+DISCORD_EMBED_BODY_MAX = 4000      # embed description cap with headroom
 
 # --- Command surface --------------------------------------------------------
 COMMAND_PREFIXES = ("/munin ", "!munin ")
@@ -276,19 +284,38 @@ class _RateLimitedPoster:
             with contextlib.suppress(Exception):
                 await self.channel.send(chunk)
 
+    async def post_embed(self, embed: Any, *, view: Any = None) -> Any:
+        """Send an embed (+ optional interactive view) with the same spacing."""
+        now = time.monotonic()
+        wait = self._last + self.interval - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._last = time.monotonic()
+        try:
+            return await self.channel.send(embed=embed, view=view)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("discord: embed post failed: %s", exc)
+            return None
+
 
 class _RunSession:
     """State for a single in-flight Discord-triggered run.
 
-    Renders the live run as: one editable status message (progress +
-    tools tail), separate short posts for completed reasoning/tool
-    blocks, a dedicated HITL approval card, and a final assistant
-    message.  Nothing is concatenated into a single megapost.
+    Renders the live run as one editable *embed* status message (progress+
+    tools tail), separate compact posts for completed reasoning blocks, a
+    dedicated HITL approval card **with Approve/Reject buttons**, and a
+    final completion/error embed.  Guild-channel runs also get their own
+    investigation thread (``INV-…``) so one investigation lives in one
+    thread while the main channel stays compact.  Nothing is concatenated
+    into a single megapost.
     """
 
     def __init__(self, *, channel: Any, run_id: str) -> None:
         self.channel = channel
         self.run_id = run_id
+        self.prompt = ""
+        self.conversation_id = ""
+        self.thread: Any | None = None
         self.reasoning_buffer = ""
         self.tools: list[str] = []
         self.status_message: Any = None
@@ -337,6 +364,38 @@ class _RunSession:
         text = "\n\n".join(parts) if parts else "_working..._"
         return text[:DISCORD_MAX_MESSAGE_CHARS]
 
+    async def start(self, *, prompt: str = "", conversation_id: str = "") -> None:
+        """Send the initial status embed immediately.
+
+        The operator sees ``🔄 Munin · Running`` (with the objective) right
+        away — a visible signal that the bot is processing — before the
+        flush loop's first tick.  Falls back to a plain text line when
+        embeds are unavailable (e.g. unit-test fakes).
+        """
+        self.prompt = prompt
+        self.conversation_id = conversation_id
+        embed = ui.build_run_status_embed(
+            run_id=self.run_id,
+            state="running",
+            prompt=prompt,
+            conversation_id=conversation_id,
+        )
+        if embed is not None:
+            try:
+                self.status_message = await self.channel.send(embed=embed)
+                self._dirty = False
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "discord: initial status embed failed run_id=%s: %s",
+                    self.run_id, exc,
+                )
+        with contextlib.suppress(Exception):
+            self.status_message = await self.channel.send(
+                f"🔄 Munin · running — `{self.run_id}`"
+            )
+        self._dirty = False
+
     async def flush_loop(self) -> None:
         while not self._closed:
             await asyncio.sleep(DISCORD_FLUSH_INTERVAL)
@@ -346,18 +405,59 @@ class _RunSession:
 
     async def _flush(self) -> None:
         self._dirty = False
+        embed = ui.build_run_status_embed(
+            run_id=self.run_id,
+            state="running",
+            reasoning_summary=self.reasoning_buffer,
+            tools=self.tools,
+            prompt=self.prompt,
+            conversation_id=self.conversation_id,
+        )
         content = self._render_status()
         try:
             if self.status_message is None:
-                self.status_message = await self.channel.send(content or "_working..._")
+                if embed is not None:
+                    self.status_message = await self.channel.send(embed=embed)
+                else:
+                    self.status_message = await self.channel.send(content or "_working..._")
+            elif embed is not None:
+                await self.status_message.edit(embed=embed)
             else:
                 await self.status_message.edit(content=content or "_working..._")
         except Exception as exc:  # noqa: BLE001
             log.debug("discord: flush failed run_id=%s: %s", self.run_id, exc)
 
-    async def post_approval_card(self, request_id: str, action: str, risk: str) -> None:
-        """Dedicated, visible HITL card with the durable request id."""
+    async def post_approval_card(
+        self,
+        request_id: str,
+        action: str,
+        risk: str,
+        *,
+        on_resolve: Any = None,
+    ) -> None:
+        """Dedicated, visible HITL card with Approve/Reject buttons.
+
+        ``on_resolve`` is an async ``(choice, interaction)`` callback that
+        resolves through the server-side authority boundary (see
+        ``_resolve_via_button``).  Falls back to the plain text card when
+        embeds/views are unavailable.
+        """
         self.last_request_id = request_id
+        embed = ui.build_approval_embed(
+            request_id=request_id, action=action, risk=risk, run_id=self.run_id,
+        )
+        approval_view = ui.ApprovalView(
+            request_id=request_id, run_id=self.run_id, on_resolve=on_resolve,
+        )
+        view = approval_view.view if approval_view is not None else None
+        if embed is not None and view is not None:
+            try:
+                sent = await self._poster.post_embed(embed, view=view)
+                if sent is not None:
+                    view.message = sent
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discord: approval embed+view failed: %s", exc)
         await self._poster.post(
             f"⚠️ **Approval required** — `{request_id}`\n"
             f"Action: {action}\nRisk: {risk}\n\n"
@@ -372,22 +472,61 @@ class _RunSession:
             with contextlib.suppress(BaseException):
                 await self._flush_task
         if paused:
-            with contextlib.suppress(Exception):
-                await self._flush()
+            # The approval card (with its buttons) stays visible; point the
+            # status embed at the waiting state so the operator sees the run
+            # is paused on a human decision, not dead.
+            embed = ui.build_run_status_embed(
+                run_id=self.run_id,
+                state="waiting_for_human",
+                reasoning_summary=self.reasoning_buffer,
+                tools=self.tools,
+                prompt=self.prompt,
+                conversation_id=self.conversation_id,
+            )
+            if embed is not None and self.status_message is not None:
+                with contextlib.suppress(Exception):
+                    await self.status_message.edit(embed=embed)
+            else:
+                with contextlib.suppress(Exception):
+                    await self._flush()
             return
-        prefix = "[completed]" if ok else "[failed]"
-        rendered = f"{prefix} {final_content}".rstrip()
-        # Reuse the live status message if we have one: edit it to the
-        # final text so the operator sees ONE message in the channel
-        # (the running status -> final answer), not two. If the final
-        # text exceeds the Discord edit body limit (~2000 chars) or we
-        # never created a status message, fall back to posting new
-        # chunks. The reasoning buffer is already captured in
-        # ``final_content`` when ``_final_consumed`` is set, so we drop
-        # it to avoid duplicating it in the edited body.
+        # The supervisor's run_state provides the canonical final text; drop
+        # the reasoning buffer so we don't duplicate it in the result embed.
         if self._final_consumed:
             self.reasoning_buffer = ""
-            self._dirty = True
+        if ok:
+            embed = ui.build_completion_embed(
+                run_id=self.run_id,
+                outcome="completed",
+                content=final_content,
+                tools_used=self.tools,
+                conversation_id=self.conversation_id,
+            )
+        else:
+            embed = ui.build_error_embed(
+                run_id=self.run_id, error=final_content, recoverable=False,
+            )
+        if embed is not None:
+            try:
+                if self.status_message is not None:
+                    # Drop any run-control buttons — the run is over.
+                    await self.status_message.edit(embed=embed, view=None)
+                else:
+                    await self.channel.send(embed=embed)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("discord: final embed failed run_id=%s: %s", self.run_id, exc)
+                with contextlib.suppress(Exception):
+                    await self.channel.send(embed=embed)
+            # Embed bodies are capped; post any overflow as plain chunks.
+            overflow = final_content[DISCORD_EMBED_BODY_MAX:] if len(final_content) > DISCORD_EMBED_BODY_MAX else ""
+            if overflow:
+                for chunk in _chunk_message(f"*(continuation)*\n{overflow}"):
+                    with contextlib.suppress(Exception):
+                        await self.channel.send(chunk)
+            return
+        # Fallback (no discord.py): old plain-text rendering.
+        prefix = "[completed]" if ok else "[failed]"
+        rendered = f"{prefix} {final_content}".rstrip()
         if self.status_message is not None and len(rendered) <= DISCORD_MAX_MESSAGE_CHARS:
             with contextlib.suppress(Exception):
                 await self.status_message.edit(content=rendered)
@@ -599,6 +738,96 @@ async def _resume_approved_run(
         lease_token=lease_token,
         resume_decisions=[{"type": "approve"}] * max(1, decision_count),
     )
+
+
+async def _resolve_via_button(
+    *,
+    store: Any,
+    shared_state: Any,
+    request_id: str,
+    choice: str,
+    interaction: Any,
+) -> None:
+    """Resolve a HITL request from an ApprovalView button click.
+
+    Mirrors ``_cmd_resolve`` but binds identity to the person who clicked
+    (``interaction.user``) and reports through the interaction (followup
+    inside the approval card's thread), resuming the approved run in place.
+    The button is a surface — the same ``reissue_human_decision_nonce`` +
+    ``resolve_human_decision`` authority boundary is used, never a bypass.
+    """
+    request_id = request_id.strip()
+    try:
+        click_actor = _resolve_actor(
+            store,
+            discord_user_id=int(interaction.user.id),
+            display_name=str(interaction.user),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("discord: button actor resolution failed: %s", exc)
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(
+                f"[failed] could not resolve actor for decision: {exc}",
+                ephemeral=True,
+            )
+        return
+    try:
+        nonce = store.reissue_human_decision_nonce(
+            actor_id=click_actor["id"], request_id=request_id
+        )["nonce"]
+        result = store.resolve_human_decision(
+            actor_id=click_actor["id"],
+            request_id=request_id,
+            choice=choice,
+            nonce=nonce,
+        )
+    except PermissionError as exc:
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(f"[denied] {exc}", ephemeral=True)
+        return
+    except KeyError:
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(
+                f"[not_found] no human request `{request_id}`", ephemeral=True,
+            )
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("discord: button %s failed request_id=%s", choice, request_id)
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(
+                f"[failed] could not {choice} `{request_id}`: {exc}",
+                ephemeral=True,
+            )
+        return
+
+    state = result.get("state")
+    if state == "queued":
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(
+                f"✅ Approved `{request_id}` — resuming run {result.get('run_id')}",
+                ephemeral=True,
+            )
+        # Bind the resume to the interaction's channel (the approval card's
+        # thread when one exists) so the continuation streams in place.
+        synth = SimpleNamespace(
+            channel=interaction.channel,
+            author=SimpleNamespace(
+                id=click_actor["id"],
+                name=click_actor.get("display_name") or "operator",
+            ),
+        )
+        await _resume_approved_run(
+            store=store,
+            shared_state=shared_state,
+            message=synth,
+            run_id=str(result["run_id"]),
+            decision_count=int(result.get("decision_count") or 1),
+        )
+    else:
+        with contextlib.suppress(Exception):
+            await interaction.followup.send(
+                f"`{request_id}` → {state} ({choice})", ephemeral=True,
+            )
 
 
 async def _cmd_cancel(*, store: Any, actor: dict[str, Any], message: Any, run_id: str) -> None:
@@ -868,8 +1097,13 @@ async def _handle_command(
     name, args = parsed
 
     if name == "help":
-        with contextlib.suppress(Exception):
-            await message.reply(HELP_TEXT)
+        embed = ui.build_help_embed()
+        if embed is not None:
+            with contextlib.suppress(Exception):
+                await message.reply(embed=embed)
+        else:
+            with contextlib.suppress(Exception):
+                await message.reply(HELP_TEXT)
         return
     if name == "approvals":
         await _cmd_approvals(store=store, actor=actor, message=message)
@@ -1112,7 +1346,120 @@ async def _stream_run(
         return
 
     session = _RunSession(channel=message.channel, run_id=run_id)
+    session.prompt = prompt
+    session.conversation_id = conversation_id
     session._flush_task = asyncio.create_task(session.flush_loop())
+
+    # One investigation = one thread (guild channels only).  The run streams
+    # inside the thread; the main channel only gets a compact pointer.  DMs
+    # (and resume paths, which already stream inside the approval thread)
+    # keep streaming in-line.
+    if not resume_decisions:
+        with contextlib.suppress(Exception):
+            thread = await ui.create_run_thread(message, run_id=run_id, prompt=prompt)
+            if thread is not None:
+                session.thread = thread
+                session.channel = thread
+                session._poster = _RateLimitedPoster(thread)
+                await ui.post_investigation_header(
+                    thread,
+                    run_id=run_id,
+                    prompt=prompt,
+                    conversation_id=conversation_id,
+                )
+                if hasattr(message, "reply"):
+                    with contextlib.suppress(Exception):
+                        await message.reply(
+                            f"🔍 Investigation open in thread: {thread.jump_url}"
+                        )
+
+    # Immediate "processing" signal: the status embed appears before the
+    # flush loop's first tick so the operator knows the bot picked the run up.
+    await session.start(prompt=prompt, conversation_id=conversation_id)
+
+    # Interactive run controls (Stop / Status / Artifacts) on the status
+    # message.  They are convenience surfaces; server-side authority stays
+    # in the store.
+    async def _clicker_actor(interaction: Any) -> dict[str, Any] | None:
+        try:
+            return _resolve_actor(
+                store,
+                discord_user_id=int(interaction.user.id),
+                display_name=str(interaction.user),
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("discord: clicker actor resolution failed")
+            return None
+
+    async def _on_run_cancel(interaction: Any) -> None:
+        clicker = await _clicker_actor(interaction)
+        if clicker is None:
+            return
+        try:
+            await store.request_run_cancellation(actor_id=clicker["id"], run_id=run_id)
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    f"🚫 Cancellation requested for `{run_id}`.", ephemeral=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    f"[failed] cancel `{run_id}`: {exc}", ephemeral=True,
+                )
+
+    async def _on_run_status(interaction: Any) -> None:
+        embed = ui.build_run_status_embed(
+            run_id=run_id, state="running",
+            reasoning_summary=session.reasoning_buffer, tools=session.tools,
+            prompt=prompt, conversation_id=conversation_id,
+        )
+        if embed is not None:
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    session._render_status(), ephemeral=True,
+                )
+
+    async def _on_run_artifacts(interaction: Any) -> None:
+        clicker = await _clicker_actor(interaction)
+        if clicker is None:
+            return
+        try:
+            detail = store.get_run_detail_for_actor(actor_id=clicker["id"], run_id=run_id)
+        except Exception as exc:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    f"[failed] artifacts for `{run_id}`: {exc}", ephemeral=True,
+                )
+            return
+        artifacts = (detail or {}).get("artifacts") or []
+        if not artifacts:
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    f"No artifacts for `{run_id}` yet.", ephemeral=True,
+                )
+            return
+        lines = [f"**Artifacts for `{run_id}`**"]
+        for art in artifacts:
+            lines.append(
+                f"- `{art['id']}` · {art.get('filename') or '?'} · {art.get('media_type') or '?'}"
+            )
+        for chunk in _chunk_message("\n".join(lines)):
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(chunk, ephemeral=True)
+
+    control = ui.RunControlView(
+        run_id=run_id,
+        on_cancel=_on_run_cancel,
+        on_status=_on_run_status,
+        on_artifacts=_on_run_artifacts,
+    )
+    if control is not None and session.status_message is not None:
+        with contextlib.suppress(Exception):
+            await session.status_message.edit(view=control.view)
+            control.view.message = session.status_message
 
     final_content = ""
     outcome = "completed"
@@ -1179,8 +1526,25 @@ async def _stream_run(
                 request_id = str(envelope.get("request_id") or "")
                 action = str(envelope.get("tool_name") or "tool execution")
                 risk = str(envelope.get("risk") or "high")
+
+                async def _on_approval(
+                    choice: str,
+                    interaction: Any,
+                    _request_id: str = request_id,
+                ) -> None:
+                    await _resolve_via_button(
+                        store=store,
+                        shared_state=shared_state,
+                        request_id=_request_id,
+                        choice=choice,
+                        interaction=interaction,
+                    )
+
                 await session.post_approval_card(
-                    request_id=request_id, action=action, risk=risk,
+                    request_id=request_id,
+                    action=action,
+                    risk=risk,
+                    on_resolve=_on_approval,
                 )
                 break
             elif kind == "tool_intent":

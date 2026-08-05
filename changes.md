@@ -4,6 +4,43 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-04 — Discord UX redesign: embeds, buttons, INV-threads
+
+Rebuilt the Discord operator surface from plain text into the `discord_ui`
+component layer: dark-first status **embeds**, interactive **buttons** for
+HITL and run control, and **one investigation = one thread** (INV-…).
+
+- `munin/production/discord_ui.py` (new): embed builders
+  (`build_run_status_embed`, `build_approval_embed`, `build_completion_embed`,
+  `build_error_embed`, `build_help_embed`), interactive views
+  (`ApprovalView` Approve/Reject, `RunControlView` Stop/Status/Artifacts),
+  thread helpers (`create_run_thread` with `INV-{id}` naming,
+  `post_investigation_header` with the "Context Utilized" block) and
+  `truncate_for_embed`. Colour palette maps Munin semantic tokens to
+  `discord.Colour`. All entry points degrade to `None` without discord.py
+  so unit tests and non-Discord deployments stay unaffected.
+- `munin/production/discord_adapter.py`:
+  - `_RunSession.start()` posts the initial status embed immediately — a
+    visible "processing" signal before the flush loop's first tick.
+  - `_flush()` edits a status **embed** (reasoning + tools tail) instead of
+    plain text; `_render_status()` stays as fallback.
+  - `post_approval_card()` sends `build_approval_embed` + `ApprovalView`;
+    buttons resolve via the new `_resolve_via_button()`, which reuses the
+    same `reissue_human_decision_nonce` + `resolve_human_decision`
+    authority boundary as `/approve <id>` (identity bound to the clicker).
+  - `close()` renders completion/error **embeds** (tools summary; overflow
+    chunked under the embed) and drops run-control buttons on finish.
+  - `_stream_run()` creates the INV-thread on guild channels, streams
+    inside it, posts a compact pointer in the main channel, and attaches
+    `RunControlView` (Stop/Status/Artifacts) to the status message.
+  - `/help` renders as an embed with a plain-text fallback.
+  - Removed dead `DISCORD_TOOL_POST_CHARS`; added `DISCORD_EMBED_BODY_MAX`.
+
+Live-tested findings fixed earlier in this branch (already shipped):
+`58cd304` reverted `Command(update=...)` checkpoint corruption and made
+double-approve graceful; `1aff5e4` threaded `shared_state` through the
+`/approve` chain so the durable `AsyncSqliteSaver` is preserved on resume.
+
 ## 2026-08-04 — 3-tier memory scoping for cognitive tables
 
 `shared_intel`, `semantic`, `episodic` were GLOBAL (no `conversation_id`/
