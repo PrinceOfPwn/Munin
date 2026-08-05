@@ -578,7 +578,21 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
         if content.startswith(prefix):
             return content[len(prefix):].strip()
 
-    return None
+    # Community channel: after the allowlist check in _handle_message passed,
+    # ANY human message in an allowed guild channel is an invocation.  The bot
+    # is the channel's assistant — it answers every member, not just whoever
+    # mentions it.  (Slash commands are still routed to _handle_command later.)
+    return content
+
+
+def _is_thread_channel(channel: Any) -> bool:
+    """True when a Discord channel object is a thread (public/private/news).
+
+    Threads are first-class channels in discord.py with their own ``id`` and a
+    ``parent`` pointing at the guild channel.  They must NOT share the
+    ``channel:{parent_id}`` graph — each INV thread is its own Munin graph.
+    """
+    return bool(getattr(channel, "is_thread", False))
 
 
 def _parse_command(content: str) -> tuple[str, list[str]] | None:
@@ -1195,7 +1209,18 @@ async def _handle_message(
         return
 
     is_dm = getattr(message, "guild", None) is None
-    channel_key = f"dm:{author_id}" if is_dm else f"channel:{channel_id}"
+    # Isolation key: DMs get their own graph, guild threads get their OWN
+    # graph (thread:{id} — one INV thread = one Munin), plain guild channels
+    # keep the community graph.  This is what keeps parallel operators from
+    # cross-contaminating each other's contexts.
+    is_thread = _is_thread_channel(message.channel)
+    channel_key = (
+        f"dm:{author_id}"
+        if is_dm
+        else f"thread:{channel_id}"
+        if is_thread
+        else f"channel:{channel_id}"
+    )
 
     # Slash commands are handled without creating a graph turn.
     if _parse_command(prompt) is not None:
@@ -1514,15 +1539,33 @@ async def _stream_run(
                 "discord: investigation thread created run_id=%s thread_id=%s",
                 run_id, getattr(thread, "id", "?"),
             )
-            # Bind this thread to the same conversation/grafo the run started
-            # in, so subsequent operator replies inside the thread resolve to
-            # the SAME conversation_id (memory + history + checkpoint) instead
-            # of forking a new graph per thread.  One thread = one graph.
-            if conversation_cache is not None:
-                conversation_cache[f"channel:{getattr(thread, 'id', '')}"] = conversation_id
+            # One INV thread = one Munin graph.  The thread gets its OWN
+            # conversation (thread:{id}), isolated from the source channel's
+            # community graph and from every other thread, so parallel
+            # operators never cross-contaminate each other's contexts while
+            # still sharing data with everyone who writes inside the thread.
+            thread_key = f"thread:{getattr(thread, 'id', '')}"
+            try:
+                thread_conv_id = _get_or_create_conversation(
+                    store,
+                    actor_id=actor_id or "system",
+                    channel_key=thread_key,
+                    cache=conversation_cache or {},
+                    title=f"discord:{thread.name if hasattr(thread, 'name') else thread_key}",
+                    is_dm=False,
+                )
+            except Exception:  # noqa: BLE001
+                thread_conv_id = None
+                log.warning(
+                    "discord: thread conversation bind failed run_id=%s thread=%s",
+                    run_id, getattr(thread, "id", "?"),
+                    exc_info=True,
+                )
+            if thread_conv_id and conversation_cache is not None:
+                conversation_cache[thread_key] = thread_conv_id
                 log.info(
-                    "discord: thread bound to conversation run_id=%s thread_id=%s conv_id=%s",
-                    run_id, getattr(thread, "id", "?"), conversation_id,
+                    "discord: thread owns graph run_id=%s thread_id=%s conv_id=%s",
+                    run_id, getattr(thread, "id", "?"), thread_conv_id,
                 )
             session.thread = thread
             session.channel = thread

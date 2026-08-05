@@ -39,11 +39,14 @@ def test_extract_prompt_dm_passthrough() -> None:
     assert _extract_prompt(_msg(content="hello"), bot_user_id=42) == "hello"
 
 
-def test_extract_prompt_channel_requires_mention_or_prefix() -> None:
+def test_extract_prompt_channel_any_message_is_invocation() -> None:
     from munin.production.discord_adapter import _extract_prompt
 
     guild = SimpleNamespace(id=1)
-    assert _extract_prompt(_msg(content="hello", guild=guild), bot_user_id=42) is None
+    # Community channel: after the allowlist check passed, ANY human message
+    # in an allowed guild channel is an invocation — the bot is the channel's
+    # assistant and answers every member, not just whoever mentions it.
+    assert _extract_prompt(_msg(content="hello", guild=guild), bot_user_id=42) == "hello"
     assert (
         _extract_prompt(_msg(content="<@42> scan example.com", guild=guild), bot_user_id=42)
         == "scan example.com"
@@ -70,15 +73,17 @@ def test_extract_prompt_reply_to_bot_counts_as_invocation() -> None:
     )
 
 
-def test_extract_prompt_reply_to_other_ignored_in_channel() -> None:
+def test_extract_prompt_reply_to_other_in_channel() -> None:
     from munin.production.discord_adapter import _extract_prompt
 
     guild = SimpleNamespace(id=1)
     other_author = SimpleNamespace(id=7, bot=False)
     reply = SimpleNamespace(resolved=SimpleNamespace(author=other_author))
+    # Replies to other humans in an allowed channel are still invocations:
+    # the bot is the channel's assistant.
     assert (
         _extract_prompt(_msg(content="hi", guild=guild, reference=reply), bot_user_id=42)
-        is None
+        == "hi"
     )
 
 
