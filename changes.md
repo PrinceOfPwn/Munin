@@ -4,6 +4,68 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-05 (later) — Discord: claim race against chat recovery (Bug E)
+
+The architectural fix shipped the same day (commit `1d4d99d`) regressed the
+Discord dispatch path: the operator reported
+`[failed] could not claim run: run <id> is not queued (already running or terminal)`
+on every guild-channel invocation. Two parallel subagent investigations — one
+mapping `store.claim_run_direct` and the chat-supervisor recovery path, the
+other reconstructing the run `31037937837` munin.log timeline — converged on
+the same deterministic race:
+
+The new `_handle_message` flow inserted `await thread.edit(name=...)` (a
+rate-limited HTTPS PATCH to Discord, 50–500 ms typical, seconds under global
+rate-limit) BETWEEN `store.create_turn` (which writes the run row with
+`state='queued'`) and `_claim_direct`. While that `await` yielded the event
+loop, `chat.py`'s `chat_recovery_loop` (started at boot on the same asyncio
+loop via `start_chat_recovery_worker`, polling every `CHAT_RECOVERY_POLL_SECONDS
+= 5s`) ran `list_queued_chat_recovery_candidates` → `SELECT ... WHERE
+state='queued'` with **no `_ACTIVE_RUN_TASKS` filter and no ownership guard**
+(store.py:1295–1298, chat.py:1144–1146). The freshly-queued row appeared; the
+recovery loop fence-claimed it to `running` via `chat._claim_direct`
+(chat.py:1171) and drove the run to terminal through its own chat executor.
+When Discord's `await thread.edit` returned and `_handle_message` finally
+called `_claim_direct`, `claim_run_direct`'s `SELECT ... state='queued'` found
+nothing (state was `running`) and raised (store.py:3300–3304).
+
+The munin.log confirms 2/2 new-flow dispatches failed identically:
+```
+discord: investigation thread created run_id=run_8b80a24f (provisional) thread_id=1534640433731211505
+discord: claim_run_direct failed: run run_88fe8ec9 is not queued (already running or terminal)
+discord: on_message type=MessageType.channel_name_change          ← thread.edit completed AFTER the claim raised
+chat: executor lost lease run_id=run_88fe8ec9                      ← chat.py had won the claim
+chat: run_id=run_88fe8ec9 final_state=completed actor=usr_872ba2... ← chat drove the run to completion
+```
+
+The runs were NOT broken at the agent-supervisor level — they actually
+completed via `chat.py`'s own executor. The operator-visible failure was that
+Discord no longer owned the run and the INV-thread reply path was severed.
+
+Fix — restore the OLD-flow invariant that between `create_turn` and
+`_claim_direct` there is NO control-flow `await`. Reorder `_handle_message`:
+register the run in `chat._ACTIVE_RUN_TASKS` (defensive — even if a future
+edit reintroduces an await here, `recover_persisted_chat_runs`'s
+`existing is not None and not existing.done()` guard skips us), then fenced
+`_claim_direct`, then move `await thread.edit(...)` to fire-and-forget AFTER
+the claim. On claim failure we pop the `_ACTIVE_RUN_TASKS` registration
+(housekeeping) and short-circuit without attempting the cosmetic rename.
+
+Bug E did NOT exist as a practical race on `78c6bb4`: the OLD flow was the
+ synchronous sequence `create_turn → idempotent_replay check → _claim_direct`
+with no `await` between the queue and the claim, so `chat_recovery_loop` could
+not pre-empt at the Python level. The architecture fix introduced the first
+genuine `await` in that window — the regression surface.
+
+Test update: `test_handle_message_creates_thread_and_dedicated_conversation`
+(Bug A regression guard) had assumed the thread rename happened BEFORE the
+claim short-circuit. Updated to assert `len(fake_thread.edits) == 0` and the
+provisional name is preserved when the claim stub raises — this is the new
+correct ordering: rename is cosmetic and lives AFTER the fenced claim.
+
+Validation: 35 passed, 1 skipped; py_compile clean; live validation pending
+the next run on `feat/discord-community-adapter` with this fix.
+
 ## 2026-08-05 — Discord: thread isolation + shared-intel scope + un-truncated reasoning
 
 A live session (`31022892758`, branch `feat/discord-community-adapter`,

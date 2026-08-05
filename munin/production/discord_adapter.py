@@ -1432,22 +1432,58 @@ async def _handle_message(
             await message.reply(f"[replay] run {run_id} already exists")
         return
 
-    # Rename the INV thread to the REAL run_id now that ``create_turn``
-    # returned it.  In the guild-channel path the thread was created with a
-    # provisional id; renaming keeps the sidebar entry in sync with the
-    # actually-running run.  ``thread.edit`` is best-effort — if it raises
-    # (perms / rate-limit) the thread still works under the provisional name.
-    if thread is not None:
-        with contextlib.suppress(Exception):
-            await thread.edit(name=ui._thread_name(run_id, prompt))
+    # CLAIM BEFORE any control-flow ``await`` between ``create_turn`` and
+    # ``_claim_direct``.  ``store.create_turn`` just inserted the run row
+    # with ``state='queued'``; ``chat.py``'s ``chat_recovery_loop`` (running
+    # on this same asyncio loop every ~5s, scan: ``SELECT ... WHERE
+    # state='queued'``) will fence-claim any queued row it sees and drive
+    # the run through its own chat executor.  If we let the event loop go
+    # to another task between ``create_turn`` and our claim — e.g. by
+    # awaiting ``thread.edit`` (a 50–500ms HTTPS round-trip to Discord,
+    # seconds under global rate-limit) — the recovery task wins the claim
+    # first and our subsequent ``claim_run_direct`` raises
+    # ``RuntimeError: run ... is not queued (already running or terminal)``.
+    #
+    # Defensive double-shield: register this task in
+    # ``chat._ACTIVE_RUN_TASKS`` BEFORE attempting the claim so that even
+    # if a future edit reintroduces an await here, ``recover_persisted_chat_runs``'s
+    # ``existing is not None and not existing.done()`` guard skips us.
+    # The post-claim registration inside ``_stream_run`` (line ~1919)
+    # remains as the authoritative owner-of-record.
+    _recovery_guard_installed = False
+    try:
+        from . import chat as _chat_mod  # noqa: PLC0415
+
+        _chat_mod._ACTIVE_RUN_TASKS[run_id] = asyncio.current_task()  # type: ignore[assignment]
+        _recovery_guard_installed = True
+    except Exception:  # noqa: BLE001
+        # Optional guard — never block the dispatch on import/registration
+        # bookkeeping failures.
+        pass
 
     try:
         lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
     except Exception as exc:  # noqa: BLE001
         log.exception("discord: claim_run_direct failed: %s", exc)
+        if _recovery_guard_installed:
+            try:
+                from . import chat as _chat_mod  # noqa: PLC0415
+
+                _chat_mod._ACTIVE_RUN_TASKS.pop(run_id, None)
+            except Exception:  # noqa: BLE001
+                pass
         with contextlib.suppress(Exception):
             await message.reply(f"[failed] could not claim run: {exc}")
         return
+
+    # Rename the INV thread to the REAL run_id — fire-and-forget AFTER the
+    # fenced claim, so no in-progress ``await`` can widen a claim race
+    # window.  Cosmetically keeps the sidebar entry in sync with the
+    # actually-running run; failure is non-fatal (the run already owns the
+    # thread by id, only the label would stay on the provisional name).
+    if thread is not None:
+        with contextlib.suppress(Exception):
+            await thread.edit(name=ui._thread_name(run_id, prompt))
 
     try:
         exec_ctx = store.run_execution_context(run_id=run_id)

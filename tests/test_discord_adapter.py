@@ -847,19 +847,20 @@ def test_handle_message_creates_thread_and_dedicated_conversation() -> None:
     # 3. The publisher mapped the REAL run_id (post-create_turn) to channel 7.
     assert publisher.mapped == [("run_real_12345678", "7")]
 
-    # 4. The thread was renamed to the real run_id via thread.edit() because
-    #    the initial name used the provisional id and create_turn returned a
-    #    different real one.  create_run_thread built the name with the
-    #    provisional id, and after create_turn _handle_message renames it.
-    assert len(fake_thread.edits) == 1
-    renamed = fake_thread.edits[0]
-    # Canonical name uses the real run_id prefix.
-    assert renamed == "🔍 INV-RUN_REAL · scan example.com"
-    # The thread's name is now updated.
-    assert fake_thread.name == renamed
-
-    # 5. The thread should NOT be deleted (the turn succeeded was non-replay;
-    #    the claim_run_direct short-circuit happens AFTER the rename).
+    # 4. The thread was NOT renamed.  Per the Bug E fix (race against
+    #    chat.recover_persisted_chat_runs), the fenced claim must run BEFORE
+    #    the ``await thread.edit`` network round-trip, and if the claim
+    #    short-circuits (this test stubs claim_run_direct to raise) the
+    #    rename is never attempted — the function returns from the claim's
+    #    except branch.  The thread keeps its provisional name (cosmetic
+    #    only; the run owns the thread by id).
+    assert len(fake_thread.edits) == 0
+    # The thread keeps the provisional name it was created with.
+    assert fake_thread.name == "🔍 INV-PROVISIONAL · scan"
+    # The thread should NOT be deleted: the create_turn succeeded and was
+    # non-replay; the claim_run_direct short-circuit happens AFTER create_turn
+    # but BEFORE the cosmetic rename, so we fall out of the claim's except
+    # branch without touching the thread.
     assert fake_thread._deleted is False
 
 
