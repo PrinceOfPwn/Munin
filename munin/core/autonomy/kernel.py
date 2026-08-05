@@ -185,6 +185,17 @@ class AutonomyKernel:
             test_args: dict | None = Field(
                 default=None, description="Optional smoke-test kwargs run in the sandbox"
             )
+            parameters: dict | None = Field(
+                default=None,
+                description="Explicit JSON schema for the tool parameters "
+                "({type/properties/required}). When omitted, the schema is derived "
+                "from the typed function signature in source.",
+            )
+            spec: str = Field(
+                default="",
+                description="Natural-language intent captured as provenance in the registry row",
+            )
+            tags: list[str] | None = None
 
         class InvokeToolArgs(BaseModel):
             name: str
@@ -229,6 +240,9 @@ class AutonomyKernel:
             function_name: str | None = None,
             allowed_imports: list[str] | None = None,
             test_args: dict | None = None,
+            parameters: dict | None = None,
+            spec: str = "",
+            tags: list[str] | None = None,
         ) -> str:
             return _json(
                 kernel.tool_factory.create_tool(
@@ -238,6 +252,9 @@ class AutonomyKernel:
                     function_name=function_name,
                     allowed_imports=allowed_imports,
                     test_args=test_args,
+                    parameters=parameters,
+                    spec=spec,
+                    tags=tags,
                 )
             )
 

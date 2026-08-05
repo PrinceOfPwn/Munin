@@ -4,6 +4,50 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-05 (evening) — Tool factory: JSON-schema serialization for generics
+
+The operator reported that tools created with `create_tool` failed by
+parameter type: `list`/`dict`-typed parameters did not survive serialization,
+forcing a re-forge with hand-written JSON. Two independent root causes, both
+fixed:
+
+1. `signature_to_json_schema` (`munin/mcp/registry.py`) only understood plain
+   scalar annotations (`int`/`float`/`bool`/`str` and *bare* `list`/`tuple`/
+   `dict`). Any generic annotation — `list[dict]`, `dict[str, int]`,
+   `Optional[int]`, `Union[int, str]`, `Literal["fast","deep"]`, PEP 604
+   `X | Y` — fell through to `{"type": "string"}`, so the model saw string
+   parameters where the function expected lists/objects. Replaced the flat
+   membership checks with `_annotation_to_json_schema` (via
+   `typing.get_origin`/`get_args`): `list[T]` → array+items, `dict[K, V]` →
+   object+additionalProperties, `Optional` → nullable inner type,
+   `Union` → anyOf (None stripped), `Literal` → enum, `tuple[T, ...]` →
+   array. Unknown annotations still degrade to `"string"`; the plain-scalar
+   contract is unchanged.
+
+2. The `create_tool` meta-tool (`munin/core/autonomy/kernel.py`) declared
+   `CreateToolArgs` without `parameters`/`spec`/`tags` even though
+   `ToolFactory.create_tool` accepted them, so an agent could never pass an
+   explicit JSON schema. The args schema now exposes `parameters: dict | None`
+   (explicit `{type/properties/required}`), `spec: str` (natural-language
+   intent stored as provenance) and `tags: list[str] | None`, and the wrapper
+   forwards all three to the factory.
+
+3. `ToolFactory.create_tool` (`munin/core/autonomy/tool_factory.py`) now
+   derives the schema from the authored function's typed signature when
+   `parameters` is omitted (loaded callable → `inspect.signature` →
+   `signature_to_json_schema`), so even schema-less creations advertise
+   list/dict/Optional parameters correctly. The script is materialized on disk
+   (`staging_path.replace(script_path)`) before derivation so the callable
+   loads from the final `.py` path.
+
+Tests: `test_signature_to_json_schema_generics` (array/object/nullable/anyOf/
+enum shapes), `test_create_tool_accepts_explicit_parameters_and_tags`
+(parameters/spec/tags persisted verbatim), `test_create_tool_derives_schema_from_typed_signature`
+(derived array+items/required from typed source) and
+`test_create_tool_explicit_parameters_win_over_derived`. Characterization
+suite: 11 passed; full related suite (discord adapter, forge runtime, shared
+state, capabilities, PR-review regressions): 57 passed, 1 skipped.
+
 ## 2026-08-05 (later) — Discord: claim race against chat recovery (Bug E)
 
 The architectural fix shipped the same day (commit `1d4d99d`) regressed the
