@@ -1161,7 +1161,16 @@ async def _handle_message(
     channel_id = str(getattr(message.channel, "id", ""))
     author_id = str(message.author.id)
 
-    if allowed_channels and channel_id not in allowed_channels:
+    # Threads belong to a parent guild channel.  A reply inside an INV thread
+    # has its own channel.id (the thread's), which is NOT in the static
+    # allowed_channels set derived from settings — so the allowlist would drop
+    # it silently and the bot would ignore everything the operator asks in the
+    # thread it just created.  Resolve the parent channel id for the allowlist
+    # check; the conversation key keeps the thread id so the run streams
+    # back into the right channel.
+    parent_channel_id = str(getattr(getattr(message.channel, "parent", None), "id", "") or channel_id)
+
+    if allowed_channels and parent_channel_id not in allowed_channels and channel_id not in allowed_channels:
         return
     if allowed_users and author_id not in allowed_users:
         return
@@ -1259,6 +1268,7 @@ async def _handle_message(
             assistant_message_id=assistant_message_id,
             lease_token=lease_token,
             actor_id=str(actor["id"]),
+            conversation_cache=conversation_cache,
         )
     finally:
         publisher.unmap_run(run_id=run_id)
@@ -1348,6 +1358,7 @@ async def _stream_run(
     lease_token: str,
     resume_decisions: list[dict[str, Any]] | None = None,
     actor_id: str = "",
+    conversation_cache: dict[str, str] | None = None,
 ) -> None:
     from ..core.runtime_adapter import supervisor_runner  # noqa: PLC0415
 
@@ -1410,6 +1421,16 @@ async def _stream_run(
                 "discord: investigation thread created run_id=%s thread_id=%s",
                 run_id, getattr(thread, "id", "?"),
             )
+            # Bind this thread to the same conversation/grafo the run started
+            # in, so subsequent operator replies inside the thread resolve to
+            # the SAME conversation_id (memory + history + checkpoint) instead
+            # of forking a new graph per thread.  One thread = one graph.
+            if conversation_cache is not None:
+                conversation_cache[f"channel:{getattr(thread, 'id', '')}"] = conversation_id
+                log.info(
+                    "discord: thread bound to conversation run_id=%s thread_id=%s conv_id=%s",
+                    run_id, getattr(thread, "id", "?"), conversation_id,
+                )
             session.thread = thread
             session.channel = thread
             session._poster = _RateLimitedPoster(thread)
