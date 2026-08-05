@@ -4,6 +4,53 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-04 — Discord: pre-warm LLM client off-loop (freeze fix)
+
+After the UX redesign shipped, the live session froze on the **first** Discord
+message: the bot posted the initial status embed + INV thread header for
+`INV-RUN_A8F1 · Hi` (~22:17) and then never responded to the next two messages
+(22:18, 23:03). The runner log captured the smoking gun:
+
+```
+[munin] WARNING Shard ID None heartbeat blocked for more than 10 seconds.
+Loop thread traceback (most recent call last):
+  ... discord_adapter.py:1335, in _stream_run
+      model = LLMClient(settings).make_langchain()
+  ... llm_client.py:279, in make_langchain
+      from langchain_openai import ChatOpenAI
+  ... pydantic _generics.create_generic_submodel ... _ChatModelBinding
+```
+
+`make_langchain()` does a **lazy `from langchain_openai import ChatOpenAI`**
+inline in `_stream_run`, which triggers pydantic 2 generic submodel schema
+generation for `RunnableBinding[LanguageModelInput, AIMessage]` — a
+synchronous, CPU-bound path that took minutes (the run was cancelled ~53 min
+later still inside the import). That blocked the Discord event loop entirely:
+no heartbeats, no new message dispatch, nothing streamed. The earlier
+`tool_forge` "freeze" (session 30944036095, 664991 ms) was a different beast —
+that one was `forge_exhausted` after 5 invalid iterations, not a loop block.
+
+Fix (`munin/production/discord_adapter.py`):
+
+- New process-local cache + builder: `_model_build_lock` (`threading.Lock`),
+  `_model_cache`, `_build_model_once(settings)` builds the langchain model
+  exactly once under the lock and logs the cold-import duration; subsequent
+  callers get the cached instance.
+- New `_prewarm_model(settings)`: wraps `_build_model_once` in
+  `asyncio.to_thread`, scheduled as a named task from `on_ready` so the cold
+  import runs off the event loop *before* the first operator message arrives.
+- `_stream_run()` now builds the model via
+  `await asyncio.to_thread(_build_model_once, settings)` instead of a inline
+  `LLMClient(settings).make_langchain()`. The loop stays responsive even if the
+  cache is cold on the first message (the run just waits; heartbeats and other
+  messages keep flowing). The existing `"[failed] model unavailable"` error
+  path is preserved.
+
+Result: the event loop never blocks on the langchain import again. The model
+is built once per process, off-loop, and reused across runs. Validated:
+`py_compile` OK, ruff clean (only preexisting S110/S112), `tests/test_discord_adapter.py`
+25 passed / 1 skipped with `--basetemp`.
+
 ## 2026-08-04 — Discord UX redesign: embeds, buttons, INV-threads
 
 Rebuilt the Discord operator surface from plain text into the `discord_ui`

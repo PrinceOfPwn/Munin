@@ -63,6 +63,7 @@ import contextlib
 import json
 import logging
 import secrets
+import threading
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -1296,6 +1297,43 @@ def _finalize(
         log.debug("discord: broadcast failed", exc_info=True)
 
 
+# Process-local LLM client cache.  ``langchain_openai`` import plus pydantic
+# generic schema generation (``_ChatModelBinding``) can take *minutes* on a
+# cold loop and MUST NOT run inside the Discord event loop — in the
+# 2026-08-04 live session it blocked heartbeats and froze the bot after the
+# first message.  The model is built once, off-loop (``_prewarm_model`` on
+# ``on_ready``, then lazily via ``to_thread`` on the first run) and reused
+# for every subsequent run in the process.
+_model_build_lock = threading.Lock()
+_model_cache: Any = None
+
+
+def _build_model_once(settings: Any) -> Any:
+    """Return the process-cached langchain model, building it once off-loop."""
+    global _model_cache
+    if _model_cache is not None:
+        return _model_cache
+    with _model_build_lock:
+        if _model_cache is not None:
+            return _model_cache
+        from ..core.llm_client import LLMClient  # noqa: PLC0415
+
+        started = time.monotonic()
+        log.info("discord: building LLM client (cold import, off-loop)")
+        model = LLMClient(settings).make_langchain()
+        _model_cache = model
+        log.info("discord: LLM client ready in %.1fs", time.monotonic() - started)
+        return model
+
+
+async def _prewarm_model(settings: Any) -> None:
+    """Warm the cached LLM client without blocking the event loop."""
+    try:
+        await asyncio.to_thread(_build_model_once, settings)
+    except Exception:  # noqa: BLE001
+        log.warning("discord: model prewarm failed", exc_info=True)
+
+
 async def _stream_run(
     *,
     message: Any,
@@ -1311,7 +1349,6 @@ async def _stream_run(
     resume_decisions: list[dict[str, Any]] | None = None,
     actor_id: str = "",
 ) -> None:
-    from ..core.llm_client import LLMClient  # noqa: PLC0415
     from ..core.runtime_adapter import supervisor_runner  # noqa: PLC0415
 
     if settings is None:
@@ -1332,7 +1369,11 @@ async def _stream_run(
             shared_state.authorize_approved_tool_call = store.authorize_approved_tool_call  # type: ignore[assignment]
 
     try:
-        model = LLMClient(settings).make_langchain()
+        # Off-loop build: the cold langchain import is CPU-pathological and
+        # would otherwise freeze the Discord event loop (heartbeats + all
+        # subsequent messages) for minutes.  ``on_ready`` pre-warms it, so
+        # this is normally a cache hit.
+        model = await asyncio.to_thread(_build_model_once, settings)
     except Exception as exc:  # noqa: BLE001
         log.warning("discord: model init failed: %s", exc)
         _finalize(
@@ -1663,6 +1704,12 @@ def create_discord_task(
             "discord: bot ready as %s (allowed_channels=%d allowed_users=%d)",
             getattr(client, "user", "?"),
             len(allowed_channels), len(allowed_users),
+        )
+        # Warm the langchain model off-loop so the first operator message
+        # never blocks the event loop on the cold import (2026-08-04 fix).
+        asyncio.create_task(
+            _prewarm_model(settings),
+            name="discord-model-prewarm",
         )
 
     @client.event
