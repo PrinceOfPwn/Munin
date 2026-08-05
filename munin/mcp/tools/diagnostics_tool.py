@@ -235,7 +235,18 @@ def _probe_graphs() -> dict[str, Any]:
     # to reach the real top-level ``munin.subagents`` package.
     from ...subagents.base import _STATIC_TOOLS, ALL_SUBAGENT_TOOL_NAMES  # noqa: PLC0415,TID252
     from .. import registry  # noqa: TID252,PLC0415
+    from ..capabilities import CAPABILITY_PROFILES  # noqa: TID252,PLC0415
+    from ...core.autonomy.kernel import KERNEL_META_TOOL_NAMES  # noqa: PLC0415,TID252
     known_tools = set(_STATIC_TOOLS.keys()) | set(ALL_SUBAGENT_TOOL_NAMES)
+    # Graphs may legitimately whitelist kernel meta-tools (available to
+    # subagents with may_create_child=True) and MCP-native capability tools
+    # (e.g. list_generated_tools / describe_generated_tool) that are not part
+    # of the static subagent catalog. Without these, a forged graph whose
+    # whitelist trusts the advertised runtime surface is flagged broken and a
+    # live run fails its own health probe.
+    known_tools |= set(KERNEL_META_TOOL_NAMES)
+    for profile in CAPABILITY_PROFILES:
+        known_tools |= set(profile.get("native_tools", ()))
     known_gen = {row["name"] for row in registry.list_generated(STATE)}
     known_tools |= known_gen
 

@@ -4,6 +4,104 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-05 — Fix Turso state reset + kernel meta-tool schema + graph probe
+
+Three independent fixes that unblocked the `raven-mind/diag-pre-fix` live
+session, which kept failing its own MCP health probe and could not be wiped
+clean via the maintenance workflow.
+
+### 1. `scripts/reset_turso_state.py` — FOREIGN KEY constraint failed mid-wipe
+
+The maintenance workflow executed the reset over the shared Turso DB and
+crashed:
+
+```
+ValueError: Hrana: `stream error: `Error { message: "SQLite error:
+FOREIGN KEY constraint failed", code: "SQLITE_CONSTRAINT" }``
+```
+
+Root cause: the script iterated `_table_names` in arbitrary order and issued
+`DELETE FROM {table}` on the remote autocommit connection. Some tables have
+HTTP FK edges; deleting a *parent* before its *children* trips Turso's FK
+enforcement, and because the connection is autocommit the deletes that
+already ran were committed — leaving the database **half-wiped**.
+
+Fix:
+- Issue `PRAGMA foreign_keys=OFF` for the session (libsql honours the
+  pragma per connection over Hrana — verified against `tursodatabase/libsql`).
+- Fall back to a bounded **multi-pass drain** so a server that rejects the
+  PRAGMA still completes the wipe: each pass deletes every non-empty table,
+  swallowing `FOREIGN KEY constraint failed` for rows whose parents still
+  exist; once a pass removes nothing, the loop exits.
+- After the wipe, verify every non-preserved table has zero rows; raise with
+  the residual counts if anything survived (cyclic/self-referential FK edge).
+- Re-arm `PRAGMA foreign_keys=ON` before closing.
+
+The new script is idempotent: a partially-wiped database can be re-reset
+safely and will converge to an empty operational state regardless of the
+order the schema happens to enumerate its tables in.
+
+### 2. Kernel meta-tool schema lied about `gen_only` (runtime break)
+
+The operator's own agent crashed its runtime with:
+
+```
+AutonomyKernel.meta_tools.<locals>.list_registered_agents()
+got an unexpected keyword argument 'gen_only'
+```
+
+`munin/core/autonomy/kernel.py` registered `list_registered_agents` and
+`list_registered_workflows` with `ListToolsArgs` (which adverts `gen_only`),
+but those handlers take **no keyword arguments**. An LLM that trusts the
+published schema calls `list_registered_agents(gen_only=True)` → TypeError.
+
+Fix:
+- New module-level constant `KERNEL_META_TOOL_NAMES` enumerates the 12
+  meta-tools the kernel advertises — used by `SubagentFactory._filter_tools`
+  (replacing its second hand-coded copy) and by the `graphs` health probe.
+- New empty `NoArgs` args schema; `list_registered_agents` and
+  `list_registered_workflows` register with `NoArgs`. `list_registered_tools`
+  keeps `ListToolsArgs` because its handler genuinely accepts `gen_only`.
+
+### 3. `_probe_graphs` flagged forged graphs with a legitimate whitelist
+
+The `live-session` smoke reported:
+
+```
+munin_diagnostics hard failures: ['graphs']; ...
+{"name": "graphs", "ok": false, "total_active": 1,
+ "issues": [{"graph": "tool_dependency_fixer",
+             "unknown_tools": ["list_registered_agents", "inspect_registered_agent",
+               "list_registered_tools", "list_generated_tools",
+               "inspect_registered_tool", "describe_generated_tool", "create_tool"]}]}
+```
+
+`tool_dependency_fixer` is a **residual graph** forged in an earlier live run
+(an LLM agent created a dependency-graph specialist that whitelists the
+runtime surface it sees). The queued probe in
+`munin/mcp/tools/diagnostics_tool.py::_probe_graphs` only knew
+`_STATIC_TOOLS ∪ ALL_SUBAGENT_TOOL_NAMES ∪ generated_tools`, so:
+- kernel meta-tools (e.g. `create_tool`, `list_registered_agents`) — unknown,
+  even though `SubagentFactory._filter_tools` hands those exact names to any
+  `may_create_child=True` subagent.
+- MCP-native capability tools (`list_generated_tools`,
+  `describe_generated_tool`) — unknown, even though they are real audited
+  tools advertised by the capability profiles.
+
+Fix: extend `known_tools` in `_probe_graphs` with `KERNEL_META_TOOL_NAMES`
+and a flatten of `CAPABILITY_PROFILES[*].native_tools`. A graph whose
+whitelist trusts the advertised runtime surface is no longer flagged broken.
+
+### Tests
+
+- `tests/characterization/test_kernel_meta_schema_parity.py` (new): 4 tests
+  asserting `list_registered_agents`/`list_registered_workflows` do not
+  advertise `gen_only`, `list_registered_tools` still does, and a forged
+  graph whitelisting kernel meta-tools + MCP natives passes the health probe.
+- The pre-existing regression
+  `tests/test_pr_review_regressions.py::test_graph_diagnostics_imports_the_top_level_subagent_catalog`
+  still passes after the probe extension.
+
 ## 2026-08-04 — Discord: pre-warm LLM client off-loop (freeze fix)
 
 After the UX redesign shipped, the live session froze on the **first** Discord
