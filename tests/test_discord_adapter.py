@@ -747,7 +747,6 @@ def test_handle_message_creates_thread_and_dedicated_conversation() -> None:
     the parent channel's chatter.  Now _handle_message creates the thread
     BEFORE create_turn and binds the conversation_id to ``thread:{id}``.
     """
-    from munin.production import discord_adapter
     from munin.production import discord_ui as _ui_mod
     from munin.production.discord_adapter import _handle_message
 
@@ -874,7 +873,6 @@ def test_handle_message_idempotent_replay_deletes_duplicate_thread() -> None:
     so thread creation necessarily precedes create_turn; on a replay we
     recover by deleting the duplicate thread.
     """
-    from munin.production import discord_adapter
     from munin.production import discord_ui as _ui_mod
     from munin.production.discord_adapter import _handle_message
 
