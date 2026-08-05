@@ -1,0 +1,113 @@
+name: Enterprise Lab Runtime Smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/live-enterprise-lab.yml"
+      - ".github/workflows/enterprise-lab-smoke.yml"
+      - "scripts/ldap_mock.ldif"
+      - "scripts/ldap_seed/60-web-lab.ldif"
+      - "scripts/ldap_seed/70-enterprise-lab.ldif"
+      - "scripts/ldap_seed/71-enterprise-links.ldif"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime_smoke:
+    name: OpenLDAP + Juice Shop runtime smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      ldap:
+        image: osixia/openldap:1.5.0
+        env:
+          LDAP_ORGANISATION: "AKATSUKI"
+          LDAP_DOMAIN: "akatsuki.com"
+          LDAP_BASE_DN: "dc=akatsuki,dc=com"
+          LDAP_ADMIN_PASSWORD: "itachi"
+          LDAP_CONFIG_PASSWORD: "itachi"
+          LDAP_TLS: "false"
+        ports:
+          - 389:389
+      juiceshop:
+        image: bkimminich/juice-shop:v20.0.0
+        ports:
+          - 3000:3000
+
+    env:
+      LDAP_URI: "ldap://127.0.0.1:389"
+      LDAP_BASE_DN: "dc=akatsuki,dc=com"
+      LDAP_BIND_DN: "cn=admin,dc=akatsuki,dc=com"
+      LDAP_PASSWORD: "itachi"
+      JUICE_SHOP_URL: "http://127.0.0.1:3000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install probes
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ldap-utils nmap
+
+      - name: Wait for services
+        run: |
+          for attempt in $(seq 1 60); do
+              if ldapsearch -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+                    -b "$LDAP_BASE_DN" "(objectClass=*)" dn 2>/dev/null | grep -q "result: 0"; then
+                  break
+              fi
+              test "$attempt" -lt 60 || { echo "LDAP unavailable" >&2; exit 1; }
+              sleep 1
+          done
+
+          for attempt in $(seq 1 90); do
+              if curl -fsS "$JUICE_SHOP_URL/" -o /tmp/juice-shop-index.html; then
+                  grep -Eqi 'juice|app-root|<html' /tmp/juice-shop-index.html
+                  break
+              fi
+              test "$attempt" -lt 90 || { echo "Juice Shop unavailable" >&2; exit 1; }
+              sleep 2
+          done
+
+          nmap -Pn -sT -p 389,3000 127.0.0.1 -oN /tmp/lab-ports.txt
+          grep -q '389/tcp.*open' /tmp/lab-ports.txt
+          grep -q '3000/tcp.*open' /tmp/lab-ports.txt
+
+      - name: Apply enterprise directory fixtures
+        run: |
+          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+              -f scripts/ldap_mock.ldif
+          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+              -f scripts/ldap_seed/60-web-lab.ldif
+          ldapadd -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+              -f scripts/ldap_seed/70-enterprise-lab.ldif
+          ldapmodify -c -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+              -f scripts/ldap_seed/71-enterprise-links.ldif
+
+      - name: Verify objects and nested privilege paths
+        run: |
+          ldapsearch -LLL -H "$LDAP_URI" -x -D "$LDAP_BIND_DN" -w "$LDAP_PASSWORD" \
+              -b "$LDAP_BASE_DN" "(objectClass=*)" \
+              dn uid cn title employeeType member owner objectClass \
+              > /tmp/enterprise-directory.ldif
+
+          for expected in \
+            '^dn: cn=JUICE01,ou=computers,dc=akatsuki,dc=com$' \
+            '^uid: svc_juice$' \
+            '^title: HTTP/JUICE01.akatsuki.com:3000$' \
+            '^uid: breakglass_audit$' \
+            '^uid: legacy_batch$' \
+            '^member: cn=Tier-0 Automation,ou=groups,dc=akatsuki,dc=com$' \
+            '^member: cn=Production Deployers,ou=groups,dc=akatsuki,dc=com$' \
+            '^member: uid=vendor_zen,ou=Contractors,ou=Corp,dc=akatsuki,dc=com$'; do
+              grep -q "$expected" /tmp/enterprise-directory.ldif
+          done
+
+          test "$(grep -c '^objectClass: inetOrgPerson$' /tmp/enterprise-directory.ldif || true)" -ge 20
+          test "$(grep -c '^objectClass: groupOfNames$' /tmp/enterprise-directory.ldif || true)" -ge 18
+          test "$(grep -c '^objectClass: device$' /tmp/enterprise-directory.ldif || true)" -ge 14
+          test "$(grep -Ec '^title: [A-Za-z0-9_-]+/.+' /tmp/enterprise-directory.ldif || true)" -ge 10
+          test "$(grep -c '^employeeType: DONT_REQ_PREAUTH$' /tmp/enterprise-directory.ldif || true)" -ge 4
