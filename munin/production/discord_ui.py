@@ -467,6 +467,20 @@ class RunControlView:
 # ----------------------------------------------------------------------------
 
 
+def _thread_name(run_id: str, prompt: str) -> str:
+    """Build the canonical INV thread name from a run_id and prompt.
+
+    Used both by ``create_run_thread`` (initial creation) and by the adapter
+    when it renames the thread to the *real* ``run_id`` after ``create_turn``
+    returns.  Keeping the logic in one place guarantees the rename produces
+    the same string the original name would have used.
+    """
+    objective = prompt.strip().split("\n")[0] if prompt else "operation"
+    if len(objective) > 56:
+        objective = objective[:53] + "..."
+    return f"🔍 INV-{run_id[:8].upper()} · {objective}"
+
+
 async def create_run_thread(
     message: Any,
     *,
@@ -488,16 +502,11 @@ async def create_run_thread(
     if message.guild is None:
         return None  # DMs don't have threads
 
-    # Short objective for the thread title (max 100 chars, Discord limit).
-    objective = prompt.strip().split("\n")[0] if prompt else "operation"
-    if len(objective) > 56:
-        objective = objective[:53] + "..."
-
     try:
         thread = await message.create_thread(
             # One investigation = one thread: INV-XXXX pattern so runs are
             # easy to find in the channel sidebar.
-            name=f"🔍 INV-{run_id[:8].upper()} · {objective}",
+            name=_thread_name(run_id, prompt),
             auto_archive_duration=1440,  # 24h
             reason=f"Munin run {run_id}",
         )
@@ -546,7 +555,7 @@ async def post_investigation_header(
     embed.add_field(
         name="🧠 Context Utilized",
         value=(
-            "• This thread (fresh)\n"
+            "• Thread-scoped conversation\n"
             "• Munin conversation history (last 16 messages)\n"
             "• LangGraph checkpoint state (if resuming)\n"
             "• Hugin knowledge graph (if relevant)\n"

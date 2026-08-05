@@ -78,7 +78,6 @@ DISCORD_POST_INTERVAL = 1.15       # min spacing between separate posts (5 msg/5
 DISCORD_MAX_MESSAGE_CHARS = 1900   # 2000-char hard cap, headroom for markdown
 DISCORD_STATUS_MAX_CHARS = 1800
 DISCORD_TOOL_TAIL = 6              # last N tool events in the status message
-DISCORD_REASONING_POST_CHARS = 1400
 DISCORD_EMBED_BODY_MAX = 4000      # embed description cap with headroom
 
 # --- Command surface --------------------------------------------------------
@@ -224,11 +223,52 @@ def _get_or_create_conversation(
     return conversation["id"]
 
 
-def _chunk_message(text: str, *, size: int = DISCORD_MAX_MESSAGE_CHARS) -> list[str]:
+def _split_at_word_boundary(
+    text: str, max_size: int = DISCORD_MAX_MESSAGE_CHARS
+) -> list[str]:
+    """Split text into chunks of at most ``max_size`` chars on word boundaries.
+
+    Discord's hard cap is 2000 chars per message. We target 1900 to leave
+    headroom for the leading ``💭 `` marker and markdown formatting. The split
+    prefers, in order:
+      1. the last newline before max_size (keeps paragraphs and lists intact);
+      2. the last whitespace before max_size (never splits a word);
+      3. the max_size itself (only for a single run of >max_size chars with no
+         whitespace at all — extremely rare for natural language).
+
+    The leftover (a partial word) is ALWAYS returned in the next chunk so
+    nothing is dropped, even when a model delta crosses the chunk boundary.
+    """
     text = text or ""
     if not text:
         return [""]
-    return [text[i : i + size] for i in range(0, len(text), size)]
+    chunks: list[str] = []
+    buf = text
+    while len(buf) > max_size:
+        cut = buf[:max_size]
+        # 1) prefer the last newline (paragraph/list break)
+        nl = cut.rfind("\n")
+        if nl >= max_size // 2:  # only accept a newline if it's reasonably late
+            split_at = nl + 1
+        else:
+            # 2) fall back to the last whitespace (any kind)
+            ws = max(cut.rfind(" "), cut.rfind("\t"))
+            if ws >= max_size // 2:
+                split_at = ws + 1
+            else:
+                # 3) no good boundary — hard cut. The rest of the word
+                # continues in the next chunk; nothing is lost.
+                split_at = max_size
+        chunks.append(buf[:split_at])
+        buf = buf[split_at:]
+    if buf:
+        chunks.append(buf)
+    return chunks if chunks else [""]
+
+
+def _chunk_message(text: str, *, size: int = DISCORD_MAX_MESSAGE_CHARS) -> list[str]:
+    """Split text for Discord (2000-char hard cap, word-boundary safe)."""
+    return _split_at_word_boundary(text, size)
 
 
 def _extract_tool_summary(output_raw: str) -> str:
@@ -331,17 +371,40 @@ class _RunSession:
         if text:
             self.reasoning_buffer += text
             self._dirty = True
-            # Long reasoning is posted separately so the status message
-            # stays small; keep the tail in the status buffer.
-            if len(self.reasoning_buffer) >= DISCORD_REASONING_POST_CHARS:
+            # Transmit the reasoning fully (operator directive: no arbitrary
+            # 1400-char cap).  Only hold back the trailing partial chunk when
+            # the buffer exceeds Discord's per-message cap so a model delta
+            # crossing the boundary doesn't split a word the LLM is still
+            # emitting.  When the buffer passes DISCORD_MAX_MESSAGE_CHARS,
+            # flush every complete word-boundary chunk and keep just the
+            # residual to wait for the next delta to complete it.
+            if len(self.reasoning_buffer) >= DISCORD_MAX_MESSAGE_CHARS:
                 self._post_reasoning_block()
 
     def _post_reasoning_block(self) -> None:
-        block = self.reasoning_buffer[: DISCORD_REASONING_POST_CHARS]
-        if not block.strip():
+        """Flush as much of the reasoning buffer as fits in complete Discord-
+        sized, word-boundary-safe chunks.
+
+        The LAST chunk is never safe to post alone — it's the trailing tail
+        which the next model delta is likely to extend (and might currently
+        end mid-word).  Keep it buffered; send everything before it as a
+        single `💭` post.  ``_RateLimitedPoster.post`` then splits that post
+        into Discord-safe messages via ``_chunk_message``/``_split_at_word_
+        boundary``, so no layer ever splits a word.
+        """
+        if not self.reasoning_buffer.strip():
             return
-        self.reasoning_buffer = self.reasoning_buffer[len(block):]
-        asyncio.create_task(self._poster.post(f"💭 {block.strip()}"))
+        chunks = _split_at_word_boundary(
+            self.reasoning_buffer, DISCORD_MAX_MESSAGE_CHARS
+        )
+        # Single chunk → nothing safely postable yet (might still grow). Wait.
+        if len(chunks) <= 1:
+            return
+        to_send = "".join(chunks[:-1])
+        self.reasoning_buffer = chunks[-1]
+        body = to_send.strip()
+        if body:
+            asyncio.create_task(self._poster.post(f"💭 {body}"))
 
     def add_tool_event(self, line: str) -> None:
         if line:
@@ -578,11 +641,17 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
         if content.startswith(prefix):
             return content[len(prefix):].strip()
 
-    # Community channel: after the allowlist check in _handle_message passed,
-    # ANY human message in an allowed guild channel is an invocation.  The bot
-    # is the channel's assistant — it answers every member, not just whoever
-    # mentions it.  (Slash commands are still routed to _handle_command later.)
-    return content
+    # A mention that Discord renders as plain text (e.g. typing "@Munin"
+    # without using the native mention, or a role mention the client cannot
+    # resolve) still counts as an invocation.  Be lenient ONLY for the bot's
+    # own name so "Nico wrote @Munin and got nothing" cannot happen again;
+    # ordinary channel chatter is NOT an invocation (otherwise every message
+    # spawns an empty INV thread, as observed in the 1:11 PM live session).
+    lowered = content.lower()
+    if "@munin" in lowered or lowered.startswith("munin "):
+        return content.replace("@munin", "", 1).strip().replace("@Munin", "", 1).strip()
+
+    return None
 
 
 def _is_thread_channel(channel: Any) -> bool:
@@ -1214,13 +1283,6 @@ async def _handle_message(
     # keep the community graph.  This is what keeps parallel operators from
     # cross-contaminating each other's contexts.
     is_thread = _is_thread_channel(message.channel)
-    channel_key = (
-        f"dm:{author_id}"
-        if is_dm
-        else f"thread:{channel_id}"
-        if is_thread
-        else f"channel:{channel_id}"
-    )
 
     # Slash commands are handled without creating a graph turn.
     if _parse_command(prompt) is not None:
@@ -1229,20 +1291,109 @@ async def _handle_message(
         )
         return
 
-    try:
-        conversation_id = _get_or_create_conversation(
-            store,
-            actor_id=actor["id"],
-            channel_key=channel_key,
-            cache=conversation_cache,
-            title=f"discord:{message.author}",
-            is_dm=is_dm,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("discord: conversation bootstrap failed: %s", exc)
-        with contextlib.suppress(Exception):
-            await message.reply(f"[failed] could not open conversation: {exc}")
-        return
+    # --- Conversation + (optional) INV thread creation -------------------
+    #
+    # The architecture-critical decision: for a guild channel message that
+    # is NOT already inside a thread, the INV thread is created HERE, BEFORE
+    # ``create_turn``, so the user message, the run, the checkpoint and the
+    # ``run_execution_context`` history ALL live in the thread's dedicated
+    # ``thread:{thread.id}`` conversation from the very start.  Doing the
+    # thread creation in ``_stream_run`` (the old design) bound the run to
+    # the channel's community graph and only *logged* that the thread "owns"
+    # a dedicated conv — without ever retargeting the run to it — so
+    # ``run_execution_context`` (store.py LIMIT 16) pulled the channel's
+    # unrelated chatter and polluted the agent's session intent.
+    #
+    # DMs and messages inside an existing thread keep the old behaviour:
+    # they already have a dedicated graph (``dm:{author_id}`` or
+    # ``thread:{channel_id}``) so bind the conversation normally and let
+    # ``_stream_run`` stream in-line WITHOUT creating a new thread.
+
+    thread: Any = None
+    if is_dm or is_thread:
+        channel_key = f"dm:{author_id}" if is_dm else f"thread:{channel_id}"
+        # thread stays None: ``_stream_run`` will NOT create one for these
+        # paths (DMs can't, and the thread already exists).
+        try:
+            conversation_id = _get_or_create_conversation(
+                store,
+                actor_id=actor["id"],
+                channel_key=channel_key,
+                cache=conversation_cache,
+                title=f"discord:{message.author}",
+                is_dm=is_dm,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("discord: conversation bootstrap failed: %s", exc)
+            with contextlib.suppress(Exception):
+                await message.reply(f"[failed] could not open conversation: {exc}")
+            return
+    else:
+        # GUILD CHANNEL + non-thread message → create the INV thread FIRST
+        # so the run, the user message, and the checkpoint all live in the
+        # thread's dedicated conversation (``thread:{thread.id}``).  This is
+        # what isolates parallel operators in the same channel from each
+        # other: each invocation is its own bounded graph.
+        #
+        # ``create_turn`` mints the real ``run_id`` internally (store.py
+        # ``_id("run")``), so we cannot know it before calling it.  Use a
+        # provisional id (matching the ``run_{uuid.uuid4().hex}`` format at
+        # store.py:57-58) for the thread NAME only, then rename the thread
+        # to the real run_id after ``create_turn`` returns (see the rename
+        # below).  If the rename fails, the thread still works under the
+        # provisional name — cosmetic, not fatal.
+        import uuid as _uuid
+
+        provisional_run_id = f"run_{_uuid.uuid4().hex}"
+        try:
+            thread = await ui.create_run_thread(message, run_id=provisional_run_id, prompt=prompt)
+        except Exception:  # noqa: BLE001
+            thread = None
+        if thread is not None:
+            thread_key = f"thread:{getattr(thread, 'id', '')}"
+            try:
+                conversation_id = _get_or_create_conversation(
+                    store,
+                    actor_id=actor["id"],
+                    channel_key=thread_key,
+                    cache=conversation_cache,
+                    title=f"discord:{getattr(thread, 'name', None) or thread_key}",
+                    is_dm=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.exception("discord: thread conversation bind failed: %s", exc)
+                # The thread exists but the conv cannot be bound — fall back
+                # to the community graph AND drop the dangling thread so the
+                # operator isn't confused by an empty INV thread next to an
+                # in-channel stream.
+                with contextlib.suppress(Exception):
+                    await thread.delete()
+                thread = None
+                conversation_id = _get_or_create_conversation(
+                    store,
+                    actor_id=actor["id"],
+                    channel_key=f"channel:{channel_id}",
+                    cache=conversation_cache,
+                    title=f"discord:{message.author}",
+                    is_dm=False,
+                )
+            else:
+                log.info(
+                    "discord: investigation thread created run_id=%s thread_id=%s conv_id=%s",
+                    provisional_run_id, getattr(thread, "id", "?"), conversation_id,
+                )
+        else:
+            # Thread creation failed (perms / DM-like channel) — fall back to
+            # the channel community graph (current behaviour).  ``_stream_run``
+            # stream in-line in the original channel.
+            conversation_id = _get_or_create_conversation(
+                store,
+                actor_id=actor["id"],
+                channel_key=f"channel:{channel_id}",
+                cache=conversation_cache,
+                title=f"discord:{message.author}",
+                is_dm=False,
+            )
 
     try:
         turn = store.create_turn(
@@ -1253,6 +1404,10 @@ async def _handle_message(
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("discord: create_turn failed: %s", exc)
+        # If we created a thread speculatively, drop it so we don't leak.
+        if thread is not None:
+            with contextlib.suppress(Exception):
+                await thread.delete()
         with contextlib.suppress(Exception):
             await message.reply(f"[failed] could not queue run: {exc}")
         return
@@ -1261,11 +1416,30 @@ async def _handle_message(
     publisher.map_run(run_id=run_id, channel_id=channel_id)
 
     # Idempotent replay (Discord retry / duplicate message id): don't
-    # re-run, just acknowledge.
+    # re-run, just acknowledge.  In the guild-channel path we already
+    # created a thread on a provisional id; on a replay the real run
+    # already lives in a thread created on the FIRST dispatch, so the
+    # duplicate thread we just made must be deleted to avoid leaking an
+    # empty INV thread per Discord gateway retry.  There is no public
+    # "lookup pending run by idempotency_key" helper on the store, so we
+    # can't detect the replay BEFORE thread creation — recovery here is
+    # the documented trade-off (Discord message-id replays are rare).
     if turn.get("idempotent_replay"):
+        if thread is not None:
+            with contextlib.suppress(Exception):
+                await thread.delete()
         with contextlib.suppress(Exception):
             await message.reply(f"[replay] run {run_id} already exists")
         return
+
+    # Rename the INV thread to the REAL run_id now that ``create_turn``
+    # returned it.  In the guild-channel path the thread was created with a
+    # provisional id; renaming keeps the sidebar entry in sync with the
+    # actually-running run.  ``thread.edit`` is best-effort — if it raises
+    # (perms / rate-limit) the thread still works under the provisional name.
+    if thread is not None:
+        with contextlib.suppress(Exception):
+            await thread.edit(name=ui._thread_name(run_id, prompt))
 
     try:
         lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
@@ -1294,6 +1468,7 @@ async def _handle_message(
             lease_token=lease_token,
             actor_id=str(actor["id"]),
             conversation_cache=conversation_cache,
+            thread=thread,
         )
     finally:
         publisher.unmap_run(run_id=run_id)
@@ -1477,6 +1652,7 @@ async def _stream_run(
     actor_id: str = "",
     conversation_cache: dict[str, str] | None = None,
     presence: bool = False,
+    thread: Any = None,
 ) -> None:
     from ..core.runtime_adapter import supervisor_runner  # noqa: PLC0415
 
@@ -1524,7 +1700,23 @@ async def _stream_run(
     # inside the thread; the main channel only gets a compact pointer.  DMs
     # (and resume paths, which already stream inside the approval thread)
     # keep streaming in-line.
-    if not resume_decisions and not presence:
+    #
+    # Two entry shapes reach here:
+    #   * ``thread`` pre-supplied by ``_handle_message`` (the guild-channel
+    #     path after the architecture fix): the thread already exists and
+    #     ``conversation_id`` IS already the thread's own conv — no work to
+    #     do here, just wire the session onto the pre-created thread.
+    #   * ``thread is None`` AND not resume/presence: a defensive fallback
+    #     for the rare case where ``_handle_message`` could not create the
+    #     thread (e.g. missing perms) and fell back to the channel community
+    #     graph.  In that case we ATTEMPT to create one late here; if it
+    #     succeeds we RETARGET the run by reassigning ``conversation_id`` to
+    #     the new thread's conv_id so the header, ``session.start``, the
+    #     status button, ``supervisor_runner`` and ``_finalize`` all target
+    #     the thread's graph (the OLD code only logged "thread owns graph"
+    #     without retargeting — the actual root cause of the context
+    #     pollution bug this fix addresses).
+    if thread is None and not resume_decisions and not presence:
         try:
             thread = await ui.create_run_thread(message, run_id=run_id, prompt=prompt)
         except Exception:  # noqa: BLE001
@@ -1536,14 +1728,9 @@ async def _stream_run(
             thread = None
         if thread is not None:
             log.info(
-                "discord: investigation thread created run_id=%s thread_id=%s",
+                "discord: investigation thread created (defensive) run_id=%s thread_id=%s",
                 run_id, getattr(thread, "id", "?"),
             )
-            # One INV thread = one Munin graph.  The thread gets its OWN
-            # conversation (thread:{id}), isolated from the source channel's
-            # community graph and from every other thread, so parallel
-            # operators never cross-contaminate each other's contexts while
-            # still sharing data with everyone who writes inside the thread.
             thread_key = f"thread:{getattr(thread, 'id', '')}"
             try:
                 thread_conv_id = _get_or_create_conversation(
@@ -1551,7 +1738,7 @@ async def _stream_run(
                     actor_id=actor_id or "system",
                     channel_key=thread_key,
                     cache=conversation_cache or {},
-                    title=f"discord:{thread.name if hasattr(thread, 'name') else thread_key}",
+                    title=f"discord:{getattr(thread, 'name', None) or thread_key}",
                     is_dm=False,
                 )
             except Exception:  # noqa: BLE001
@@ -1561,11 +1748,18 @@ async def _stream_run(
                     run_id, getattr(thread, "id", "?"),
                     exc_info=True,
                 )
-            if thread_conv_id and conversation_cache is not None:
-                conversation_cache[thread_key] = thread_conv_id
+            # Retarget the run to the thread's own graph from here on.  This
+            # is the critical difference from the buggy old code: a local
+            # reassignment of ``conversation_id`` propagates to every
+            # downstream use (session.start, _on_run_status, supervisor_runner,
+            # _finalize) because they all read the LOCAL name.
+            if thread_conv_id:
+                if conversation_cache is not None:
+                    conversation_cache[thread_key] = thread_conv_id
+                conversation_id = thread_conv_id
                 log.info(
-                    "discord: thread owns graph run_id=%s thread_id=%s conv_id=%s",
-                    run_id, getattr(thread, "id", "?"), thread_conv_id,
+                    "discord: run retargeted to thread graph (defensive) run_id=%s conv_id=%s",
+                    run_id, conversation_id,
                 )
             session.thread = thread
             session.channel = thread
@@ -1582,6 +1776,26 @@ async def _stream_run(
                     await message.reply(
                         f"🔍 Investigation open in thread: {thread.jump_url}"
                     )
+    elif thread is not None:
+        # Pre-created thread (``_handle_message`` guild-channel path): the
+        # run already lives in ``thread:{id}``.  ``conversation_id`` IS the
+        # thread's conv_id.  Wire the session onto the thread — NO late
+        # creation, NO recomputation of thread_conv_id.
+        session.thread = thread
+        session.channel = thread
+        session._poster = _RateLimitedPoster(thread)
+        with contextlib.suppress(Exception):
+            await ui.post_investigation_header(
+                thread,
+                run_id=run_id,
+                prompt=prompt,
+                conversation_id=conversation_id,
+            )
+        if hasattr(message, "reply"):
+            with contextlib.suppress(Exception):
+                await message.reply(
+                    f"🔍 Investigation open in thread: {thread.jump_url}"
+                )
 
     # Immediate "processing" signal: the status embed appears before the
     # flush loop's first tick so the operator knows the bot picked the run up.

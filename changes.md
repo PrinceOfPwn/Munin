@@ -4,6 +4,113 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-05 — Discord: thread isolation + shared-intel scope + un-truncated reasoning
+
+A live session (`31022892758`, branch `feat/discord-community-adapter`,
+HEAD `78c6bb4`) surfaced **four** operator-visible defects running together.
+The runner log (`discord: thread owns graph ... conv_id=conv_5a0a688...` showed
+up alongside `discord: dispatch channel=1534054277075570771 author=...
+prompt_len=7` for "ajjajaj" — i.e. the bot dispatched everything). Reading
+the diff against the live behaviour turned up two structural bugs plus the
+gate liberalisation shipped in `78c6bb4`, plus a streaming layer that
+truncated mid-word.
+
+**A. Thread→conversation binding was declared but never applied.**
+`_stream_run` (discord_adapter.py) computed `thread_conv_id` for the new
+INV thread and even logged `discord: thread owns graph ... conv_id=...`,
+but every downstream use — `post_investigation_header`, `session.start`,
+the status button, `supervisor_runner`, `_finalize` — kept the channel's
+`conversation_id`. Worse: `run_execution_context` (store.py:1218-1221) loads
+the supervisor's `LIMIT 16` history from `run.conversation_id`, so the
+model's "## Session Intent" started out polluted with the channel's chatter
++ the previous OSINT (the MercadoLibre / shared-intel #817 string surfacing
+in every new thread). Fix: move thread creation BEFORE `create_turn` in
+`_handle_message`. The thread name uses a provisional `run_<uuid>` (matches
+store.py:57-58 shape) and after `create_turn` returns the real run_id the
+thread is renamed via `thread.edit(name=ui._thread_name(run_id, prompt))`
+(helper extracted in `discord_ui.py`). The run, the user message, the
+checkpoint, and the history query now all live in `thread:{thread.id}` from
+the first row inserted. Idempotent replays delete the speculatively-created
+duplicate thread. `_stream_run` accepts a `thread=` kwarg and only falls
+back to the old defensive thread-creation path when `_handle_message` could
+not make one — and that defensive path NOW reassigns `conversation_id =
+thread_conv_id` (the actual bug the previous code had: it logged the binding
+without retargeting). DMs and messages inside an existing thread keep the
+`dm:{author_id}` / `thread:{channel_id}` key; presence and resume paths stay
+unaffected because `_stream_run`'s guard is now
+`if thread is None and not resume_decisions and not presence:`.
+
+**B. `shared_intel` was effectively global.** `publish_shared_intel` and
+`query_shared_intel` (mcp/main.py) did not declare `conversation_id` /
+`actor_id`, so `_bind_runtime_context` (tool_gateway.py:143) early-returned
+without injecting the `ACTIVE_CONVERSATION_ID` / `ACTIVE_ACTOR_ID`
+contextvars. `STATE.publish_intel` inserted `""`/`""`; `STATE.query_intel`
+fell into `WHERE 1=1`. Result: the OSINT record from one operation was
+visible to every later run — the second half of the "Session Intent
+contamination" effect. Fix: add `conversation_id: str = ""` and
+`actor_id: str = ""` as kwargs BEFORE `run_id` in both tool signatures and
+forward them into the corresponding `STATE` calls. `shared_state.py` already
+accepts and stores/queries those scopes — only the tools were missing the
+plumbing.
+
+**C. `_extract_prompt` had `return content`** in `78c6bb4`, which turned
+every channel message ("oh shit ahora abre un grafo por mensaje",
+"tenes que ponerle un mensaje...", "ajjajaj") into an invocation spawning
+an empty INV thread. Restored the gated contract: native mention
+`<@{id}>` / `<@!{id}>`, reply-to-bot, `/munin ` / `!munin ` prefix, or a
+textual `@munin` mention case-insensitive (so Nico's "wrote @Munin and got
+nothing" cannot recur). Plain channel chatter returns `None` and the bot
+stays out of unrelated conversation. Tests updated:
+`test_extract_prompt_channel_requires_mention_or_prefix` (expanded),
+`test_extract_prompt_reply_to_other_ignored_in_channel` (no longer an
+invocation).
+
+**D. Reasoning streaming cut mid-word at the 1400-char cap.**
+`_post_reasoning_block` sliced `reasoning_buffer[:1400]` — a hard substring
+with no word-boundary awareness. When the latest model delta crossed the
+boundary the slice landed inside the word the LLM was still emitting, so
+the operator saw posts ending "...ldap_search → que" and the rest of the
+word showed up across the next post or got dropped while the next delta
+arrived. Operator directive: "don't put limits on what it transmits —
+let it transmit everything, the 1400 just makes it cut short or split a
+word." Removed `DISCORD_REASONING_POST_CHARS = 1400`. Added
+`_split_at_word_boundary(text, max_size=DISCORD_MAX_MESSAGE_CHARS)`: prefers
+the last newline (paragraph/list), then the last whitespace, then hard-cuts.
+Rewrote `add_reasoning` to trigger only when the buffer exceeds Discord's
+per-message cap; rewrote `_post_reasoning_block` to flush every complete
+word-boundary chunk in one `💭` post and keep only the trailing partial
+chunk buffered so the next delta can complete the in-flight word.
+`_chunk_message` (used by `_RateLimitedPoster.post` and `close()`) now
+also delegates to `_split_at_word_boundary`, so the final-content overflow
+path stopped splitting mid-word too. No character is ever dropped:
+`"".join(chunks) == original` is an invariant enforced in unit tests.
+
+**Embed cosmetics.** The "🧠 Context Utilized" block in
+`post_investigation_header` (discord_ui.py) had the line `"• This thread
+(fresh)"`. Once the thread's conversation accumulates history that claim
+is false; changed to `"• Thread-scoped conversation"`.
+
+**Tests.** `tests/test_discord_adapter.py` baseline went from 25 passed /
+1 skipped (with the Bug C working-tree fix) to **35 passed / 1 skipped**.
+The 10 new tests:
+- 5 for `_split_at_word_boundary` (no-split, newline preference, whitespace
+  fallback, no-whitespace hard-cut, partial-word preservation — the
+  canonical "ldap_search → que" reproduction).
+- 1 for `_chunk_message` delegating to `_split_at_word_boundary` (smoke).
+- 1 for `_post_reasoning_block` keeping the residual partial chunk +
+  reconstruction invariant under a real `asyncio.run`.
+- 3 for `_handle_message` (Bug A): guild-channel path creates the thread
+  before `create_turn` with `thread:{id}` conversation binding and renames
+  with the real run_id; idempotent replay deletes the duplicate thread; DM
+  end-to-end regression (would have caught a missing `_get_or_create_
+  conversation` in the DM branch).
+
+**Validation.** `py_compile` clean on all touched modules. `git diff --check`
+clean (only benign LF→CRLF notice on Windows). Live validation pending —
+to be confirmed in the next live session on `feat/discord-community-adapter`,
+watching `discord: investigation thread created` + the `Conversation:` header
+in the embed (now should show `thread_conv_*`, not the channel's communal id).
+
 ## 2026-08-04 — Discord: pre-warm LLM client off-loop (freeze fix)
 
 After the UX redesign shipped, the live session froze on the **first** Discord
