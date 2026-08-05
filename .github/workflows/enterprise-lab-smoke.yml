@@ -3,7 +3,7 @@ name: Enterprise Lab Runtime Smoke
 on:
   pull_request:
     paths:
-      - ".github/workflows/live-enterprise-lab.yml"
+      - ".github/workflows/live-session.yml"
       - ".github/workflows/enterprise-lab-smoke.yml"
       - "scripts/ldap_mock.ldif"
       - "scripts/ldap_seed/60-web-lab.ldif"
