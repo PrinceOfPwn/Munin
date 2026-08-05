@@ -387,7 +387,7 @@ class _RunSession:
                 self._dirty = False
                 return
             except Exception as exc:  # noqa: BLE001
-                log.debug(
+                log.warning(
                     "discord: initial status embed failed run_id=%s: %s",
                     self.run_id, exc,
                 )
@@ -1396,23 +1396,35 @@ async def _stream_run(
     # (and resume paths, which already stream inside the approval thread)
     # keep streaming in-line.
     if not resume_decisions:
-        with contextlib.suppress(Exception):
+        try:
             thread = await ui.create_run_thread(message, run_id=run_id, prompt=prompt)
-            if thread is not None:
-                session.thread = thread
-                session.channel = thread
-                session._poster = _RateLimitedPoster(thread)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "discord: create_run_thread failed run_id=%s — streaming in-line",
+                run_id,
+                exc_info=True,
+            )
+            thread = None
+        if thread is not None:
+            log.info(
+                "discord: investigation thread created run_id=%s thread_id=%s",
+                run_id, getattr(thread, "id", "?"),
+            )
+            session.thread = thread
+            session.channel = thread
+            session._poster = _RateLimitedPoster(thread)
+            with contextlib.suppress(Exception):
                 await ui.post_investigation_header(
                     thread,
                     run_id=run_id,
                     prompt=prompt,
                     conversation_id=conversation_id,
                 )
-                if hasattr(message, "reply"):
-                    with contextlib.suppress(Exception):
-                        await message.reply(
-                            f"🔍 Investigation open in thread: {thread.jump_url}"
-                        )
+            if hasattr(message, "reply"):
+                with contextlib.suppress(Exception):
+                    await message.reply(
+                        f"🔍 Investigation open in thread: {thread.jump_url}"
+                    )
 
     # Immediate "processing" signal: the status embed appears before the
     # flush loop's first tick so the operator knows the bot picked the run up.
@@ -1645,6 +1657,10 @@ async def _stream_run(
                 content=final_content or "(no response)", outcome=outcome,
                 conversation_id=conversation_id,
             )
+        log.info(
+            "discord: run stream end run_id=%s outcome=%s paused=%s content_len=%d",
+            run_id, outcome, paused_for_human, len(final_content or ""),
+        )
         await session.close(
             final_content=final_content or "(no response)",
             ok=ok,
