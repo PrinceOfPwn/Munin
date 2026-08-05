@@ -1344,6 +1344,98 @@ async def _prewarm_model(settings: Any) -> None:
         log.warning("discord: model prewarm failed", exc_info=True)
 
 
+# Presence report: when the bot comes online, run a REAL supervisor turn that
+# instructs the agent to report itself into the channel with the
+# ``send_discord_message`` tool.  Nothing here is a hardcoded message — if the
+# report lands, it proves end-to-end that: gateway connected, graph loaded,
+# model reachable, tool catalog live, agent → Discord egress working.
+_PRESENCE_PROMPT = (
+    "You are Munin's supervisor agent. The runtime just came online in this "
+    "Discord channel and the operator is watching. Report your presence: "
+    "send exactly ONE short operational message to this channel using the "
+    "send_discord_message tool. Say you are online, the runtime graph is "
+    "loaded and you are ready for operations. Do not run any investigation, "
+    "do not call approval-gated tools, do not enumerate tools. This is a "
+    "presence check, not an operation."
+)
+
+
+async def _presence_report(
+    *,
+    settings: Any,
+    store: Any,
+    shared_state: Any,
+    publisher: Any,
+    client: Any,
+    channel_id: str,
+    prewarm_task: asyncio.Task | None = None,
+) -> None:
+    """Fire a single agent-driven presence run once per bot login."""
+    try:
+        if prewarm_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(asyncio.shield(prewarm_task), timeout=180)
+    except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive
+        log.debug("discord: presence prewarm wait skipped: %s", exc)
+
+    channel = None
+    with contextlib.suppress(Exception):
+        channel = client.get_channel(int(channel_id))
+    if channel is None:
+        log.warning("discord: presence skipped — channel %s not resolvable", channel_id)
+        return
+
+    try:
+        # The presence actor is the bot itself (audit: who sent it).
+        actor = _resolve_actor(
+            store,
+            discord_user_id=int(getattr(client.user, "id", 0) or 0),
+            display_name="Munin (presence)",
+        )
+        conversation_id = _get_or_create_conversation(
+            store,
+            actor_id=actor["id"],
+            channel_key=f"channel:{channel_id}",
+            cache={},
+            title="discord:presence",
+            is_dm=False,
+        )
+        turn = store.create_turn(
+            actor_id=actor["id"],
+            conversation_id=conversation_id,
+            content=_PRESENCE_PROMPT,
+            idempotency_key=f"discord:presence:{channel_id}:{int(time.time() // 300)}",
+        )
+        run_id = turn["run"]["id"]
+        publisher.map_run(run_id=run_id, channel_id=channel_id)
+        lease_token, assistant_message_id = _claim_direct(store, run_id=run_id)
+        fake_message = SimpleNamespace(
+            channel=channel,
+            author=SimpleNamespace(id=getattr(client.user, "id", 0)),
+            reply=lambda content: channel.send(content),
+            guild=getattr(channel, "guild", None),
+        )
+        await _stream_run(
+            message=fake_message,
+            store=store,
+            shared_state=shared_state,
+            settings=settings,
+            run_id=run_id,
+            conversation_id=conversation_id,
+            prompt=_PRESENCE_PROMPT,
+            conversation_history=[],
+            assistant_message_id=assistant_message_id,
+            lease_token=lease_token,
+            actor_id=actor["id"],
+            conversation_cache=None,
+            presence=True,
+        )
+    except Exception:  # noqa: BLE001
+        log.warning("discord: presence report failed", exc_info=True)
+    finally:
+        publisher.unmap_run(run_id=run_id)
+
+
 async def _stream_run(
     *,
     message: Any,
@@ -1359,6 +1451,7 @@ async def _stream_run(
     resume_decisions: list[dict[str, Any]] | None = None,
     actor_id: str = "",
     conversation_cache: dict[str, str] | None = None,
+    presence: bool = False,
 ) -> None:
     from ..core.runtime_adapter import supervisor_runner  # noqa: PLC0415
 
@@ -1406,7 +1499,7 @@ async def _stream_run(
     # inside the thread; the main channel only gets a compact pointer.  DMs
     # (and resume paths, which already stream inside the approval thread)
     # keep streaming in-line.
-    if not resume_decisions:
+    if not resume_decisions and not presence:
         try:
             thread = await ui.create_run_thread(message, run_id=run_id, prompt=prompt)
         except Exception:  # noqa: BLE001
@@ -1744,15 +1837,39 @@ def create_discord_task(
         )
         # Warm the langchain model off-loop so the first operator message
         # never blocks the event loop on the cold import (2026-08-04 fix).
-        asyncio.create_task(
+        prewarm_task = asyncio.create_task(
             _prewarm_model(settings),
             name="discord-model-prewarm",
         )
+        # Agent-driven presence report: one real supervisor run per login so
+        # the operator sees Munin announce itself (graph loaded, tools live).
+        if allowed_channels:
+            asyncio.create_task(
+                _presence_report(
+                    settings=settings,
+                    store=store,
+                    shared_state=shared_state,
+                    publisher=publisher,
+                    client=client,
+                    channel_id=next(iter(allowed_channels)),
+                    prewarm_task=prewarm_task,
+                ),
+                name="discord-presence-report",
+            )
 
     @client.event
     async def on_message(message: Any) -> None:  # noqa: D401
         bot_user = getattr(client, "user", None)
         bot_user_id = int(bot_user.id) if bot_user else None
+        # Raw gateway probe: fires before any allowlist/content filter so the
+        # log always shows whether Discord delivered the event at all.
+        log.info(
+            "discord: on_message raw author=%s channel=%s type=%s content_len=%d",
+            getattr(message.author, "id", "?"),
+            getattr(getattr(message, "channel", None), "id", "?"),
+            getattr(message, "type", "?"),
+            len(getattr(message, "content", "") or ""),
+        )
         try:
             await _handle_message(
                 message,
