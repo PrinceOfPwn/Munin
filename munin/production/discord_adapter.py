@@ -62,6 +62,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -650,6 +651,29 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
     lowered = content.lower()
     if "@munin" in lowered or lowered.startswith("munin "):
         return content.replace("@munin", "", 1).strip().replace("@Munin", "", 1).strip()
+
+    # Final lenient fallback: a leading native Discord mention tag —
+    # ``<@ID>`` (user), ``<@!ID>`` (legacy nickname), or ``<@&ID>`` (role) —
+    # to ANY entity, in an allowlisted guild channel, is treated as an
+    # invocation.  This catches three real failure modes that all produced
+    # the same "bot ready but @Munin invocations silently dropped" symptom
+    # observed in the 2026-08-06 live session:
+    #   1. ``bot_user_id`` is None because the message was delivered during
+    #      the brief startup window before ``client.user`` populated, so the
+    #      L635-638 ``tag in content`` check (which gates on
+    #      ``bot_user_id is not None``) was skipped entirely;
+    #   2. The operator autocomplete-picked a role named "Munin" so the tag
+    #      is ``<@&ROLE_ID>`` — unmatched by L636's ``<@ID>``/``<@!ID>`` only;
+    #   3. ``bot_user_id`` (from ``client.user.id``) does not string-equal
+    #      the snowflake that Discord embedded in the rendered mention tag
+    #      (sharded/deployed application ID drift).
+    # The allowlist gate in ``_handle_message`` (L1256) already restricted
+    # us to operator-curated channels, so being lenient here is safe: a
+    # leading mention-tag in such a channel is almost certainly directed at
+    # the bot, not community chatter.
+    leading_mention = re.match(r"^<@!?\&?\d+>\s*", content)
+    if leading_mention is not None:
+        return content[leading_mention.end():].strip() or None
 
     return None
 
