@@ -47,7 +47,7 @@
 ## Verified v1.1.0 configuration
 
 > [!IMPORTANT]
-> Протестированной и проверенной рабочей конфигурацией для **Munin v1.1.0** является **адаптер Discord, работающий через GitHub Actions с моделью MiMo V2.5**.
+> Протестированной и проверенной рабочей конфигурацией для **Munin v1.1.0** является **адаптер Discord, работающий через GitHub Actions с моделью DeepSeek V4-Flash**.
 >
 > **Discord — стабильная операторская поверхность на данный момент.** Веб-интерфейс
 > (GUI) — целевая долгосрочная поверхность, но в живых сессиях обнаружены баги
@@ -61,14 +61,14 @@
 | Версия | **Munin v1.1.0** |
 | Интерфейс | **Адаптер Discord** (GUI в починке) |
 | Среда исполнения | **GitHub Actions** |
-| Модель | **MiMo V2.5** |
+| Модель | **DeepSeek V4-Flash** |
 
 ```mermaid
 flowchart LR
     Operator[Operator] --> Discord[Munin Discord surface]
     Discord --> Actions[GitHub Actions runner]
     Actions --> Runtime[Munin v1.1.0]
-    Runtime --> Model[MiMo V2.5]
+    Runtime --> Model[DeepSeek V4-Flash]
     Runtime --> Evidence[Durable events, reports and evidence]
 ```
 
@@ -420,9 +420,9 @@ cd app && npm run build
 
 Нет. Навыки предоставляют контекст и инструкции. Доступ к инструментам, рамки и согласование являются отдельными элементами управления среды исполнения.
 
-### Могу ли я использовать модель, отличную от MiMo V2.5?
+### Могу ли я использовать модель, отличную от DeepSeek V4-Flash?
 
-Потенциально да. Однако проверенная конфигурация v1.1.0 — это адаптер Discord на GitHub Actions с MiMo V2.5.
+Потенциально да. Однако проверенная конфигурация v1.1.0 — это адаптер Discord на GitHub Actions с DeepSeek V4-Flash.
 
 ### Заменяет ли Munin суждение аналитика?
 

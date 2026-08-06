@@ -4,6 +4,29 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — Default runtime model: MiMo V2.5 → DeepSeek V4-Flash
+
+The verified model for the Discord + GitHub Actions execution path changes from
+MiMo V2.5 to **DeepSeek V4-Flash** (`deepseek-v4-flash`) — the model ID the
+DeepSeek API docs name for "the latest version" (V4-Flash 0731, public beta
+2026-07-31). Legacy IDs `deepseek-chat` / `deepseek-reasoner` were retired on
+2026-07-24.
+
+- `.env.example`: `LLM_BASE_URL=https://api.deepseek.com/v1`,
+  `LLM_MODEL=deepseek-v4-flash` (replaces the MiMo endpoint/model), with a
+  comment noting V4 IDs are required.
+- `tests/test_prompt_contract.py`: added `deepseek-v4-flash` and
+  `deepseek-v4-pro` model-family cases (both map to "DeepSeek").
+- Docs (`README.md` + 5 localizations, `AGENTS.md`, `MAP.md`,
+  `docs/operator-guide.md`, `docs/en|es|pt-BR|zh-CN/handbook.md`): verified
+  configuration and FAQs now state **DeepSeek V4-Flash** instead of MiMo V2.5.
+  Historical MiMo mentions (HITL fix, `README.PROMPTS.md` validation matrix)
+  are preserved.
+- **Operator action required**: GitHub Actions runs consume secrets
+  `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` — update those in the repository
+  settings to `https://api.deepseek.com/v1` + a DeepSeek API key +
+  `deepseek-v4-flash`.
+
 ## 2026-08-06 — v1.1.0 release preparation: version bump + FAQ realignment
 
 - `pyproject.toml`: `version = "0.1.0"` → `"1.1.0"` (package metadata; docs

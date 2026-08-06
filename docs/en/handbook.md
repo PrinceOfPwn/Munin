@@ -11,7 +11,7 @@ approvals, live capability composition, Hugin knowledge and Valravn
 reconnaissance.
 
 The verified v1.1.0 configuration is **Discord adapter + GitHub Actions +
-MiMo V2.5**. The Web GUI is the target long-term interface but is under repair
+DeepSeek V4-Flash**. The Web GUI is the target long-term interface but is under repair
 after live-session frontend bugs; treat GUI-only claims as unverified until the
 repair loop passes. Other models and deployments may work but remain
 experimental until documented.
@@ -89,7 +89,7 @@ Soul never grants authorization, tools or scope.
 ## Deployment
 
 For v1.1.0, the tested path is the Discord adapter on GitHub Actions with
-MiMo V2.5. The Web GUI follows once its repair loop passes.
+DeepSeek V4-Flash. The Web GUI follows once its repair loop passes.
 Ephemeral runners require explicit persistence through artifacts or remote
 storage. Production deployments need durable volumes, protected ingress,
 strong secrets, strict origins and retention controls.

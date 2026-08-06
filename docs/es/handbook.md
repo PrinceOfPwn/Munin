@@ -11,7 +11,7 @@ persistentes, checkpoints, aprobaciones humanas, composición viva de
 capacidades, conocimiento Hugin y reconocimiento Valravn.
 
 La configuración verificada de v1.1.0 es **adaptador Discord + GitHub Actions +
-MiMo V2.5**. La GUI web es la interfaz objetivo a largo plazo, pero sigue en
+DeepSeek V4-Flash**. La GUI web es la interfaz objetivo a largo plazo, pero sigue en
 reparación tras bugs de frontend detectados en sesiones en vivo; trata las
 afirmaciones solo-GUI como no verificadas hasta que pase el ciclo de arreglo.
 Otras combinaciones pueden funcionar, pero son experimentales hasta
@@ -80,7 +80,7 @@ autorización, tools ni alcance.
 
 ## Despliegue
 
-El camino verificado es adaptador Discord en GitHub Actions con MiMo V2.5. La
+El camino verificado es adaptador Discord en GitHub Actions con DeepSeek V4-Flash. La
 GUI web se une una vez que pase su ciclo de reparación. Los runners
 efímeros requieren persistencia explícita mediante artifacts o almacenamiento
 remoto. Producción necesita volúmenes durables, ingreso protegido, secretos

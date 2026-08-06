@@ -8,7 +8,7 @@ Munin 是一个由操作员治理、面向自主安全行动的持久化运行�
 （稳定操作面）、认证 API、MCP、持续开发的 Web GUI、LangGraph 执行、持久化事件、
 checkpoint、人工审批、实时能力组合、Hugin 知识和 Valravn 侦察。
 
-v1.1.0 的已验证配置是 **适配器 Discord + GitHub Actions + MiMo V2.5**。Web GUI 是
+v1.1.0 的已验证配置是 **适配器 Discord + GitHub Actions + DeepSeek V4-Flash**。Web GUI 是
 长期目标界面，但在实时会话前端 bug 修复通过前视为维修状态；仅限 GUI 的说法视为未验证。
 其他组合可能可用，但在明确记录之前均视为实验性配置。
 
@@ -63,7 +63,7 @@ Hugin 提供带来源的被动知识。Valravn 收集 IOC、CVE、资产、历�
 
 ## 部署
 
-已验证路径是 GitHub Actions 上的适配器 Discord 与 MiMo V2.5。Web GUI 在修复循环
+已验证路径是 GitHub Actions 上的适配器 Discord 与 DeepSeek V4-Flash。Web GUI 在修复循环
 通过后加入。临时 runner 需要通过 artifact
 或远程存储显式持久化。生产环境需要持久卷、受保护入口、强秘密、严格来源和保留策略。
 

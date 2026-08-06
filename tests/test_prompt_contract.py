@@ -22,6 +22,8 @@ from munin.core.prompting import (
         ("mimo-v2.5-free", "MiMo"),
         ("Qwen3-32B", "Qwen"),
         ("deepseek-chat", "DeepSeek"),
+        ("deepseek-v4-flash", "DeepSeek"),
+        ("deepseek-v4-pro", "DeepSeek"),
         ("moonshot-v1", "Kimi"),
         ("Yi-Large", "Yi"),
         ("custom-agent-model", "OpenAI-compatible"),

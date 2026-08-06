@@ -53,7 +53,7 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 ## Verified v1.1.0 configuration
 
 > [!IMPORTANT]
-> The tested and verified operating configuration for **Munin v1.1.0** is the **Discord community adapter running through GitHub Actions with MiMo V2.5** as the model.
+> The tested and verified operating configuration for **Munin v1.1.0** is the **Discord community adapter running through GitHub Actions with DeepSeek V4-Flash** (`deepseek-v4-flash`) as the model.
 >
 > **Discord is the stable operator surface today.** The Web GUI is the target
 > long-term interface, but live-session testing exposed frontend bugs that are
@@ -67,14 +67,14 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 | Version | **Munin v1.1.0** |
 | Interface | **Discord community adapter** (Web GUI under repair) |
 | Execution environment | **GitHub Actions** |
-| Model | **MiMo V2.5** |
+| Model | **DeepSeek V4-Flash** (`deepseek-v4-flash`) |
 
 ```mermaid
 flowchart LR
     operator["Operator"] --> discord["Munin Discord surface"]
     discord --> actions["GitHub Actions runner"]
     actions --> runtime["Munin v1.1.0"]
-    runtime --> model["MiMo V2.5"]
+    runtime --> model["DeepSeek V4-Flash"]
     runtime --> evidence["Durable events, reports and evidence"]
 ```
 
@@ -427,9 +427,9 @@ Not under the noncommercial licence when the use has a commercial application. A
 
 No. Skills provide context and instructions. Tool access, scope and approval are separate runtime controls.
 
-### Can I use a model other than MiMo V2.5?
+### Can I use a model other than DeepSeek V4-Flash?
 
-Potentially. However, the verified v1.1.0 configuration is the Discord adapter on GitHub Actions with MiMo V2.5.
+Potentially. However, the verified v1.1.0 configuration is the Discord adapter on GitHub Actions with DeepSeek V4-Flash (`deepseek-v4-flash`).
 
 ### Does Munin replace analyst judgement?
 
