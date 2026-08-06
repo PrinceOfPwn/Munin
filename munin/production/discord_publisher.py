@@ -116,7 +116,11 @@ class DiscordPublisher:
                 await channel.send(chunk)
             return True
 
-        if loop.is_running() and loop is asyncio.get_running_loop():
+        try:
+            same_loop = loop is asyncio.get_running_loop()
+        except RuntimeError:
+            same_loop = False
+        if loop.is_running() and same_loop:
             return await _send()
         future = asyncio.run_coroutine_threadsafe(_send(), loop)
         try:

@@ -4,6 +4,36 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — Fix Discord publish RuntimeError from non-adapter threads
+
+`send_discord_message` (MCP tool) and `DiscordPublisher.publish()` both gated
+their same-loop fast path on `loop is asyncio.get_running_loop()`. When the
+caller ran on a worker/executor thread with no running asyncio loop (the
+common case for sync MCP tool handlers invoked from the supervisor graph),
+`asyncio.get_running_loop()` raised `RuntimeError: no running event loop`.
+The broad `except Exception` swallowed it, logged
+`send_discord_message: adapter publish failed, falling back to bridge: no
+running event loop`, and the message fell through to the legacy
+`post_to_discord` bridge — which is not connected when the adapter owns the
+channel — so agent output (e.g. presence reports) never reached Discord.
+
+Fix:
+- `munin/mcp/tools/discord_tool.py`: removed the `asyncio.ensure_future`
+  same-loop branch and the `loop is asyncio.get_running_loop()` comparison.
+  Now, whenever `loop is not None and loop.is_running()`, the call always
+  schedules via `asyncio.run_coroutine_threadsafe(...).result(timeout=10)`,
+  which is safe from any thread (same loop, different loop, or a sync thread
+  with no loop). Return dict shapes, the `publish_failed` error code, the
+  warning log, and the legacy bridge fallback are all preserved.
+- `munin/production/discord_publisher.py`: wrapped the same-loop check in a
+  `try/except RuntimeError` so `publish()` no longer raises when awaited from
+  a non-adapter thread; the `run_coroutine_threadsafe` +
+  `asyncio.wrap_future` path is preserved for the cross-loop/cross-thread
+  case, and the fast-path `await _send()` is preserved for the genuine
+  same-loop case.
+
+No public signatures, return dict shapes, or other files were touched.
+
 ## 2026-08-05 â€” Fix Turso state reset + kernel meta-tool schema + graph probe
 
 Three independent fixes that unblocked the `raven-mind/diag-pre-fix` live

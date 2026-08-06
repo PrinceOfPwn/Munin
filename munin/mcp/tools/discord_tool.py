@@ -39,12 +39,7 @@ def send_discord_message(content: str, run_id: str = "") -> dict[str, Any]:
     if PUBLISHER.attached:
         try:
             loop = PUBLISHER._loop  # noqa: SLF001 - publisher owns the loop binding
-            if loop is not None and loop.is_running() and loop is asyncio.get_running_loop():
-                # Same loop (agent calling inside the supervisor): schedule
-                # the send, report queued.
-                asyncio.ensure_future(PUBLISHER.publish(run_id=run_id, content=content))
-                return {"ok": True, "tool": "send_discord_message", "mode": "sync", "summary": "Discord message queued", "data": {"channel_id": PUBLISHER.channel_id_for_run(run_id), "via": "adapter"}}
-            if loop is not None:
+            if loop is not None and loop.is_running():
                 future = asyncio.run_coroutine_threadsafe(
                     PUBLISHER.publish(run_id=run_id, content=content), loop
                 )
