@@ -40,6 +40,17 @@ def send_discord_message(content: str, run_id: str = "") -> dict[str, Any]:
         try:
             loop = PUBLISHER._loop  # noqa: SLF001 - publisher owns the loop binding
             if loop is not None and loop.is_running():
+                try:
+                    same_loop = loop is asyncio.get_running_loop()
+                except RuntimeError:
+                    same_loop = False
+                if same_loop:
+                    # Caller already runs ON the adapter loop: blocking on
+                    # future.result() would deadlock the loop until the
+                    # publish coroutine gets scheduled. Schedule and fire,
+                    # the caller receives an immediate "queued" ack.
+                    loop.create_task(PUBLISHER.publish(run_id=run_id, content=content))
+                    return {"ok": True, "tool": "send_discord_message", "mode": "sync", "summary": "Discord message queued", "data": {"channel_id": PUBLISHER.channel_id_for_run(run_id), "via": "adapter"}}
                 future = asyncio.run_coroutine_threadsafe(
                     PUBLISHER.publish(run_id=run_id, content=content), loop
                 )

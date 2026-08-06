@@ -18,11 +18,29 @@ PR #52 "Nico wrote @Munin and got nothing" cause). No "Munin" role
 exists in the server, but the lenient fallback covers all three.
 
 Fix `ecc8100` in `munin/production/discord_adapter.py::_extract_prompt`:
-a final fallback treats a LEADING mention tag to ANY entity
-(`<@ID>`, `<@!ID>`, `<@&ID>`) as an invocation and strips it. The
-78c6bb4 regression (every channel message spawning an empty INV thread)
-is explicitly NOT resurrected: chatter without a leading mention tag
-still returns `None`.
+a fallback treats a leading native user mention tag (`<@ID>` / `<@!ID>`)
+as an invocation and strips it. CodeRabbit review tightened the contract
+(PR #58 findings #1/#2):
+- When `bot_user_id` is known, ONLY the bot's own tag is accepted; a
+  mention to another member is NOT an invocation.
+- Role mentions `<@&ID>` are NEVER accepted (no authoritative
+  invocation role configured; would let any member trigger runs).
+- When `bot_user_id` is None (startup backlog before `client.user`
+  populated — the 2026-08-06 silent-drop window), user tags still work;
+  role tags remain rejected.
+- The diagnostic drop log no longer includes `content_preview` (raw
+  rejected messages may contain credentials/PII); it logs structure
+  only: author, bot_user_id, channel, content_len.
+The 78c6bb4 regression (every channel message spawning an empty INV
+thread) is explicitly NOT resurrected: chatter without a matching
+leading mention still returns `None`.
+
+`discord_tool.py::send_discord_message` gained a same-loop branch
+(CodeRabbit #3): when the caller already runs on `PUBLISHER._loop`,
+schedule `PUBLISHER.publish` via `loop.create_task` and return an
+immediate "queued" ack instead of blocking on `future.result()` (which
+would deadlock the adapter loop until the coroutine got scheduled).
+Cross-thread callers keep `run_coroutine_threadsafe(...).result(timeout=10)`.
 
 New `tests/test_discord_regression.py` (12 tests, all green):
 - `_extract_prompt`: role mention, legacy `<@!ID>`, arbitrary user
@@ -36,7 +54,7 @@ New `tests/test_discord_regression.py` (12 tests, all green):
 - `DiscordPublisher.publish`: cross-thread `run_coroutine_threadsafe`
   delivery + detached → `False`.
 
-Validation: `tests/test_discord_regression.py` 12 passed;
+Validation: `tests/test_discord_regression.py` 13 passed;
 `tests/test_discord_adapter.py` 35 passed, 1 skipped (pre-existing).
 
 ## 2026-08-06 — Fix Discord publish RuntimeError from non-adapter threads

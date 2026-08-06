@@ -652,28 +652,30 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
     if "@munin" in lowered or lowered.startswith("munin "):
         return content.replace("@munin", "", 1).strip().replace("@Munin", "", 1).strip()
 
-    # Final lenient fallback: a leading native Discord mention tag —
-    # ``<@ID>`` (user), ``<@!ID>`` (legacy nickname), or ``<@&ID>`` (role) —
-    # to ANY entity, in an allowlisted guild channel, is treated as an
-    # invocation.  This catches three real failure modes that all produced
-    # the same "bot ready but @Munin invocations silently dropped" symptom
-    # observed in the 2026-08-06 live session:
-    #   1. ``bot_user_id`` is None because the message was delivered during
-    #      the brief startup window before ``client.user`` populated, so the
-    #      L635-638 ``tag in content`` check (which gates on
-    #      ``bot_user_id is not None``) was skipped entirely;
-    #   2. The operator autocomplete-picked a role named "Munin" so the tag
-    #      is ``<@&ROLE_ID>`` — unmatched by L636's ``<@ID>``/``<@!ID>`` only;
-    #   3. ``bot_user_id`` (from ``client.user.id``) does not string-equal
-    #      the snowflake that Discord embedded in the rendered mention tag
-    #      (sharded/deployed application ID drift).
-    # The allowlist gate in ``_handle_message`` (L1256) already restricted
-    # us to operator-curated channels, so being lenient here is safe: a
-    # leading mention-tag in such a channel is almost certainly directed at
-    # the bot, not community chatter.
-    leading_mention = re.match(r"^<@!?\&?\d+>\s*", content)
-    if leading_mention is not None:
-        return content[leading_mention.end():].strip() or None
+    # Final fallback for a leading native Discord mention tag —
+    # ``<@ID>`` (user) or ``<@!ID>`` (legacy nickname).  Security rule:
+    # when ``bot_user_id`` is known, ONLY the bot's own tag is accepted
+    # (a mention to another member/role is not an invocation — the
+    # operator must confirm identity server-side).  Role mentions
+    # ``<@&ROLE_ID>`` are NEVER accepted: no authoritative invocation
+    # role is configured, and accepting any role would let any member
+    # of the role trigger runs in the channel.
+    #
+    # When ``bot_user_id`` is None (the brief startup window before
+    # ``client.user`` populated, which was the cause of silent drops on
+    # 2026-08-06), user tags are still accepted so backlog messages do
+    # not vanish; role tags remain rejected.  This keeps the operator's
+    # "wrote @Munin and got nothing" failure mode fixed without opening
+    # an arbitrary-mention invocation surface on the steady state.
+    # The caller's allowlist gate on operator-curated channels already
+    # bounds who reaches this code path.
+    mention = re.match(r"^<@!?(\d+)>\s*", content)
+    if mention is not None:
+        mentioned_id = int(mention.group(1))
+        if bot_user_id is not None and mentioned_id != int(bot_user_id):
+            return None
+        rest = content[mention.end():].strip()
+        return rest or None
 
     return None
 
@@ -1285,12 +1287,13 @@ async def _handle_message(
     prompt = _extract_prompt(message, bot_user_id=bot_user_id)
     if not prompt:
         # DIAGNOSTIC (2026-08-06): log the dropped message so "bot didn't
-        # respond" investigations can see exactly what _extract_prompt
-        # rejected. Remove once root cause is confirmed.
+        # respond" investigations can see that _extract_prompt rejected it.
+        # Raw message content is intentionally NOT included (rejected
+        # messages may carry credentials/PII — CodeRabbit security review).
         _content = (getattr(message, "content", "") or "")
         log.info(
-            "discord: extract-drop author=%s bot_user_id=%s channel=%s content_len=%d content_preview=%r",
-            author_id, bot_user_id, channel_id, len(_content), _content[:150],
+            "discord: extract-drop author=%s bot_user_id=%s channel=%s content_len=%d",
+            author_id, bot_user_id, channel_id, len(_content),
         )
         return
 

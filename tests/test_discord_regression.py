@@ -55,45 +55,53 @@ def _msg(*, content: str, guild: object | None = None) -> Any:
     return SimpleNamespace(content=content, guild=guild, reference=None)
 
 
-def test_extract_prompt_role_mention_is_invocation() -> None:
+def test_extract_prompt_role_mention_rejected_when_bot_known() -> None:
+    """Role mentions <@&ID> are NEVER invocations (no authoritative
+    invocation role is configured; security review finding #1)."""
     from munin.production.discord_adapter import _extract_prompt
 
     assert (
         _extract_prompt(_msg(content="<@&102938475612345678> scan example.com", guild=SimpleNamespace(id=1)), bot_user_id=42)
-        == "scan example.com"
+        is None
     )
 
 
-def test_extract_prompt_legacy_nickname_mention_is_invocation() -> None:
+def test_extract_prompt_legacy_nickname_mention_matches_bot() -> None:
     from munin.production.discord_adapter import _extract_prompt
 
     assert (
-        _extract_prompt(_msg(content="<@!1533391803959476344> scan example.com", guild=SimpleNamespace(id=1)), bot_user_id=42)
+        _extract_prompt(_msg(content="<@!42> scan example.com", guild=SimpleNamespace(id=1)), bot_user_id=42)
         == "scan example.com"
     )
 
 
-def test_extract_prompt_arbitrary_user_mention_is_invocation() -> None:
-    """A mention to ANY user (not just <@{bot_user_id}>) is an invocation —
-    covers tag/entity drift and multi-bot servers."""
+def test_extract_prompt_other_user_mention_rejected_when_bot_known() -> None:
+    """A mention to another member is NOT an invocation whenever the bot id
+    is known (security review #1): no arbitrary-mention trigger surface."""
     from munin.production.discord_adapter import _extract_prompt
 
     assert (
         _extract_prompt(_msg(content="<@999> what are my options", guild=SimpleNamespace(id=1)), bot_user_id=42)
-        == "what are my options"
+        is None
     )
 
 
 def test_extract_prompt_backlog_when_bot_user_id_unknown() -> None:
     """Startup backlog timing: bot_user_id=None must NOT drop a leading
-    mention.  Pre-fix this returned None and the operator's message was
-    silently swallowed (no dispatch log at all)."""
+    user mention.  Pre-fix this returned None and the operator's message was
+    silently swallowed (no dispatch log at all).  Role tags remain rejected
+    even in the unknown-bot window (security review #1)."""
     from munin.production.discord_adapter import _extract_prompt
 
     content = "<@1532383753959476344> scan example.com"
     assert (
         _extract_prompt(_msg(content=content, guild=SimpleNamespace(id=1)), bot_user_id=None)
         == "scan example.com"
+    )
+    # Role mention in the unknown-bot window: STILL rejected.
+    assert (
+        _extract_prompt(_msg(content="<@&123456789012345678> scan", guild=SimpleNamespace(id=1)), bot_user_id=None)
+        is None
     )
 
 
@@ -215,6 +223,45 @@ def test_send_discord_message_from_thread_without_loop(monkeypatch: pytest.Monke
     assert result["ok"] is True
     assert result["summary"] == "Discord message queued"
     assert delivered == ["hello from agent"]
+    assert probe._errors == []  # no unhandled loop exceptions
+
+
+def test_send_discord_message_same_loop_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the caller already runs ON the adapter loop, blocking on
+    future.result() would deadlock the loop; the same-loop branch schedules
+    PUBLISHER.publish via create_task and returns an immediate queued ack
+    (CodeRabbit stability review #3)."""
+    from munin.production.discord_publisher import DiscordPublisher
+    from munin.mcp.tools import discord_tool
+
+    delivered: list[str] = []
+    channel = _FakeChannel(delivered)
+
+    with _Probe() as probe:
+        publisher = DiscordPublisher()
+        publisher.attach(loop=probe.loop, client=_FakeClient(channel), default_channel_id="999")
+        publisher.map_run(run_id="run_s", channel_id="999")
+
+        monkeypatch.setattr(discord_tool, "PUBLISHER", publisher)
+        monkeypatch.setattr(discord_tool, "get_discord_config", lambda: SimpleNamespace(outbound_enabled=True))
+        monkeypatch.setattr(discord_tool, "post_to_discord", lambda *a, **k: (_ for _ in ()).throw(AssertionError("bridge reached while adapter attached")))
+        monkeypatch.setattr(discord_tool, "get_bridge", lambda: None)
+
+        async def _drive() -> dict[str, Any]:
+            result = discord_tool.send_discord_message("same-loop hello", run_id="run_s")
+            await asyncio.sleep(0)  # let the created publish task run a tick
+            await asyncio.sleep(0)
+            return result
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_drive(), probe.loop)
+            result = future.result(timeout=10)
+        finally:
+            publisher.detach()
+
+    assert result["ok"] is True
+    assert result["summary"] == "Discord message queued"
+    assert delivered == ["same-loop hello"]
     assert probe._errors == []  # no unhandled loop exceptions
 
 
