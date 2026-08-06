@@ -47,21 +47,26 @@
 ## Verified v1.0.0 configuration
 
 > [!IMPORTANT]
-> Протестированной и проверенной рабочей конфигурацией для **Munin v1.0.0** является **веб-интерфейс (GUI), работающий через GitHub Actions с моделью MiMo V2.5**.
+> Протестированной и проверенной рабочей конфигурацией для **Munin v1.0.0** является **адаптер Discord, работающий через GitHub Actions с моделью MiMo V2.5**.
+>
+> **Discord — стабильная операторская поверхность на данный момент.** Веб-интерфейс
+> (GUI) — целевая долгосрочная поверхность, но в живых сессиях обнаружены баги
+> фронтенда, которые ещё исправляются; до прохождения цикла починки Discord является
+> эталонной поверхностью для полных операций.
 >
 > Другие провайдеры, модели, целевые среды развертывания и интерфейсы управления могут работать, но они не входят в проверенную конфигурацию v1.0.0, если это не задокументировано явно.
 
 | Компонент | Проверенная конфигурация |
 | --- | --- |
 | Версия | **Munin v1.0.0** |
-| Интерфейс | **Web GUI** |
+| Интерфейс | **Адаптер Discord** (GUI в починке) |
 | Среда исполнения | **GitHub Actions** |
 | Модель | **MiMo V2.5** |
 
 ```mermaid
 flowchart LR
-    Operator[Operator] --> GUI[Munin Web GUI]
-    GUI --> Actions[GitHub Actions runner]
+    Operator[Operator] --> Discord[Munin Discord surface]
+    Discord --> Actions[GitHub Actions runner]
     Actions --> Runtime[Munin v1.0.0]
     Runtime --> Model[MiMo V2.5]
     Runtime --> Evidence[Durable events, reports and evidence]

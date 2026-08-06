@@ -13,11 +13,14 @@ runtime.
 
 The configuration tested and verified for **v1.0.0** is:
 
-- Web GUI
+- Discord community adapter (stable operator surface)
 - GitHub Actions execution environment
 - MiMo V2.5
 
-Other combinations may work, but are not verified unless documented.
+The Web GUI remains the target long-term interface, but live-session testing
+uncovered frontend bugs that have not yet passed the full repair loop; treat
+GUI-only claims as unverified until they do. Other combinations may work, but
+are not verified unless documented.
 
 ## Repository map
 
@@ -53,7 +56,7 @@ cd app && npm run build
 ```
 
 CI is the authoritative integration environment. Local tests remain useful, but
-the verified v1.0.0 path is the GUI on GitHub Actions with MiMo V2.5.
+the verified v1.0.0 path is the Discord adapter on GitHub Actions with MiMo V2.5.
 
 Start at [docs/README.md](docs/README.md), [ARCHITECTURE.md](ARCHITECTURE.md)
 and [MAP.md](MAP.md).

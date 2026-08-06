@@ -32,21 +32,24 @@
 ## v1.0.0 已验证配置
 
 > [!IMPORTANT]
-> **Munin v1.0.0** 已测试和验证的配置是：通过 **GitHub Actions** 运行 **Web GUI**，并使用 **MiMo V2.5** 作为模型。
+> **Munin v1.0.0** 已测试和验证的配置是：通过 **GitHub Actions** 运行 **Discord 操作员适配器**，并使用 **MiMo V2.5** 作为模型。
+>
+> **Discord 是当前稳定的操作面。** Web GUI 是长期目标界面，但实时会话测试发现的
+> 前端 bug 仍在修复中；在修复循环通过之前，Discord 是完整操作的参考表面。
 >
 > 其他模型、提供商、部署环境和控制界面可能可以工作，但除非明确记录，否则不属于 v1.0.0 的已验证配置。
 
 | 组件 | 已验证配置 |
 | --- | --- |
 | 版本 | **Munin v1.0.0** |
-| 界面 | **Web GUI** |
+| 界面 | **Discord 操作员适配器**（Web GUI 修复中） |
 | 执行环境 | **GitHub Actions** |
 | 模型 | **MiMo V2.5** |
 
 ```mermaid
 flowchart LR
-    Operator[操作员] --> GUI[Munin Web GUI]
-    GUI --> Actions[GitHub Actions Runner]
+    Operator[操作员] --> Discord[Munin Discord 表面]
+    Discord --> Actions[GitHub Actions Runner]
     Actions --> Runtime[Munin v1.0.0]
     Runtime --> Model[MiMo V2.5]
     Runtime --> Evidence[持久化事件、报告与证据]
