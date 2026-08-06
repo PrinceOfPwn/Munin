@@ -10,7 +10,7 @@ evolving Web GUI, LangGraph execution, durable events, checkpoints, human
 approvals, live capability composition, Hugin knowledge and Valravn
 reconnaissance.
 
-The verified v1.0.0 configuration is **Discord adapter + GitHub Actions +
+The verified v1.1.0 configuration is **Discord adapter + GitHub Actions +
 MiMo V2.5**. The Web GUI is the target long-term interface but is under repair
 after live-session frontend bugs; treat GUI-only claims as unverified until the
 repair loop passes. Other models and deployments may work but remain
@@ -35,7 +35,7 @@ flowchart LR
 
 ## Interfaces
 
-Discord is the stable v1.0.0 operator surface: presence, commands, threads and
+Discord is the stable v1.1.0 operator surface: presence, commands, threads and
 approvals. The Web GUI remains in active development. `/api/*` serves
 authenticated application operations. `/mcp/` exposes the live capability
 surface. None of these clients owns independent authority.
@@ -88,7 +88,7 @@ Soul never grants authorization, tools or scope.
 
 ## Deployment
 
-For v1.0.0, the tested path is the Discord adapter on GitHub Actions with
+For v1.1.0, the tested path is the Discord adapter on GitHub Actions with
 MiMo V2.5. The Web GUI follows once its repair loop passes.
 Ephemeral runners require explicit persistence through artifacts or remote
 storage. Production deployments need durable volumes, protected ingress,

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "munin"
-version = "0.1.0"
+version = "1.1.0"
 description = "Agente ReAct de offensive-security con memoria persistente, soul editable, forjado dinámico de tools y grafos, y MCP OFFX integrado."
 license = "Proprietary"
 readme = "README.md"

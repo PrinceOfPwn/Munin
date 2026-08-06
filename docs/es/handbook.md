@@ -10,7 +10,7 @@ autenticada, MCP, GUI web en desarrollo, ejecución LangGraph, eventos
 persistentes, checkpoints, aprobaciones humanas, composición viva de
 capacidades, conocimiento Hugin y reconocimiento Valravn.
 
-La configuración verificada de v1.0.0 es **adaptador Discord + GitHub Actions +
+La configuración verificada de v1.1.0 es **adaptador Discord + GitHub Actions +
 MiMo V2.5**. La GUI web es la interfaz objetivo a largo plazo, pero sigue en
 reparación tras bugs de frontend detectados en sesiones en vivo; trata las
 afirmaciones solo-GUI como no verificadas hasta que pase el ciclo de arreglo.
@@ -26,7 +26,7 @@ preservan lo ocurrido.
 
 ## Interfaces
 
-Discord es la superficie de operador estable de v1.0.0: presencia, comandos,
+Discord es la superficie de operador estable de v1.1.0: presencia, comandos,
 threads y aprobaciones. La GUI web sigue en desarrollo activo. `/api/*` expone
 operaciones autenticadas, `/mcp/` publica capacidades vivas. Ninguna interfaz
 crea autoridad propia.

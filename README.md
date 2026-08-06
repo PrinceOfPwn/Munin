@@ -50,21 +50,21 @@ Munin's research prompts use **ROGUE mode by default**: an intentionally aggress
 
 Parts of the internal control language are written in **Simplified Chinese** because it offers compact human-readable instructions and can align naturally with Chinese-developed model families used during testing. This is an empirical design choice, not a claim that Chinese is always cheaper in tokens or universally better. See [Prompt design, validation matrix and references](README.PROMPTS.md).
 
-## Verified v1.0.0 configuration
+## Verified v1.1.0 configuration
 
 > [!IMPORTANT]
-> The tested and verified operating configuration for **Munin v1.0.0** is the **Discord community adapter running through GitHub Actions with MiMo V2.5** as the model.
+> The tested and verified operating configuration for **Munin v1.1.0** is the **Discord community adapter running through GitHub Actions with MiMo V2.5** as the model.
 >
 > **Discord is the stable operator surface today.** The Web GUI is the target
 > long-term interface, but live-session testing exposed frontend bugs that are
 > still being fixed; until the GUI repair loop passes end-to-end, Discord is the
 > reference surface for full operations.
 >
-> Other providers, models, deployment targets and control surfaces may work, but they are not part of the verified v1.0.0 configuration unless explicitly documented.
+> Other providers, models, deployment targets and control surfaces may work, but they are not part of the verified v1.1.0 configuration unless explicitly documented.
 
 | Component | Verified configuration |
 | --- | --- |
-| Version | **Munin v1.0.0** |
+| Version | **Munin v1.1.0** |
 | Interface | **Discord community adapter** (Web GUI under repair) |
 | Execution environment | **GitHub Actions** |
 | Model | **MiMo V2.5** |
@@ -73,7 +73,7 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 flowchart LR
     Operator[Operator] --> Discord[Munin Discord surface]
     Discord --> Actions[GitHub Actions runner]
-    Actions --> Runtime[Munin v1.0.0]
+    Actions --> Runtime[Munin v1.1.0]
     Runtime --> Model[MiMo V2.5]
     Runtime --> Evidence[Durable events, reports and evidence]
 ```
@@ -429,7 +429,7 @@ No. Skills provide context and instructions. Tool access, scope and approval are
 
 ### Can I use a model other than MiMo V2.5?
 
-Potentially. However, the verified v1.0.0 configuration is the GUI on GitHub Actions with MiMo V2.5.
+Potentially. However, the verified v1.1.0 configuration is the Discord adapter on GitHub Actions with MiMo V2.5.
 
 ### Does Munin replace analyst judgement?
 
@@ -437,7 +437,7 @@ No. It preserves evidence, state and decisions so analysts can review and govern
 
 ## Active development
 
-The `v1.0.0` contract above is the verified baseline. Work in progress lives
+The `v1.1.0` contract above is the verified baseline. Work in progress lives
 on the `feat/discord-community-adapter` branch ([PR #52](https://github.com/PrinceOfPwn/Munin/pull/52)),
 which adds a Discord community/DM control surface alongside the web GUI and
 ships a hotfix for post-approval resume amnesia:
