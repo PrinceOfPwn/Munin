@@ -4,6 +4,21 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — Dependabot alert #1: bump cryptography to 50.0.0
+
+GHSA-g6cj-pr64-35w5 (high): `pkcs7_decrypt_der/pem/smime` exposed a
+Bleichenbacher oracle against the content-encryption key via distinguishable
+errors/timing on RSA PKCS#1 v1.5 decrypt of `RecipientInfo.encryptedKey`
+(introduced 44.0.0, fixed 50.0.0). Not directly exploitable in Munin's current
+flows (no S/MIME gateway), but the dependency is a hard `poetry.lock` pin so
+Dependabot flagged it.
+
+- `pyproject.toml`: `cryptography = ">=42.0"` → `">=50.0.0"` (with comment).
+- `poetry.lock`: regenerated with Poetry 2.4.1 → `cryptography 50.0.0`.
+  Only the cryptography stanza changed; `google-auth (>=38.0.3)` and
+  `PyJWT`'s `crypto` extra (>=3.4.0) requirement ranges are satisfied.
+- `changes.md` entry.
+
 ## 2026-08-06 — Docs realignment: Discord is the stable v1.0.0 operator surface
 
 The self-audit (subagent report + local review) found the repository
