@@ -1,11 +1,11 @@
 # Operator guide
 
-This guide covers authorized operation of Munin v1.0.0.
+This guide covers authorized operation of Munin v1.1.0.
 
 ## Verified configuration
 
 The tested configuration is **Discord adapter + GitHub Actions + MiMo V2.5**.
-The Discord community adapter is the stable v1.0.0 operator surface; the Web
+The Discord community adapter is the stable v1.1.0 operator surface; the Web
 GUI is the target long-term interface but frontend bugs discovered in
 live-session testing have not yet passed the full repair loop. Other models and
 deployment targets may work, but should be treated as experimental until a full
@@ -38,7 +38,7 @@ paused and completed tool calls must not repeat.
 
 Use durable volumes, protected ingress, strong authentication, strict origins,
 secret management, retention policies and explicit backup/recovery tests.
-GitHub Actions is the verified v1.0.0 runner path, but its filesystem is
+GitHub Actions is the verified v1.1.0 runner path, but its filesystem is
 ephemeral unless state is exported or stored remotely.
 
 ## Evidence and reporting

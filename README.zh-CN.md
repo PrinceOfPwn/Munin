@@ -29,19 +29,19 @@
 > [!WARNING]
 > **仅限授权用途。** Munin 面向合法的安全研究、威胁情报和受控红队行动。操作员必须负责获得授权、定义范围、保护凭据、评估影响并遵守适用法律。
 
-## v1.0.0 已验证配置
+## v1.1.0 已验证配置
 
 > [!IMPORTANT]
-> **Munin v1.0.0** 已测试和验证的配置是：通过 **GitHub Actions** 运行 **Discord 操作员适配器**，并使用 **MiMo V2.5** 作为模型。
+> **Munin v1.1.0** 已测试和验证的配置是：通过 **GitHub Actions** 运行 **Discord 操作员适配器**，并使用 **MiMo V2.5** 作为模型。
 >
 > **Discord 是当前稳定的操作面。** Web GUI 是长期目标界面，但实时会话测试发现的
 > 前端 bug 仍在修复中；在修复循环通过之前，Discord 是完整操作的参考表面。
 >
-> 其他模型、提供商、部署环境和控制界面可能可以工作，但除非明确记录，否则不属于 v1.0.0 的已验证配置。
+> 其他模型、提供商、部署环境和控制界面可能可以工作，但除非明确记录，否则不属于 v1.1.0 的已验证配置。
 
 | 组件 | 已验证配置 |
 | --- | --- |
-| 版本 | **Munin v1.0.0** |
+| 版本 | **Munin v1.1.0** |
 | 界面 | **Discord 操作员适配器**（Web GUI 修复中） |
 | 执行环境 | **GitHub Actions** |
 | 模型 | **MiMo V2.5** |
@@ -50,7 +50,7 @@
 flowchart LR
     Operator[操作员] --> Discord[Munin Discord 表面]
     Discord --> Actions[GitHub Actions Runner]
-    Actions --> Runtime[Munin v1.0.0]
+    Actions --> Runtime[Munin v1.1.0]
     Runtime --> Model[MiMo V2.5]
     Runtime --> Evidence[持久化事件、报告与证据]
 ```
@@ -286,7 +286,7 @@ cd app && npm run build
 
 ### 可以使用其他模型吗？
 
-可能可以，但 v1.0.0 的已验证配置是 GUI + GitHub Actions + MiMo V2.5。
+可能可以，但 v1.1.0 的已验证配置是 Discord 适配器 + GitHub Actions + MiMo V2.5。
 
 ## 许可证
 

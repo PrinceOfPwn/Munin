@@ -1,7 +1,7 @@
 # Working on Munin
 
 This guide is for coding agents and contributors working on `PrinceOfPwn/Munin`.
-It describes the v1.0.0 repository and runtime; it is not an instruction to use
+It describes the v1.1.0 repository and runtime; it is not an instruction to use
 the CTF-oriented prompts in `soul/` as the default personality.
 
 ## Project contract
@@ -11,7 +11,7 @@ operations. The server owns identity, policy, approvals, state and capability
 composition. The Web GUI, MCP and Discord are control surfaces over that same
 runtime.
 
-The configuration tested and verified for **v1.0.0** is:
+The configuration tested and verified for **v1.1.0** is:
 
 - Discord community adapter (stable operator surface)
 - GitHub Actions execution environment
@@ -56,7 +56,7 @@ cd app && npm run build
 ```
 
 CI is the authoritative integration environment. Local tests remain useful, but
-the verified v1.0.0 path is the Discord adapter on GitHub Actions with MiMo V2.5.
+the verified v1.1.0 path is the Discord adapter on GitHub Actions with MiMo V2.5.
 
 Start at [docs/README.md](docs/README.md), [ARCHITECTURE.md](ARCHITECTURE.md)
 and [MAP.md](MAP.md).

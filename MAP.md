@@ -1,6 +1,6 @@
 # Munin system map
 
-This is the current v1.0.0 map. Runtime discovery remains authoritative for
+This is the current v1.1.0 map. Runtime discovery remains authoritative for
 exact capabilities, schemas and enabled providers.
 
 ```mermaid
@@ -52,7 +52,7 @@ flowchart TB
 
 | Surface | Role |
 | --- | --- |
-| Discord | **Stable v1.0.0 operator surface** — presence, commands, threads and approvals |
+| Discord | **Stable v1.1.0 operator surface** — presence, commands, threads and approvals |
 | Web GUI | Target long-term interface; under repair after live-session frontend bugs |
 | `/api/*` | Authenticated application and integration API |
 | `/mcp/` | Live MCP discovery and invocation under server policy |
@@ -67,13 +67,13 @@ flowchart TB
 - Skills, Hugin and Soul provide context, not permission.
 - The bundled CTF Soul is optional and not a default deployment profile.
 
-## Verified v1.0.0 path
+## Verified v1.1.0 path
 
 ```mermaid
 flowchart LR
   Operator --> Discord[Discord surface]
   Discord --> Actions[GitHub Actions runner]
-  Actions --> Munin[Munin v1.0.0]
+  Actions --> Munin[Munin v1.1.0]
   Munin --> MiMo[MiMo V2.5]
 ```
 

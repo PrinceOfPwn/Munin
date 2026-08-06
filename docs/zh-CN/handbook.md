@@ -8,7 +8,7 @@ Munin 是一个由操作员治理、面向自主安全行动的持久化运行�
 （稳定操作面）、认证 API、MCP、持续开发的 Web GUI、LangGraph 执行、持久化事件、
 checkpoint、人工审批、实时能力组合、Hugin 知识和 Valravn 侦察。
 
-v1.0.0 的已验证配置是 **适配器 Discord + GitHub Actions + MiMo V2.5**。Web GUI 是
+v1.1.0 的已验证配置是 **适配器 Discord + GitHub Actions + MiMo V2.5**。Web GUI 是
 长期目标界面，但在实时会话前端 bug 修复通过前视为维修状态；仅限 GUI 的说法视为未验证。
 其他组合可能可用，但在明确记录之前均视为实验性配置。
 
@@ -19,7 +19,7 @@ Munin 将知识、权限、执行和证据分离。知识可以建议路线；�
 
 ## 接口
 
-Discord 是 v1.0.0 的稳定操作面：状态、命令、线程与审批。Web GUI 仍在积极开发。
+Discord 是 v1.1.0 的稳定操作面：状态、命令、线程与审批。Web GUI 仍在积极开发。
 `/api/*` 提供认证操作，`/mcp/` 暴露实时能力。任何客户端都不拥有独立权限。
 
 ## 运行、事件与恢复

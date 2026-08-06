@@ -4,6 +4,18 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — v1.1.0 release preparation: version bump + FAQ realignment
+
+- `pyproject.toml`: `version = "0.1.0"` → `"1.1.0"` (package metadata; docs
+  reflect v1.1.0 as the current release line).
+- All canonical docs (`README.md` + 5 localizations, `AGENTS.md`, `MAP.md`,
+  `docs/operator-guide.md`, `docs/en|es|pt-BR|zh-CN/handbook.md`) bumped
+  `v1.0.0` → `v1.1.0`.
+- Remaining FAQ "verified config is GUI" mentions now point to the **Discord
+  adapter** (README.md:432, ko:424, ru:425, zh-CN:289, pt-BR:289) — these were
+  missed in the original #59 realignment.
+- Tag `v1.1.0` + GitHub release prepared.
+
 ## 2026-08-06 — Dependabot alert #1: bump cryptography to 50.0.0
 
 GHSA-g6cj-pr64-35w5 (high): `pkcs7_decrypt_der/pem/smime` exposed a
