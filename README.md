@@ -53,7 +53,7 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 ## Verified v1.1.0 configuration
 
 > [!IMPORTANT]
-> The tested and verified operating configuration for **Munin v1.1.0** is the **Discord community adapter running through GitHub Actions with DeepSeek V4-Flash** (`deepseek-v4-flash`) as the model.
+> The tested and verified operating configuration for **Munin v1.1.0** is the **Discord community adapter running through GitHub Actions with DeepSeek V4-Flash Free** (`deepseek-v4-flash-free`, via OpenCode Zen) as the model.
 >
 > **Discord is the stable operator surface today.** The Web GUI is the target
 > long-term interface, but live-session testing exposed frontend bugs that are
@@ -67,7 +67,7 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 | Version | **Munin v1.1.0** |
 | Interface | **Discord community adapter** (Web GUI under repair) |
 | Execution environment | **GitHub Actions** |
-| Model | **DeepSeek V4-Flash** (`deepseek-v4-flash`) |
+| Model | **DeepSeek V4-Flash Free** (`deepseek-v4-flash-free`) |
 
 ```mermaid
 flowchart LR
@@ -429,7 +429,7 @@ No. Skills provide context and instructions. Tool access, scope and approval are
 
 ### Can I use a model other than DeepSeek V4-Flash?
 
-Potentially. However, the verified v1.1.0 configuration is the Discord adapter on GitHub Actions with DeepSeek V4-Flash (`deepseek-v4-flash`).
+Potentially. However, the verified v1.1.0 configuration is the Discord adapter on GitHub Actions with DeepSeek V4-Flash Free (`deepseek-v4-flash-free`, via OpenCode Zen).
 
 ### Does Munin replace analyst judgement?
 

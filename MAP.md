@@ -74,7 +74,7 @@ flowchart LR
   Operator --> Discord[Discord surface]
   Discord --> Actions[GitHub Actions runner]
   Actions --> Munin[Munin v1.1.0]
-  Munin --> DeepSeek[DeepSeek V4-Flash]
+  Munin --> DeepSeek[DeepSeek V4-Flash Free via OpenCode Zen]
 ```
 
 See [docs/README.md](docs/README.md) for the complete multilingual documentation.

@@ -15,7 +15,7 @@ The configuration tested and verified for **v1.1.0** is:
 
 - Discord community adapter (stable operator surface)
 - GitHub Actions execution environment
-- DeepSeek V4-Flash
+- DeepSeek V4-Flash Free (via OpenCode Zen)
 
 The Web GUI remains the target long-term interface, but live-session testing
 uncovered frontend bugs that have not yet passed the full repair loop; treat
@@ -56,7 +56,7 @@ cd app && npm run build
 ```
 
 CI is the authoritative integration environment. Local tests remain useful, but
-the verified v1.1.0 path is the Discord adapter on GitHub Actions with DeepSeek V4-Flash.
+the verified v1.1.0 path is the Discord adapter on GitHub Actions with DeepSeek V4-Flash Free (via OpenCode Zen).
 
 Start at [docs/README.md](docs/README.md), [ARCHITECTURE.md](ARCHITECTURE.md)
 and [MAP.md](MAP.md).
