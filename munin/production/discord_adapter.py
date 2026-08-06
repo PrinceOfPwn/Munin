@@ -1260,6 +1260,14 @@ async def _handle_message(
 
     prompt = _extract_prompt(message, bot_user_id=bot_user_id)
     if not prompt:
+        # DIAGNOSTIC (2026-08-06): log the dropped message so "bot didn't
+        # respond" investigations can see exactly what _extract_prompt
+        # rejected. Remove once root cause is confirmed.
+        _content = (getattr(message, "content", "") or "")
+        log.info(
+            "discord: extract-drop author=%s bot_user_id=%s channel=%s content_len=%d content_preview=%r",
+            author_id, bot_user_id, channel_id, len(_content), _content[:150],
+        )
         return
 
     log.info(
