@@ -52,10 +52,10 @@ flowchart TB
 
 | Surface | Role |
 | --- | --- |
-| Web GUI | Conversations, timeline, approvals and artifacts |
+| Discord | **Stable v1.0.0 operator surface** — presence, commands, threads and approvals |
+| Web GUI | Target long-term interface; under repair after live-session frontend bugs |
 | `/api/*` | Authenticated application and integration API |
 | `/mcp/` | Live MCP discovery and invocation under server policy |
-| Discord | Optional remote window into the same server-owned operation |
 
 ## Runtime invariants
 
@@ -71,8 +71,8 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  Operator --> GUI[Web GUI]
-  GUI --> Actions[GitHub Actions runner]
+  Operator --> Discord[Discord surface]
+  Discord --> Actions[GitHub Actions runner]
   Actions --> Munin[Munin v1.0.0]
   Munin --> MiMo[MiMo V2.5]
 ```

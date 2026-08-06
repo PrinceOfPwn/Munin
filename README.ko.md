@@ -47,21 +47,25 @@
 ## Verified v1.0.0 configuration
 
 > [!IMPORTANT]
-> **Munin v1.0.0**의 테스트 및 검증된 운영 구성은 **MiMo V2.5**를 모델로 사용하여 **GitHub Actions를 통해 실행되는 웹 GUI**입니다.
+> **Munin v1.0.0**의 테스트 및 검증된 운영 구성은 **MiMo V2.5**를 모델로 사용하여 **GitHub Actions를 통해 실행되는 Discord 어댑터**입니다.
+>
+> **Discord가 현재 안정적인 운영자 표면입니다.** 웹 GUI는 장기 목표 인터페이스이지만
+> 라이브 세션 테스트에서 발견된 프론트엔드 버그가 아직 수리 중입니다. 수리 루프가
+> 통과할 때까지 Discord가 전체 운영의 기준 표면입니다.
 >
 > 다른 제공업체, 모델, 배포 대상 및 제어 인터페이스도 작동할 수 있으나, 명시적으로 문서화되지 않은 한 검증된 v1.0.0 구성의 일부가 아닙니다.
 
 | 구성 요소 | 검증된 구성 |
 | --- | --- |
 | 버전 | **Munin v1.0.0** |
-| 인터페이스 | **웹 GUI** |
+| 인터페이스 | **Discord 어댑터** (웹 GUI 수리 중) |
 | 실행 환경 | **GitHub Actions** |
 | 모델 | **MiMo V2.5** |
 
 ```mermaid
 flowchart LR
-    Operator[Operator] --> GUI[Munin Web GUI]
-    GUI --> Actions[GitHub Actions runner]
+    Operator[Operator] --> Discord[Munin Discord surface]
+    Discord --> Actions[GitHub Actions runner]
     Actions --> Runtime[Munin v1.0.0]
     Runtime --> Model[MiMo V2.5]
     Runtime --> Evidence[Durable events, reports and evidence]

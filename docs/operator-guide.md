@@ -4,9 +4,12 @@ This guide covers authorized operation of Munin v1.0.0.
 
 ## Verified configuration
 
-The tested configuration is **Web GUI + GitHub Actions + MiMo V2.5**. Other
-models and deployment targets may work, but should be treated as experimental
-until a full structured tool-call, streaming, replay and recovery loop passes.
+The tested configuration is **Discord adapter + GitHub Actions + MiMo V2.5**.
+The Discord community adapter is the stable v1.0.0 operator surface; the Web
+GUI is the target long-term interface but frontend bugs discovered in
+live-session testing have not yet passed the full repair loop. Other models and
+deployment targets may work, but should be treated as experimental until a full
+structured tool-call, streaming, replay and recovery loop passes.
 
 ## Before starting
 

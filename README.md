@@ -53,21 +53,26 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 ## Verified v1.0.0 configuration
 
 > [!IMPORTANT]
-> The tested and verified operating configuration for **Munin v1.0.0** is the **web GUI running through GitHub Actions with MiMo V2.5** as the model.
+> The tested and verified operating configuration for **Munin v1.0.0** is the **Discord community adapter running through GitHub Actions with MiMo V2.5** as the model.
+>
+> **Discord is the stable operator surface today.** The Web GUI is the target
+> long-term interface, but live-session testing exposed frontend bugs that are
+> still being fixed; until the GUI repair loop passes end-to-end, Discord is the
+> reference surface for full operations.
 >
 > Other providers, models, deployment targets and control surfaces may work, but they are not part of the verified v1.0.0 configuration unless explicitly documented.
 
 | Component | Verified configuration |
 | --- | --- |
 | Version | **Munin v1.0.0** |
-| Interface | **Web GUI** |
+| Interface | **Discord community adapter** (Web GUI under repair) |
 | Execution environment | **GitHub Actions** |
 | Model | **MiMo V2.5** |
 
 ```mermaid
 flowchart LR
-    Operator[Operator] --> GUI[Munin Web GUI]
-    GUI --> Actions[GitHub Actions runner]
+    Operator[Operator] --> Discord[Munin Discord surface]
+    Discord --> Actions[GitHub Actions runner]
     Actions --> Runtime[Munin v1.0.0]
     Runtime --> Model[MiMo V2.5]
     Runtime --> Evidence[Durable events, reports and evidence]

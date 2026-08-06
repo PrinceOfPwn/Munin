@@ -4,6 +4,31 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — Docs realignment: Discord is the stable v1.0.0 operator surface
+
+The self-audit (subagent report + local review) found the repository
+documentation still presented the **Web GUI as the verified v1.0.0
+configuration** while live-session testing proved the opposite: the Discord
+community adapter is the stable end-to-end surface, and the Web GUI lost its
+verified status after frontend bugs that have not yet passed the full repair
+loop.
+
+Updated to match verified reality (Discord + GitHub Actions + MiMo V2.5, GUI
+explicitly "under repair / unverified"):
+
+- `README.md` — verified configuration callout, component table and mermaid.
+- `README.es.md` / `README.pt-BR.md` / `README.zh-CN.md` / `README.ru.md` /
+  `README.ko.md` — translated verified-config blocks and missing FAQ/ru-ko
+  mentions; mermaid edges updated from GUI to Discord.
+- `AGENTS.md` — project contract verified list + validation note.
+- `MAP.md` — control surfaces table (Discord → stable) + verified-path mermaid.
+- `docs/operator-guide.md` — "Verified configuration" section.
+- `docs/en|es|pt-BR|zh-CN/handbook.md` — overview, "Interfaces" and
+  "Deployment"/"verified path" sections.
+
+Reference surface for operations today is Discord; the Web GUI remains the
+target long-term interface until its repair loop passes.
+
 ## 2026-08-06 — Discord regression tests + lenient leading-mention fallback
 
 Live session confirmed the event-loop fix (presence reports now reach

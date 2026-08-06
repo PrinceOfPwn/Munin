@@ -32,21 +32,26 @@
 ## Configuração verificada da v1.0.0
 
 > [!IMPORTANT]
-> A configuração testada e verificada para **Munin v1.0.0** é a **GUI web executada por GitHub Actions usando MiMo V2.5** como modelo.
+> A configuração testada e verificada para **Munin v1.0.0** é o **adaptador Discord executado por GitHub Actions usando MiMo V2.5** como modelo.
+>
+> **Discord é a superfície de operador estável hoje.** A GUI web é a interface
+> alvo de longo prazo, mas sessões ao vivo encontraram bugs de frontend ainda em
+> correção; até que o ciclo de reparo passe, Discord é a superfície de referência
+> para operações completas.
 >
 > Outros provedores, modelos, destinos de implantação e interfaces podem funcionar, mas não fazem parte da configuração verificada da v1.0.0 salvo documentação explícita.
 
 | Componente | Configuração verificada |
 | --- | --- |
 | Versão | **Munin v1.0.0** |
-| Interface | **GUI web** |
+| Interface | **Adaptador Discord** (GUI web em reparo) |
 | Ambiente de execução | **GitHub Actions** |
 | Modelo | **MiMo V2.5** |
 
 ```mermaid
 flowchart LR
-    Operador --> GUI[GUI web do Munin]
-    GUI --> Actions[Runner do GitHub Actions]
+    Operador --> Discord[Superfície Discord do Munin]
+    Discord --> Actions[Runner do GitHub Actions]
     Actions --> Runtime[Munin v1.0.0]
     Runtime --> Modelo[MiMo V2.5]
     Runtime --> Evidencia[Eventos, relatórios e evidências duráveis]
