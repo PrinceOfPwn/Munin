@@ -71,11 +71,11 @@ Parts of the internal control language are written in **Simplified Chinese** bec
 
 ```mermaid
 flowchart LR
-    Operator[Operator] --> Discord[Munin Discord surface]
-    Discord --> Actions[GitHub Actions runner]
-    Actions --> Runtime[Munin v1.1.0]
-    Runtime --> Model[MiMo V2.5]
-    Runtime --> Evidence[Durable events, reports and evidence]
+    operator["Operator"] --> discord["Munin Discord surface"]
+    discord --> actions["GitHub Actions runner"]
+    actions --> runtime["Munin v1.1.0"]
+    runtime --> model["MiMo V2.5"]
+    runtime --> evidence["Durable events, reports and evidence"]
 ```
 
 ## Why Munin
