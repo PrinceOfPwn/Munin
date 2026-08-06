@@ -1,0 +1,363 @@
+# AKATSUKI enterprise extension for the Munin live laboratory.
+#
+# This dataset is intentionally synthetic and isolated. It expands the existing
+# directory with cloud, data, security, contractor, privileged-account and
+# application relationships that can be correlated with the Juice Shop target.
+
+# ── Additional organizational units ───────────────────────────────────────────
+
+dn: ou=Cloud,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Cloud
+description: Cloud platform engineering and container orchestration
+
+dn: ou=Data,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Data
+description: Data engineering, analytics and database operations
+
+dn: ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Contractors
+description: Time-bounded third-party and supplier identities
+
+dn: ou=Privileged-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Privileged-Accounts
+description: Break-glass, automation and delegated administrative identities
+
+dn: ou=Applications,ou=Corp,dc=akatsuki,dc=com
+objectClass: organizationalUnit
+ou: Applications
+description: Application owners, release engineering and product operations
+
+# ── Workforce identities ──────────────────────────────────────────────────────
+
+dn: uid=ckane,ou=Cloud,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: ckane
+cn: Casey Kane
+sn: Kane
+givenName: Casey
+displayName: Casey Kane
+mail: ckane@akatsuki.com
+title: Principal Cloud Platform Engineer
+employeeNumber: AK-1042
+description: Owns Kubernetes platform design and production cluster lifecycle
+
+dn: uid=tnguyen,ou=Applications,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: tnguyen
+cn: Thanh Nguyen
+sn: Nguyen
+givenName: Thanh
+displayName: Thanh Nguyen
+mail: tnguyen@akatsuki.com
+title: Senior Release Engineer
+employeeNumber: AK-1188
+description: Coordinates production releases for customer-facing applications
+
+dn: uid=npatel,ou=Data,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: npatel
+cn: Nisha Patel
+sn: Patel
+givenName: Nisha
+displayName: Nisha Patel
+mail: npatel@akatsuki.com
+title: Database Reliability Engineer
+employeeNumber: AK-1107
+description: Operates reporting and transactional database platforms
+
+dn: uid=lmartin,ou=Security,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: lmartin
+cn: Lucia Martin
+sn: Martin
+givenName: Lucia
+displayName: Lucia Martin
+mail: lmartin@akatsuki.com
+title: Senior Detection Engineer
+employeeNumber: AK-1210
+description: Maintains SIEM detections and privileged-access monitoring
+
+dn: uid=ameyer,ou=Finance,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: ameyer
+cn: Adrian Meyer
+sn: Meyer
+givenName: Adrian
+displayName: Adrian Meyer
+mail: ameyer@akatsuki.com
+title: Financial Systems Analyst
+employeeNumber: AK-1009
+description: Business owner for finance reporting and ERP integrations
+
+dn: uid=vendor_zen,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: vendor_zen
+cn: Zen Systems Support
+sn: Support
+displayName: Zen Systems External Support
+mail: support@zen-systems.example
+title: Application Support Contractor
+employeeType: EXTERNAL_CONTRACTOR
+description: Temporary support identity for customer portal migration; review date 2026-09-01
+
+dn: uid=temp_helpdesk,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: temp_helpdesk
+cn: Temporary Helpdesk
+sn: Helpdesk
+displayName: Temporary Helpdesk Rotation
+mail: temp-helpdesk@contractor.akatsuki.com
+title: Tier 1 Support Contractor
+employeeType: EXTERNAL_CONTRACTOR
+description: Shared rotation identity retained for legacy ticket automation
+
+dn: uid=former_release,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: former_release
+cn: Former Release Contractor
+sn: Contractor
+displayName: Former Release Contractor
+mail: former-release@contractor.akatsuki.com
+title: Former Release Engineering Contractor
+employeeType: DISABLED_LEAVER
+description: Offboarded identity retained for audit; historical group memberships require review
+
+# ── Privileged and service identities ─────────────────────────────────────────
+
+dn: uid=breakglass_audit,ou=Privileged-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: breakglass_audit
+cn: Audit Break Glass
+sn: BreakGlass
+displayName: Break Glass - Audit Recovery
+mail: breakglass-audit@akatsuki.com
+title: Emergency Audit Recovery
+employeeType: DONT_REQ_PREAUTH
+description: Legacy emergency identity; interactive use requires incident commander approval
+
+dn: uid=legacy_batch,ou=Privileged-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: legacy_batch
+cn: Legacy Batch Operator
+sn: Service
+displayName: Service - Legacy Batch Operations
+mail: legacy-batch@akatsuki.com
+title: HOST/LEGACY01.akatsuki.com
+employeeType: DONT_REQ_PREAUTH
+description: Migration-era batch identity with exception CR-2026-041
+
+dn: uid=svc_juice,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_juice
+cn: Customer Portal Application Service
+sn: Service
+displayName: Service - Customer Portal
+mail: svc_juice@akatsuki.com
+title: HTTP/JUICE01.akatsuki.com:3000
+description: Runtime identity for the isolated customer-portal training application
+
+dn: uid=svc_gitlab,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_gitlab
+cn: GitLab Deployment Service
+sn: Service
+displayName: Service - GitLab Deployment
+mail: svc_gitlab@akatsuki.com
+title: HTTP/GITLAB01.akatsuki.com:8080
+description: CI deployment identity used by release engineering
+
+dn: uid=svc_k8s,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_k8s
+cn: Kubernetes Automation Service
+sn: Service
+displayName: Service - Kubernetes Automation
+mail: svc_k8s@akatsuki.com
+title: HOST/K8S01.akatsuki.com
+description: Cluster automation identity with production namespace access
+
+dn: uid=svc_vault,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_vault
+cn: Vault Integration Service
+sn: Service
+displayName: Service - Secrets Broker
+mail: svc_vault@akatsuki.com
+title: HTTP/VAULT01.akatsuki.com:8200
+description: Broker identity for application secret delivery
+
+dn: uid=svc_reporting,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_reporting
+cn: Finance Reporting Service
+sn: Service
+displayName: Service - Finance Reporting
+mail: svc_reporting@akatsuki.com
+title: MSSQLSvc/SQL01.akatsuki.com:1433
+description: Read-heavy reporting integration used by finance analytics
+
+dn: uid=svc_siem,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+objectClass: inetOrgPerson
+uid: svc_siem
+cn: SIEM Collection Service
+sn: Service
+displayName: Service - SIEM Collection
+mail: svc_siem@akatsuki.com
+title: HTTP/SIEM01.akatsuki.com:9200
+description: Security telemetry collection and enrichment identity
+
+# ── Application and infrastructure objects ────────────────────────────────────
+
+dn: cn=JUICE01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: JUICE01
+description: Isolated OWASP Juice Shop customer-portal training target on TCP 3000
+serialNumber: SN-2026-JUICE01-AK
+owner: uid=tnguyen,ou=Applications,ou=Corp,dc=akatsuki,dc=com
+owner: uid=svc_juice,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=API01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: API01
+description: Internal customer API gateway and integration tier
+serialNumber: SN-2026-API01-AK
+owner: uid=tnguyen,ou=Applications,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=GITLAB01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: GITLAB01
+description: Source-control and CI orchestration server
+serialNumber: SN-2026-GITLAB01-AK
+owner: uid=svc_gitlab,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=K8S01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: K8S01
+description: Production Kubernetes control-plane abstraction
+serialNumber: SN-2026-K8S01-AK
+owner: uid=ckane,ou=Cloud,ou=Corp,dc=akatsuki,dc=com
+owner: uid=svc_k8s,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=VAULT01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: VAULT01
+description: Enterprise secrets-management service
+serialNumber: SN-2026-VAULT01-AK
+owner: uid=lmartin,ou=Security,ou=Corp,dc=akatsuki,dc=com
+owner: uid=svc_vault,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=SIEM01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: SIEM01
+description: Security analytics and telemetry platform
+serialNumber: SN-2026-SIEM01-AK
+owner: uid=lmartin,ou=Security,ou=Corp,dc=akatsuki,dc=com
+owner: uid=svc_siem,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=BASTION01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: BASTION01
+description: Administrative jump host for production operations
+serialNumber: SN-2026-BASTION01-AK
+owner: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=LEGACY01,ou=computers,dc=akatsuki,dc=com
+objectClass: device
+cn: LEGACY01
+description: Migration-era batch server pending retirement
+serialNumber: SN-2017-LEGACY01-AK
+owner: uid=legacy_batch,ou=Privileged-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+# ── Groups and nested delegation paths ────────────────────────────────────────
+
+dn: cn=Release Engineering,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Release Engineering
+description: Maintains application release automation and deployment workflows
+member: uid=tnguyen,ou=Applications,ou=Corp,dc=akatsuki,dc=com
+member: uid=svc_gitlab,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+member: uid=former_release,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Production Deployers,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Production Deployers
+description: Delegated production deployment authority
+member: cn=Release Engineering,ou=groups,dc=akatsuki,dc=com
+member: uid=svc_juice,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+member: uid=vendor_zen,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Cloud Platform,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Cloud Platform
+description: Cloud platform engineering team
+member: uid=ckane,ou=Cloud,ou=Corp,dc=akatsuki,dc=com
+member: uid=svc_k8s,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Kubernetes Admins,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Kubernetes Admins
+description: Administrative access to production Kubernetes clusters
+member: cn=Cloud Platform,ou=groups,dc=akatsuki,dc=com
+member: uid=svc_k8s,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Secrets Readers,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Secrets Readers
+description: Read access to application deployment secrets
+member: uid=svc_vault,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+member: cn=Production Deployers,ou=groups,dc=akatsuki,dc=com
+
+dn: cn=Database Operators,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Database Operators
+description: Operational access to production and reporting databases
+member: uid=npatel,ou=Data,ou=Corp,dc=akatsuki,dc=com
+member: uid=svc_reporting,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=SOC Tier 2,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: SOC Tier 2
+description: Detection engineering and incident-response escalation
+member: uid=lmartin,ou=Security,ou=Corp,dc=akatsuki,dc=com
+member: uid=svc_siem,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Remote Access,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Remote Access
+description: Access to the production administration bastion
+member: uid=temp_helpdesk,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+member: uid=vendor_zen,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+member: uid=jdoe,ou=IT-Operations,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Juice Shop Operations,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Juice Shop Operations
+description: Application operations for the isolated customer-portal target
+member: cn=Production Deployers,ou=groups,dc=akatsuki,dc=com
+member: uid=svc_juice,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Legacy Migration,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Legacy Migration
+description: Temporary migration delegation scheduled for removal
+member: uid=legacy_batch,ou=Privileged-Accounts,ou=Corp,dc=akatsuki,dc=com
+member: uid=former_release,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+
+dn: cn=Tier-0 Automation,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Tier-0 Automation
+description: Highly privileged automation identities
+member: uid=svc_vault,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+member: uid=svc_k8s,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com
+member: cn=Legacy Migration,ou=groups,dc=akatsuki,dc=com
+
+dn: cn=Finance Reporting,ou=groups,dc=akatsuki,dc=com
+objectClass: groupOfNames
+cn: Finance Reporting
+description: Finance reporting application users and service identities
+member: uid=ameyer,ou=Finance,ou=Corp,dc=akatsuki,dc=com
+member: uid=svc_reporting,ou=Service-Accounts,ou=Corp,dc=akatsuki,dc=com

@@ -1,0 +1,33 @@
+# Cross-directory relationships applied after the enterprise extension entries.
+# These modifications deliberately create nested privilege and lifecycle-review
+# paths for an authorized Munin investigation.
+
+dn: cn=Server Operators,ou=groups,dc=akatsuki,dc=com
+changetype: modify
+add: member
+member: cn=Production Deployers,ou=groups,dc=akatsuki,dc=com
+-
+
+dn: cn=Backup Operators,ou=groups,dc=akatsuki,dc=com
+changetype: modify
+add: member
+member: cn=Legacy Migration,ou=groups,dc=akatsuki,dc=com
+-
+
+dn: cn=Domain Admins,ou=groups,dc=akatsuki,dc=com
+changetype: modify
+add: member
+member: cn=Tier-0 Automation,ou=groups,dc=akatsuki,dc=com
+-
+
+dn: cn=Web Operations,ou=groups,dc=akatsuki,dc=com
+changetype: modify
+add: member
+member: cn=Juice Shop Operations,ou=groups,dc=akatsuki,dc=com
+-
+
+dn: cn=Web Release Approvers,ou=groups,dc=akatsuki,dc=com
+changetype: modify
+add: member
+member: uid=vendor_zen,ou=Contractors,ou=Corp,dc=akatsuki,dc=com
+-
