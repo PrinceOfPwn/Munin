@@ -4,6 +4,41 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — Discord regression tests + lenient leading-mention fallback
+
+Live session confirmed the event-loop fix (presence reports now reach
+Discord) but exposed a second silent failure: operator `@Munin`
+invocations produced NO dispatch log (messages reached `on_message raw`
+and `_handle_message` returned at the `if not prompt: return` gate).
+Root-cause candidates: (a) startup backlog delivery before
+`client.user` populated → `bot_user_id=None` skipped the `<@id>` tag
+check entirely; (b) role mentions `<@&ROLE_ID>` / arbitrary `<@ID>`
+tags that the `<@id>`/`<@!id>`-only match does not accept (the original
+PR #52 "Nico wrote @Munin and got nothing" cause). No "Munin" role
+exists in the server, but the lenient fallback covers all three.
+
+Fix `ecc8100` in `munin/production/discord_adapter.py::_extract_prompt`:
+a final fallback treats a LEADING mention tag to ANY entity
+(`<@ID>`, `<@!ID>`, `<@&ID>`) as an invocation and strips it. The
+78c6bb4 regression (every channel message spawning an empty INV thread)
+is explicitly NOT resurrected: chatter without a leading mention tag
+still returns `None`.
+
+New `tests/test_discord_regression.py` (12 tests, all green):
+- `_extract_prompt`: role mention, legacy `<@!ID>`, arbitrary user
+  mention, `bot_user_id=None` backlog, multi-tag stripping, leading
+  whitespace, bare-mention falsy (no run), chatter-guard, textual
+  `@Munin` still works.
+- `send_discord_message`: delivered from a thread with no running
+  asyncio loop via a background-loop `_Probe` (the exact MCP handler
+  shape that crashed pre-`21fb088`), bridge fallback must NOT fire,
+  empty content still rejected.
+- `DiscordPublisher.publish`: cross-thread `run_coroutine_threadsafe`
+  delivery + detached → `False`.
+
+Validation: `tests/test_discord_regression.py` 12 passed;
+`tests/test_discord_adapter.py` 35 passed, 1 skipped (pre-existing).
+
 ## 2026-08-06 — Fix Discord publish RuntimeError from non-adapter threads
 
 `send_discord_message` (MCP tool) and `DiscordPublisher.publish()` both gated
