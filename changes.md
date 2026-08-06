@@ -4,6 +4,89 @@ Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides
 for the current runtime contract.
 
+## 2026-08-06 — Discord regression tests + lenient leading-mention fallback
+
+Live session confirmed the event-loop fix (presence reports now reach
+Discord) but exposed a second silent failure: operator `@Munin`
+invocations produced NO dispatch log (messages reached `on_message raw`
+and `_handle_message` returned at the `if not prompt: return` gate).
+Root-cause candidates: (a) startup backlog delivery before
+`client.user` populated → `bot_user_id=None` skipped the `<@id>` tag
+check entirely; (b) role mentions `<@&ROLE_ID>` / arbitrary `<@ID>`
+tags that the `<@id>`/`<@!id>`-only match does not accept (the original
+PR #52 "Nico wrote @Munin and got nothing" cause). No "Munin" role
+exists in the server, but the lenient fallback covers all three.
+
+Fix `ecc8100` in `munin/production/discord_adapter.py::_extract_prompt`:
+a fallback treats a leading native user mention tag (`<@ID>` / `<@!ID>`)
+as an invocation and strips it. CodeRabbit review tightened the contract
+(PR #58 findings #1/#2):
+- When `bot_user_id` is known, ONLY the bot's own tag is accepted; a
+  mention to another member is NOT an invocation.
+- Role mentions `<@&ID>` are NEVER accepted (no authoritative
+  invocation role configured; would let any member trigger runs).
+- When `bot_user_id` is None (startup backlog before `client.user`
+  populated — the 2026-08-06 silent-drop window), user tags still work;
+  role tags remain rejected.
+- The diagnostic drop log no longer includes `content_preview` (raw
+  rejected messages may contain credentials/PII); it logs structure
+  only: author, bot_user_id, channel, content_len.
+The 78c6bb4 regression (every channel message spawning an empty INV
+thread) is explicitly NOT resurrected: chatter without a matching
+leading mention still returns `None`.
+
+`discord_tool.py::send_discord_message` gained a same-loop branch
+(CodeRabbit #3): when the caller already runs on `PUBLISHER._loop`,
+schedule `PUBLISHER.publish` via `loop.create_task` and return an
+immediate "queued" ack instead of blocking on `future.result()` (which
+would deadlock the adapter loop until the coroutine got scheduled).
+Cross-thread callers keep `run_coroutine_threadsafe(...).result(timeout=10)`.
+
+New `tests/test_discord_regression.py` (12 tests, all green):
+- `_extract_prompt`: role mention, legacy `<@!ID>`, arbitrary user
+  mention, `bot_user_id=None` backlog, multi-tag stripping, leading
+  whitespace, bare-mention falsy (no run), chatter-guard, textual
+  `@Munin` still works.
+- `send_discord_message`: delivered from a thread with no running
+  asyncio loop via a background-loop `_Probe` (the exact MCP handler
+  shape that crashed pre-`21fb088`), bridge fallback must NOT fire,
+  empty content still rejected.
+- `DiscordPublisher.publish`: cross-thread `run_coroutine_threadsafe`
+  delivery + detached → `False`.
+
+Validation: `tests/test_discord_regression.py` 13 passed;
+`tests/test_discord_adapter.py` 35 passed, 1 skipped (pre-existing).
+
+## 2026-08-06 — Fix Discord publish RuntimeError from non-adapter threads
+
+`send_discord_message` (MCP tool) and `DiscordPublisher.publish()` both gated
+their same-loop fast path on `loop is asyncio.get_running_loop()`. When the
+caller ran on a worker/executor thread with no running asyncio loop (the
+common case for sync MCP tool handlers invoked from the supervisor graph),
+`asyncio.get_running_loop()` raised `RuntimeError: no running event loop`.
+The broad `except Exception` swallowed it, logged
+`send_discord_message: adapter publish failed, falling back to bridge: no
+running event loop`, and the message fell through to the legacy
+`post_to_discord` bridge — which is not connected when the adapter owns the
+channel — so agent output (e.g. presence reports) never reached Discord.
+
+Fix:
+- `munin/mcp/tools/discord_tool.py`: removed the `asyncio.ensure_future`
+  same-loop branch and the `loop is asyncio.get_running_loop()` comparison.
+  Now, whenever `loop is not None and loop.is_running()`, the call always
+  schedules via `asyncio.run_coroutine_threadsafe(...).result(timeout=10)`,
+  which is safe from any thread (same loop, different loop, or a sync thread
+  with no loop). Return dict shapes, the `publish_failed` error code, the
+  warning log, and the legacy bridge fallback are all preserved.
+- `munin/production/discord_publisher.py`: wrapped the same-loop check in a
+  `try/except RuntimeError` so `publish()` no longer raises when awaited from
+  a non-adapter thread; the `run_coroutine_threadsafe` +
+  `asyncio.wrap_future` path is preserved for the cross-loop/cross-thread
+  case, and the fast-path `await _send()` is preserved for the genuine
+  same-loop case.
+
+No public signatures, return dict shapes, or other files were touched.
+
 ## 2026-08-05 â€” Fix Turso state reset + kernel meta-tool schema + graph probe
 
 Three independent fixes that unblocked the `raven-mind/diag-pre-fix` live

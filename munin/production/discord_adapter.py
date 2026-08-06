@@ -62,6 +62,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -650,6 +651,31 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
     lowered = content.lower()
     if "@munin" in lowered or lowered.startswith("munin "):
         return content.replace("@munin", "", 1).strip().replace("@Munin", "", 1).strip()
+
+    # Final fallback for a leading native Discord mention tag —
+    # ``<@ID>`` (user) or ``<@!ID>`` (legacy nickname).  Security rule:
+    # when ``bot_user_id`` is known, ONLY the bot's own tag is accepted
+    # (a mention to another member/role is not an invocation — the
+    # operator must confirm identity server-side).  Role mentions
+    # ``<@&ROLE_ID>`` are NEVER accepted: no authoritative invocation
+    # role is configured, and accepting any role would let any member
+    # of the role trigger runs in the channel.
+    #
+    # When ``bot_user_id`` is None (the brief startup window before
+    # ``client.user`` populated, which was the cause of silent drops on
+    # 2026-08-06), user tags are still accepted so backlog messages do
+    # not vanish; role tags remain rejected.  This keeps the operator's
+    # "wrote @Munin and got nothing" failure mode fixed without opening
+    # an arbitrary-mention invocation surface on the steady state.
+    # The caller's allowlist gate on operator-curated channels already
+    # bounds who reaches this code path.
+    mention = re.match(r"^<@!?(\d+)>\s*", content)
+    if mention is not None:
+        mentioned_id = int(mention.group(1))
+        if bot_user_id is not None and mentioned_id != int(bot_user_id):
+            return None
+        rest = content[mention.end():].strip()
+        return rest or None
 
     return None
 
@@ -1260,6 +1286,15 @@ async def _handle_message(
 
     prompt = _extract_prompt(message, bot_user_id=bot_user_id)
     if not prompt:
+        # DIAGNOSTIC (2026-08-06): log the dropped message so "bot didn't
+        # respond" investigations can see that _extract_prompt rejected it.
+        # Raw message content is intentionally NOT included (rejected
+        # messages may carry credentials/PII — CodeRabbit security review).
+        _content = (getattr(message, "content", "") or "")
+        log.info(
+            "discord: extract-drop author=%s bot_user_id=%s channel=%s content_len=%d",
+            author_id, bot_user_id, channel_id, len(_content),
+        )
         return
 
     log.info(
