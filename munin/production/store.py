@@ -990,6 +990,71 @@ class ProductionStore:
         if not row:
             raise PermissionError("actor is not authorized for this conversation")
 
+    def add_conversation_participant(self, *, conversation_id: str, user_id: str, role: str = "member") -> dict[str, Any]:
+        """Add a participant to an existing conversation (community channel graph).
+
+        Used by the Discord adapter so every member of a shared guild channel
+        can talk into the same per-channel graph without mixing session
+        state.  Idempotent: re-adding an active participant is a no-op.
+        """
+        if role not in {"owner", "member"}:
+            raise ValueError("participant role must be owner or member")
+        now = _now_ms()
+        with self._transaction() as conn:
+            self._require_user(conn, user_id)
+            if not conn.execute("SELECT 1 FROM conversations WHERE id=? AND deleted_at_ms IS NULL", (conversation_id,)).fetchone():
+                raise KeyError(conversation_id)
+            conn.execute(
+                "INSERT INTO conversation_participants (conversation_id,user_id,role,added_at_ms,removed_at_ms) VALUES (?,?,?,?,NULL)"
+                " ON CONFLICT(conversation_id,user_id) DO UPDATE SET role=excluded.role,removed_at_ms=NULL",
+                (conversation_id, user_id, role, now),
+            )
+            self._audit(conn, actor_id=user_id, action="conversation.participant_added", resource_type="conversation", resource_id=conversation_id, outcome="success")
+        return {"conversation_id": conversation_id, "user_id": user_id, "role": role}
+
+    def list_pending_human_requests(self, *, actor_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Return unresolved human requests visible to ``actor_id``.
+
+        Participants see requests for conversations they belong to; admins
+        see every pending request (parity with the resolution bypass).
+        Used by the Discord surface to render ``/approvals``.
+        """
+        now = _now_ms()
+        cap = max(1, min(int(limit), 100))
+        with self._read_only() as conn:
+            if self._is_admin(conn, actor_id):
+                rows = conn.execute(
+                    """SELECT h.id,h.run_id,h.action,h.risk,h.choices_json,h.expires_at_ms,h.created_at_ms,
+                              r.conversation_id
+                       FROM human_requests h JOIN agent_runs r ON r.id=h.run_id
+                       WHERE h.state='waiting' AND h.expires_at_ms>?
+                       ORDER BY h.created_at_ms DESC LIMIT ?""",
+                    (now, cap),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT h.id,h.run_id,h.action,h.risk,h.choices_json,h.expires_at_ms,h.created_at_ms,
+                              r.conversation_id
+                       FROM human_requests h JOIN agent_runs r ON r.id=h.run_id
+                       JOIN conversation_participants p ON p.conversation_id=r.conversation_id
+                       WHERE h.state='waiting' AND h.expires_at_ms>? AND p.user_id=? AND p.removed_at_ms IS NULL
+                       ORDER BY h.created_at_ms DESC LIMIT ?""",
+                    (now, actor_id, cap),
+                ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "action": row["action"],
+                "risk": row["risk"],
+                "choices": json.loads(row["choices_json"]),
+                "expires_at_ms": int(row["expires_at_ms"]),
+                "created_at_ms": int(row["created_at_ms"]),
+                "conversation_id": row["conversation_id"],
+            }
+            for row in rows
+        ]
+
     def _append_event(self, conn: Any, *, run_id: str, kind: str, payload: Any, actor_id: str | None = None, causation_id: str | None = None) -> dict[str, Any]:
         sequence = self._next_sequence(conn, table="run_events", key="run_id", key_value=run_id)
         event = {"id": _id("evt"), "run_id": run_id, "sequence": sequence, "kind": kind, "payload": redact_payload(payload), "created_at_ms": _now_ms()}
@@ -1667,7 +1732,13 @@ class ProductionStore:
             request = conn.execute("SELECT h.*,r.conversation_id,r.assistant_message_id FROM human_requests h JOIN agent_runs r ON r.id=h.run_id WHERE h.id=?", (request_id,)).fetchone()
             if not request:
                 raise KeyError(request_id)
-            self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
+            try:
+                self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
+            except PermissionError:
+                # Admin bypass: an administrator may resolve a decision for
+                # any conversation (mirrors ``soft_delete_conversation``).
+                if not self._is_admin(conn, actor_id):
+                    raise
             allowed = json.loads(request["choices_json"])
             if request["state"] != "waiting" or int(request["expires_at_ms"]) < now or choice not in allowed or not hmac.compare_digest(request["nonce_hash"], self._token_hash(nonce)):
                 raise PermissionError("human request is invalid, expired, or already resolved")
@@ -1727,7 +1798,12 @@ class ProductionStore:
             ).fetchone()
             if not request:
                 raise KeyError(request_id)
-            self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
+            try:
+                self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
+            except PermissionError:
+                # Admin bypass for HITL nonce reissue (parity with resolve).
+                if not self._is_admin(conn, actor_id):
+                    raise
             if request["state"] != "waiting" or int(request["expires_at_ms"]) < now:
                 raise PermissionError("human request is not awaiting a decision")
             conn.execute(
@@ -3060,6 +3136,16 @@ class MuninStore:
         self._hydrate_hot_conversation(conversation_id=result["id"])
         return result
 
+    def add_conversation_participant(self, *, conversation_id: str, user_id: str, role: str = "member") -> dict[str, Any]:
+        result = self._durable.add_conversation_participant(
+            conversation_id=conversation_id, user_id=user_id, role=role
+        )
+        self._mirror_participant(conversation_id=conversation_id, user_id=user_id, role=role)
+        return result
+
+    def list_pending_human_requests(self, *, actor_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        return self._durable.list_pending_human_requests(actor_id=actor_id, limit=limit)
+
     # ------------------------------------------------------------------
     # Turns / runs (durable stub message + hot run)
     # ------------------------------------------------------------------
@@ -3480,6 +3566,21 @@ class MuninStore:
         if self._durable is self._hot:
             raise KeyError(run_id)
         return self._durable.get_run_detail_for_actor(actor_id=actor_id, run_id=run_id)
+
+    def get_artifact(self, *, actor_id: str, artifact_id: str) -> dict[str, Any]:
+        # Artifacts live only in the durable archive; mirror the actor's
+        # participant row into the hot store first so reads behave identically
+        # across deployments.
+        with self._durable._read_only() as conn:  # noqa: SLF001
+            artifact = conn.execute(
+                "SELECT conversation_id FROM conversation_artifacts WHERE id=?",
+                (artifact_id,),
+            ).fetchone()
+        if artifact:
+            self._hydrate_hot_participant(
+                actor_id=actor_id, conversation_id=str(artifact["conversation_id"])
+            )
+        return self._durable.get_artifact(actor_id=actor_id, artifact_id=artifact_id)
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
         with self._hot._read_only() as conn:  # noqa: SLF001

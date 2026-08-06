@@ -155,15 +155,12 @@ class SubagentFactory:
     # ------------------------------------------------------------------
 
     def _filter_tools(self, tool_names: list[str], *, may_create_child: bool = False) -> list[Any]:
+        from .kernel import KERNEL_META_TOOL_NAMES  # noqa: PLC0415
+
         name_set = set(tool_names)
         if may_create_child:
             # Kernel-owned meta tools are safe to inherit as *capability
             # constructors*. Any resulting side effect still encounters the
             # gateway's scope/audit/HITL policy.
-            name_set |= {
-                "create_tool", "invoke_registered_tool", "list_registered_tools",
-                "inspect_registered_tool", "create_subagent", "invoke_registered_agent",
-                "list_registered_agents", "inspect_registered_agent", "create_workflow",
-                "invoke_registered_workflow", "list_registered_workflows", "schedule_workers",
-            }
+            name_set |= KERNEL_META_TOOL_NAMES
         return [t for t in self._tools if getattr(t, "name", None) in name_set]

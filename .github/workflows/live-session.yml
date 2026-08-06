@@ -64,6 +64,11 @@ on:
         required: true
         default: true
         type: boolean
+      enable_discord:
+        description: "Start the Discord community adapter (requires MUNIN_DISCORD_BOT_TOKEN + allowed channels/users secrets)"
+        required: true
+        default: false
+        type: boolean
 
 # Required so Munin can commit forged tools + open soul-proposal PRs.
 permissions:
@@ -166,6 +171,14 @@ jobs:
       MUNIN_SSE_HEARTBEAT_SECONDS: "20"
       NGROK_AUTH_TOKEN:   ${{ secrets.NGROK_AUTH_TOKEN }}
       MUNIN_TUNNEL_PROVIDER: ${{ inputs.tunnel_provider }}
+      # Discord community adapter — opt-in. The bot only starts when
+      # enable_discord=true AND MUNIN_DISCORD_BOT_TOKEN is configured as a
+      # repository secret. Empty token => create_discord_task returns None
+      # and no background task is scheduled. Allowed channels/users are
+      # comma-separated Discord snowflake IDs (Developer Mode → Copy ID).
+      MUNIN_DISCORD_BOT_TOKEN:      ${{ secrets.MUNIN_DISCORD_BOT_TOKEN }}
+      MUNIN_DISCORD_ALLOWED_CHANNELS: ${{ secrets.MUNIN_DISCORD_ALLOWED_CHANNELS }}
+      MUNIN_DISCORD_ALLOWED_USER_IDS: ${{ secrets.MUNIN_DISCORD_ALLOWED_USER_IDS }}
       # DEBIAN_FRONTEND avoids interactive prompts during apt-get inside Kali
       DEBIAN_FRONTEND: noninteractive
 

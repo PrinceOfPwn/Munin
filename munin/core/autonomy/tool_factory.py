@@ -162,7 +162,27 @@ class ToolFactory:
                     "validation": validation,
                 }
 
+        # Materialize the script on disk BEFORE deriving the schema / registering,
+        # so register_state_only (which loads the callable to validate it loads)
+        # sees the file. The previous ordering registered first and replaced
+        # second, which raised "script not found" for every create_tool call.
+        staging_path.replace(script_path)
+
         # 3. Persist with provenance (procedural table is the Tool Registry).
+        if parameters is None:
+            # Derive the parameter schema from the typed signature of the
+            # authored function, so tools created without an explicit JSON
+            # schema still advertise list/dict/Optional arguments correctly
+            # (and the model never sees them degraded to plain "string").
+            try:
+                derived_fn = registry._load_callable(script_path.resolve(), fn_name)
+                derived = registry.signature_to_json_schema(inspect.signature(derived_fn))
+                if derived.get("properties"):
+                    parameters = derived
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("tool_factory: could not derive schema for %s: %s", tool_name, exc)
+                parameters = None
+
         signature = {
             "function_name": fn_name,
             "parameters": parameters or {"type": "object", "properties": {}},
@@ -175,12 +195,6 @@ class ToolFactory:
             },
         }
         tool_tags = ["tool-factory", f"run:{self._run_id or 'unknown'}", *(tags or [])]
-        # Materialize the script on disk BEFORE registering it, so register_state_only
-        # (which loads the callable to validate it loads) sees the file. The previous
-        # ordering registered first and replaced second, which raised "script not found"
-        # for every create_tool call. The try/except below still gives us the issue-7
-        # guarantee that a failed registration does not leave a half-registered entry.
-        staging_path.replace(script_path)
         try:
             registry.register_state_only(
                 self._state,

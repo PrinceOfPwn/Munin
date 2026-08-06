@@ -1120,6 +1120,8 @@ def publish_shared_intel(
     status: str = "NEW",
     tags: str = "",
     fingerprint: str = "",
+    conversation_id: str = "",
+    actor_id: str = "",
     run_id: str = "",
 ) -> dict[str, Any]:
     """Publish a finding to the shared intel SQLite store. Accessible by all agents."""
@@ -1134,6 +1136,8 @@ def publish_shared_intel(
         status=status,
         tags=tags,
         fingerprint=fingerprint,
+        conversation_id=conversation_id,
+        actor_id=actor_id,
     )
     return {
         "ok": True,
@@ -1153,6 +1157,8 @@ def query_shared_intel(
     severity: str = "",
     status: str = "",
     limit: int = 50,
+    conversation_id: str = "",
+    actor_id: str = "",
     run_id: str = "",
 ) -> dict[str, Any]:
     """Query the shared intel store. Filter by IP, service, finding type, severity, or status."""
@@ -1163,6 +1169,8 @@ def query_shared_intel(
         severity=severity,
         status=status,
         limit=limit,
+        conversation_id=conversation_id,
+        actor_id=actor_id,
     )
     return {
         "ok": True,

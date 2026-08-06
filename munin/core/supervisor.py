@@ -227,12 +227,33 @@ def build_supervisor(
     prompt = system_prompt.strip() or compose_munin_prompt()
     skill_binding = bundled_skill_library().bind_all()
 
+    # Explicitly install a SummarizationMiddleware with a lower trigger
+    # threshold than Deep Agents' auto-default so long Munin conversations
+    # compact before blowing the model context window. An explicitly-supplied
+    # middleware overrides the auto-installed one by class-name match. If the
+    # class cannot be imported or constructed (older deepagents, missing
+    # backend) we silently keep the framework default so the build never breaks.
+    composed_middleware = list(middleware or ())
+    try:
+        from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: PLC0415
+
+        composed_middleware.append(
+            SummarizationMiddleware(
+                model=model,
+                backend=skill_binding.backend,
+                trigger=[("tokens", 170_000), ("messages", 80)],
+                keep=("messages", 12),
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("supervisor: SummarizationMiddleware not installed; using framework default", exc_info=True)
+
     return create_deep_agent(
         name="munin",
         model=model,
         tools=[*tools, *(meta_tools or [])],
         system_prompt=prompt,
-        middleware=list(middleware or ()),
+        middleware=composed_middleware,
         subagents=subagents or None,
         skills=skill_binding.sources,
         backend=skill_binding.backend,

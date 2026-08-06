@@ -1,4 +1,4 @@
-# tags: [core, runtime, orchestrator, subagent, contextvars, ACTIVE_STORE, autonomy-context, ACTIVE_MODE, ACTIVE_GOAL, ACTIVE_PLAN_SNAPSHOT, ACTIVE_EMITTER, supervisor-runner, middleware-context, per-invocation, thread-local-state]
+# tags: [core, runtime, orchestrator, subagent, contextvars, ACTIVE_STORE, autonomy-context, ACTIVE_MODE, ACTIVE_GOAL, ACTIVE_PLAN_SNAPSHOT, ACTIVE_EMITTER, supervisor-runner, middleware-context, per-invocation, thread-local-state, ACTIVE_CONVERSATION_ID, ACTIVE_ACTOR_ID, memory-scoping]
 """
 Autonomy per-invocation context (contextvars).
 
@@ -30,6 +30,12 @@ ACTIVE_PLAN_SNAPSHOT: contextvars.ContextVar[dict | None] = contextvars.ContextV
 ACTIVE_EMITTER: contextvars.ContextVar[Callable[[dict], None] | None] = contextvars.ContextVar(
     "munin_autonomy_active_emitter", default=None
 )
+ACTIVE_CONVERSATION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "munin_autonomy_active_conversation_id", default=""
+)
+ACTIVE_ACTOR_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "munin_autonomy_active_actor_id", default=""
+)
 
 __all__ = [
     "ACTIVE_STORE",
@@ -37,4 +43,6 @@ __all__ = [
     "ACTIVE_GOAL",
     "ACTIVE_PLAN_SNAPSHOT",
     "ACTIVE_EMITTER",
+    "ACTIVE_CONVERSATION_ID",
+    "ACTIVE_ACTOR_ID",
 ]
