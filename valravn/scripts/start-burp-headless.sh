@@ -122,6 +122,9 @@ Path(os.environ["BURP_USER_CONFIG"]).write_text(
 )
 PY
 
+echo ">>> generated $BURP_USER_CONFIG:"
+cat "$BURP_USER_CONFIG"
+
 if [[ -f "$BURP_PID_FILE" ]]; then
   OLD_PID="$(cat "$BURP_PID_FILE" 2>/dev/null || true)"
   if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" >/dev/null 2>&1; then
@@ -138,7 +141,6 @@ JAVA_ARGS=(
   -Duser.home="$BURP_HOME/home"
   -Xmx"$BURP_MAX_HEAP"
   -jar "$BURP_JAR"
-  --use-defaults
   --user-config-file="$BURP_USER_CONFIG"
 )
 
@@ -324,6 +326,16 @@ try:
         diag.append(shot.stdout.strip())
 except Exception as exc:
     diag.append(f"(screenshot failed: {exc})")
+try:
+    ocr = subprocess.run(
+        ["bash", "-c", "DISPLAY=${DISPLAY:-:99} import -window root /tmp/failure.png 2>/dev/null; tesseract /tmp/failure.png stdout 2>/dev/null | grep -viE '^\\s*$' | head -40 || true"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if ocr.stdout.strip():
+        diag.append("--- OCR of display ---")
+        diag.append(ocr.stdout.strip())
+except Exception as exc:
+    diag.append(f"(ocr failed: {exc})")
 try:
     s = subprocess.run(
         ["bash", "-c", "ss -tlnp 2>/dev/null | grep -E '9444|8080|:99' || true; ps -ef | grep -E '[j]ava|[X]vfb' | head -10"],
