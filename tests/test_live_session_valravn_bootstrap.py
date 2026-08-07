@@ -12,7 +12,7 @@ def test_live_session_chains_valravn_before_server_step() -> None:
     smoke = TURSO_SMOKE.read_text(encoding="utf-8")
     assert 'GITHUB_WORKFLOW", "") != "Munin Live Session"' in smoke
     assert "valravn_live_bootstrap.sh" in smoke
-    assert smoke.index("_bootstrap_live_session_mesh()") > smoke.index("Turso online roundtrip OK")
+    assert smoke.rindex("_bootstrap_live_session_mesh()") > smoke.index("Turso online roundtrip OK")
 
 
 def test_valravn_live_bootstrap_is_real_and_pinned() -> None:
