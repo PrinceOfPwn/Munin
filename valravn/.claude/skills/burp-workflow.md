@@ -9,6 +9,8 @@ This skill preserves the operational workflow from the original Valravn MCP whil
 
 The rule is simple: **Valravn decides; Ultimate drives Burp.** Do not recreate mature Montoya operations in Python or a second Java REST API.
 
+Use `evidence-and-tabs.md` alongside this workflow when the operation needs durable evidence organization, replay context, or tab/request correlation. The Munin skill adapter rewrites that sibling reference into the namespaced Deep Agents package automatically.
+
 ## First move
 
 Before assuming a tool name or schema:
