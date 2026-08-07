@@ -64,8 +64,10 @@ def _open_burp_tunnel(host: str, port: int, is_https: bool) -> socket.socket:
         if not resp.startswith(b"HTTP/1.1 200") and not resp.startswith(b"HTTP/1.0 200"):
             sock.close()
             raise RuntimeError(f"Burp proxy CONNECT refused: {resp[:120]!r}")
-        # Upgrade to TLS over the tunnel
+        # Upgrade to TLS over the tunnel. Certificate validation stays disabled
+        # for Burp MITM, while legacy TLS 1.0/1.1 are explicitly rejected.
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         ssock = ctx.wrap_socket(sock, server_hostname=host)
