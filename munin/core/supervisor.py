@@ -237,12 +237,30 @@ def build_supervisor(
     try:
         from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: PLC0415
 
+        from .autonomy.compaction import compose_cti_summary_prompt  # noqa: PLC0415
+
+        cti_summary_prompt = compose_cti_summary_prompt()
         composed_middleware.append(
             SummarizationMiddleware(
                 model=model,
                 backend=skill_binding.backend,
-                trigger=[("tokens", 170_000), ("messages", 80)],
-                keep=("messages", 12),
+                # Compact by CONTEXT (token pressure), not by message count —
+                # a long red-team turn with few messages should still compact
+                # when it pressures the window, and a chatty short-turn thread
+                # should NOT compact just because it hit 80 messages. Keep the
+                # last 40 messages unsummarized (up from 12) so the high
+                # context-window model retains more live campaign history
+                # across compaction events.  Trigger threshold conservative at
+                # 100K tokens (was 170K) — compact earlier rather than later
+                # so a DeepSeek-tier window never rides the edge before the
+                # CTI checkpoint fires.
+                trigger=[("tokens", 100_000)],
+                keep=("messages", 40),
+                # CTI compaction: insert the operator's red-team checkpoint
+                # rules into DEEPAGENTS_DEFAULT_SUMMARY_PROMPT (splice before
+                # <messages>, never replace). None falls back to the framework
+                # default when deepagents or the rules file is unavailable.
+                summary_prompt=cti_summary_prompt,
             )
         )
     except Exception:  # noqa: BLE001

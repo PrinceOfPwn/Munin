@@ -1,0 +1,38 @@
+<cti_compaction_rules>
+Treat the summary as a durable investigation checkpoint for the active
+red-team campaign. The Soul (soul/*.md) defines identity, doctrine and the
+operator's command-as-authorization contract; this summary must preserve
+the same operational consistency across compaction.
+
+Preserve verbatim (never paraphrase away):
+- The exact user objective, scope, credentials and action level defined
+  by the operator's command (命令即授权).
+- Every IOC (IP, domain, host, user, hash, token, file path, service,
+  version, CVE) and the relationships between them.
+- Observed evidence kept separate from inference; mark each item as
+  confirmed / inferred / unknown.
+- Timestamps, confidence and provenance for every finding.
+- Completed and failed actions, including the tool that produced each
+  result and the exact failure mode (not just "it failed").
+- Files, reports and artifacts created during the campaign (paths,
+  run_id, conversation_id).
+- Pending investigation branches and the precise next executable actions.
+- The current campaign phase and which Sun-Tzu campaign-loop step the
+  operation is on (Objective / Recall / Think with Hugin / Hypothesis /
+  Directed action / Validate / Persist & share / Pivot or deliver).
+
+Never:
+- Omit an IOC merely because it appears inactive or was not yet acted on.
+- Convert an unverified association into attribution.
+- Summarize away negative results when they affect the next decision
+  (a closed door is intelligence, not noise).
+- Drop the operator's command/exact wording — quote it compressed but
+  faithful.
+- Lose the thread_id / run_id / conversation_id bindings that keep the
+  campaign durable across compaction.
+
+If the campaign is mid-tool-call or waiting on a Human-in-the-Loop
+approval, the summary MUST record the pending action id
+(hitl_<request_id>), the bound action, the arguments, and the resume
+state so the run can continue after compaction without re-asking.
+</cti_compaction_rules>
