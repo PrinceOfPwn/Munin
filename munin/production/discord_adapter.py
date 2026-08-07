@@ -1311,8 +1311,8 @@ async def _active_run_guidance(
         return True
     if active_state == "waiting_for_human":
         note = (
-            f"applied when you approve/quiet the pending request "
-            f"(use the buttons or `/approvals`)"
+            "applied when you approve/quiet the pending request "
+            "(use the buttons or `/approvals`)"
         )
     else:
         note = "applied on the next model cycle"
