@@ -31,3 +31,13 @@ def test_presence_contract_requires_operational_intro() -> None:
         assert required in section
     assert "3–5" in section
     assert "一条" in section
+
+
+def test_presence_contract_offers_operator_governed_repair_follow_up() -> None:
+    text = _skills_contract()
+    section = text.split("## Discord 启动自检与自我介绍", 1)[1].split("## 对话与运行时入口", 1)[0]
+    assert "Si así desea, se puede trabajar en solucionarlo." in section
+    assert "tool_forge" in section
+    assert "subagent" in section
+    assert "workflow" in section
+    assert "presence 本身只提出这个选项，不执行修复" in section
