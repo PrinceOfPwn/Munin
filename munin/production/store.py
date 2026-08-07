@@ -3284,6 +3284,35 @@ class MuninStore:
             "goal_id": str(run_row["goal_id"]) if "goal_id" in run_row.keys() and run_row["goal_id"] else None,
         }
 
+    def active_run_for_conversation(self, *, conversation_id: str) -> dict[str, Any] | None:
+        """Return the most recent non-terminal run bound to a conversation.
+
+        Used by the Discord adapter to decide whether a new message inside a
+        live INV thread is *guidance for the running operation* rather than a
+        brand-new run: if the thread's conversation still owns a run in
+        ``queued`` / ``running`` / ``waiting_for_human`` we must NOT mint a
+        second turn (that is the "every message restarts" bug seen in live
+        session 31194804677).  Reads HOT first (the authoritative agent_runs
+        while active), falling back to the durable backend after migration.
+        """
+        backends = (
+            (self._hot, self._durable) if self._durable is not self._hot else (self._hot,)
+        )
+        for backend in backends:
+            try:
+                with backend._read_only() as conn:  # noqa: SLF001
+                    row = conn.execute(
+                        "SELECT * FROM agent_runs WHERE conversation_id=? AND state IN "
+                        "('queued','running','waiting_for_human')"
+                        " ORDER BY created_at_ms DESC LIMIT 1",
+                        (conversation_id,),
+                    ).fetchone()
+                    if row is not None:
+                        return ProductionStore._run_dict(row)
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
     def claim_run_direct(self, *, run_id: str) -> tuple[str, str]:
         """Promote a queued run to ``running`` (chat.py's ``_claim_direct``).
 

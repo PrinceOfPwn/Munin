@@ -1,4 +1,44 @@
-﻿## 2026-08-07 - Discord surface: classify provider errors instead of leaking raw transport exceptions
+﻿## 2026-08-07 - Discord: active-run guard — mid-run guidance instead of a new run
+
+Live session 31194804677 reproduced two operator-facing failures inside the
+same INV thread:
+
+1. Each new message in a live thread started a WHOLE NEW run in a NEW
+   conversation (`conv_62ef...` for run `3cbe`, then `conv_5f64...` for run
+   `94d7`) instead of continuing the active operation.
+2. The resume claim after an HITL approval raced the chat loop:
+   `WARNING discord: resume claim failed ... run ... is not queued (already
+   running or terminal)` — the run stayed `waiting_for_human`/`running` and
+   the operator saw no progress.
+
+Diagnosis from the run's munin.log:
+- `discord_adapter._handle_message` minted a second `create_turn` even when
+  the thread's conversation still owned a live run; the second run raced the
+  resume path and orphaned the first graph.
+- `_claim_direct` (store.py) only promotes `queued` runs, so a decision taken
+  while the loop still holds the run cannot be claimed/resumed and the reply
+  is lost.
+
+Operator decision (2026-08-07): when a message arrives inside a thread with
+an active run, treat it as **guidance** for that run (durable
+`run_guidance_queue` drained by `OperatorGuidanceMiddleware`) and do NOT mint
+a new turn. The operator keeps control of the running graph without "reset".
+
+- `munin/production/store.py`:
+  - NEW `active_run_for_conversation(conversation_id)` — HOT-first read that
+    returns the most recent run in `queued`/`running`/`waiting_for_human` for
+    a conversation, or `None`.
+- `munin/production/discord_adapter.py`:
+  - NEW `_active_run_guidance(...)` — true when the conversation owns a live
+    run and the operator text was enqueued as guidance; replies with a clear
+    confirmation (distinct text when the run is `waiting_for_human`).
+  - `_handle_message` now calls the guard BEFORE `create_turn`: a live run
+    means guidance, no second run.
+- `tests/test_discord_regression.py`: NEW `_RecordingStore` +
+  `_GuidanceMessage` fakes and two tests —
+  `test_active_run_guard_enqueues_guidance_without_new_turn`,
+  `test_active_run_guard_no_run_falls_through`.
+## 2026-08-07 - Discord surface: classify provider errors instead of leaking raw transport exceptions
 
 Live session 31190961414 (run `run_e9aaee...`) failed with a raw
 `httpcore.ReadTimeout` raised from the model stream's chunk timer

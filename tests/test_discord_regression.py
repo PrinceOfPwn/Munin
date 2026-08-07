@@ -435,3 +435,88 @@ def test_classify_runner_exception_generic_keeps_contract() -> None:
     message = classify_runner_exception(exc)
 
     assert message == "Operation failed: boom"
+
+
+# ---------------------------------------------------------------------------
+# Active-run guard — mid-run guidance instead of a new run (2026-08-07)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingStore:
+    """Minimal fake store: records guidance calls, simulates active runs."""
+
+    def __init__(self, active_run: dict | None) -> None:
+        self.active_run = active_run
+        self.guidance: list[dict] = []
+
+    def active_run_for_conversation(self, *, conversation_id: str) -> dict | None:
+        return self.active_run
+
+    def enqueue_guidance(self, **kwargs: Any) -> dict:
+        self.guidance.append(dict(kwargs))
+        return {"id": "guidance-1", **kwargs}
+
+
+class _GuidanceMessage:
+    """Minimal message with the reply() surface used by the guard."""
+
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    @property
+    def author(self) -> SimpleNamespace:
+        return SimpleNamespace(id="606609507279437834", bot=False)
+
+    async def reply(self, content: str, embed: Any = None) -> None:
+        self.replies.append(content)
+
+
+def test_active_run_guard_enqueues_guidance_without_new_turn() -> None:
+    """A message inside a thread whose conversation owns a live run is fed to
+    the durable guidance outbox and does NOT create a new run (the
+    "every message starts over" live-session 31194804677 bug)."""
+    from munin.production.discord_adapter import _active_run_guidance
+
+    store = _RecordingStore(active_run={"id": "run_live", "state": "running"})
+    msg = _GuidanceMessage()
+
+    result = asyncio.run(
+        _active_run_guidance(
+            store=store,
+            conversation_id="conv_62ef1efec75f42e389d5f40910d942b7",
+            actor={"id": "usr_1"},
+            message=msg,
+            prompt="focus on the plan, not new recon",
+            channel_id="1535317112401436695",
+        )
+    )
+
+    assert result is True
+    assert len(store.guidance) == 1
+    assert store.guidance[0]["run_id"] == "run_live"
+    assert store.guidance[0]["body"] == "focus on the plan, not new recon"
+    assert any("guidance" in r.lower() for r in msg.replies)
+
+
+def test_active_run_guard_no_run_falls_through() -> None:
+    """Without a live run the guard returns False so the normal dispatch
+    (create_turn) proceeds untouched."""
+    from munin.production.discord_adapter import _active_run_guidance
+
+    store = _RecordingStore(active_run=None)
+    msg = _GuidanceMessage()
+
+    result = asyncio.run(
+        _active_run_guidance(
+            store=store,
+            conversation_id="conv_x",
+            actor={"id": "usr_1"},
+            message=msg,
+            prompt="start new operation",
+            channel_id="1535317112401436695",
+        )
+    )
+
+    assert result is False
+    assert store.guidance == []
+    assert msg.replies == []
