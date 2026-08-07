@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -38,6 +40,7 @@ async def _run(nuclei_server: Path | None) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    temp_root = Path(tempfile.mkdtemp(prefix="valravn-mesh-e2e-"))
     try:
         time.sleep(0.25)
         env = dict(os.environ)
@@ -51,6 +54,17 @@ async def _run(nuclei_server: Path | None) -> None:
             str(nuclei_server or (ROOT / "tests" / "fixtures" / "mock_stdio_mcp.py")),
         ]
         env["VALRAVN_ARSENAL_NUCLEI_MCP_COMMAND_JSON"] = json.dumps(arsenal_command)
+
+        # The real Security Hub Nuclei server is container-oriented and defaults
+        # to /app/output. For a direct stdio E2E run, inject writable paths while
+        # keeping the exact upstream server implementation unchanged.
+        if nuclei_server is not None:
+            output_dir = temp_root / "nuclei-output"
+            templates_dir = temp_root / "nuclei-templates"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            templates_dir.mkdir(parents=True, exist_ok=True)
+            env["NUCLEI_OUTPUT_DIR"] = str(output_dir)
+            env["NUCLEI_TEMPLATES_PATH"] = str(templates_dir)
 
         params = StdioServerParameters(
             command=sys.executable,
@@ -150,6 +164,7 @@ async def _run(nuclei_server: Path | None) -> None:
     finally:
         mock_http.terminate()
         mock_http.wait(timeout=5)
+        shutil.rmtree(temp_root, ignore_errors=True)
 
 
 def main() -> int:
