@@ -82,6 +82,24 @@ class BundledSkillLibrary:
                 declared = value.strip("\"'") or None
         return declared if closed else None
 
+    @staticmethod
+    def _has_closed_frontmatter(path: Path) -> bool:
+        """Valravn legacy skills may omit ``name`` but must have a closed header.
+
+        The flat filename is the canonical upstream identity. Several older
+        Valravn playbooks intentionally only carry ``description``/``globs`` in
+        their Claude frontmatter, so requiring a pre-existing ``name`` silently
+        dropped valid skills. The renderer below always inserts/normalizes the
+        Deep Agents package name.
+        """
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return False
+        if not lines or lines[0].strip() != "---":
+            return False
+        return any(line.strip() == "---" for line in lines[1:])
+
     def _native_packages(self) -> dict[str, Path]:
         if not self.root.is_dir():
             return {}
@@ -97,16 +115,23 @@ class BundledSkillLibrary:
         return packages
 
     def _valravn_packages(self) -> dict[str, Path]:
-        """Return valid flat Valravn skills under a collision-safe namespace."""
+        """Return every valid flat Valravn skill under a collision-safe namespace.
+
+        Filename stems are canonical. Frontmatter ``name`` is treated as stale
+        source metadata because the adapter rewrites it to the namespaced Deep
+        Agents identity anyway.
+        """
         if self.valravn_root is None or not self.valravn_root.is_dir():
             return {}
 
         packages: dict[str, Path] = {}
         for path in sorted(self.valravn_root.glob("*.md"), key=lambda item: item.name):
-            declared = self._frontmatter_name(path)
-            if declared is None or not _SAFE_SKILL_NAME.fullmatch(declared):
+            source_name = path.stem
+            if not _SAFE_SKILL_NAME.fullmatch(source_name):
                 continue
-            packages[f"{_VALRAVN_PREFIX}{declared}"] = path
+            if not self._has_closed_frontmatter(path):
+                continue
+            packages[f"{_VALRAVN_PREFIX}{source_name}"] = path
         return packages
 
     def validation_errors(self) -> tuple[str, ...]:
@@ -134,15 +159,15 @@ class BundledSkillLibrary:
             for path in sorted(
                 self.valravn_root.glob("*.md"), key=lambda item: item.name
             ):
-                declared = self._frontmatter_name(path)
+                source_name = path.stem
                 label = f"valravn/{path.name}"
-                if declared is None:
-                    errors.append(f"{label}: missing or malformed YAML frontmatter")
+                if not _SAFE_SKILL_NAME.fullmatch(source_name):
+                    errors.append(f"{label}: unsafe filename-derived skill name {source_name!r}")
                     continue
-                if not _SAFE_SKILL_NAME.fullmatch(declared):
-                    errors.append(f"{label}: unsafe skill name {declared!r}")
+                if not self._has_closed_frontmatter(path):
+                    errors.append(f"{label}: missing or unclosed YAML frontmatter")
                     continue
-                adapted = f"{_VALRAVN_PREFIX}{declared}"
+                adapted = f"{_VALRAVN_PREFIX}{source_name}"
                 if adapted in native_names:
                     errors.append(f"{label}: adapted name collides with {adapted}")
                 if adapted in seen:
