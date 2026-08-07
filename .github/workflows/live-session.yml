@@ -116,6 +116,8 @@ jobs:
       LLM_BASE_URL:         ${{ secrets.LLM_BASE_URL }}
       LLM_API_KEY:          ${{ secrets.LLM_API_KEY }}
       LLM_MODEL:            ${{ secrets.LLM_MODEL }}
+      # OSINT / recon
+      TAVILY_API_KEY:       ${{ secrets.TAVILY_API_KEY }}
       # MCP
       MUNIN_MCP_AUTH_TOKEN: ${{ secrets.MUNIN_MCP_AUTH_TOKEN }}
       # LDAP — the service container is reachable as hostname `ldap` on the job network
