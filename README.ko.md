@@ -47,7 +47,7 @@
 ## Verified v1.1.0 configuration
 
 > [!IMPORTANT]
-> **Munin v1.1.0**의 테스트 및 검증된 운영 구성은 **MiMo V2.5**를 모델로 사용하여 **GitHub Actions를 통해 실행되는 Discord 어댑터**입니다.
+> **Munin v1.1.0**의 테스트 및 검증된 운영 구성은 **DeepSeek V4-Flash**를 모델로 사용하여 **GitHub Actions를 통해 실행되는 Discord 어댑터**입니다.
 >
 > **Discord가 현재 안정적인 운영자 표면입니다.** 웹 GUI는 장기 목표 인터페이스이지만
 > 라이브 세션 테스트에서 발견된 프론트엔드 버그가 아직 수리 중입니다. 수리 루프가
@@ -60,14 +60,14 @@
 | 버전 | **Munin v1.1.0** |
 | 인터페이스 | **Discord 어댑터** (웹 GUI 수리 중) |
 | 실행 환경 | **GitHub Actions** |
-| 모델 | **MiMo V2.5** |
+| 모델 | **DeepSeek V4-Flash** |
 
 ```mermaid
 flowchart LR
     Operator[Operator] --> Discord[Munin Discord surface]
     Discord --> Actions[GitHub Actions runner]
     Actions --> Runtime[Munin v1.1.0]
-    Runtime --> Model[MiMo V2.5]
+    Runtime --> Model[DeepSeek V4-Flash]
     Runtime --> Evidence[Durable events, reports and evidence]
 ```
 
@@ -419,9 +419,9 @@ cd app && npm run build
 
 아닙니다. 스킬은 컨텍스트와 지침을 제공합니다. 도구 접근, 범위 및 승인은 별도의 런타임 통제 항목입니다.
 
-### Can I use a model other than MiMo V2.5?
+### Can I use a model other than DeepSeek V4-Flash?
 
-가능합니다. 다만, 검증된 v1.1.0 구성은 MiMo V2.5를 탑재한 GitHub Actions 상의 Discord 어댑터입니다.
+가능합니다. 다만, 검증된 v1.1.0 구성은 DeepSeek V4-Flash를 탑재한 GitHub Actions 상의 Discord 어댑터입니다.
 
 ### Does Munin replace analyst judgement?
 

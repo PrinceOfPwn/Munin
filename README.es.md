@@ -31,7 +31,7 @@
 ## Configuración verificada de v1.1.0
 
 > [!IMPORTANT]
-> La configuración probada y verificada para **Munin v1.1.0** es el **adaptador de Discord ejecutado mediante GitHub Actions usando MiMo V2.5** como modelo.
+> La configuración probada y verificada para **Munin v1.1.0** es el **adaptador de Discord ejecutado mediante GitHub Actions usando DeepSeek V4-Flash** como modelo.
 >
 > **Discord es la superficie de operador estable hoy.** La GUI web es la interfaz
 > objetivo a largo plazo, pero las sesiones en vivo detectaron bugs de frontend
@@ -45,14 +45,14 @@
 | Versión | **Munin v1.1.0** |
 | Interfaz | **Adaptador Discord** (GUI web en reparación) |
 | Entorno de ejecución | **GitHub Actions** |
-| Modelo | **MiMo V2.5** |
+| Modelo | **DeepSeek V4-Flash** |
 
 ```mermaid
 flowchart LR
     Operador --> Discord[Superficie Discord de Munin]
     Discord --> Actions[Runner de GitHub Actions]
     Actions --> Runtime[Munin v1.1.0]
-    Runtime --> Modelo[MiMo V2.5]
+    Runtime --> Modelo[DeepSeek V4-Flash]
     Runtime --> Evidencia[Eventos, reportes y evidencia durable]
 ```
 
@@ -285,7 +285,7 @@ No. Una skill aporta contexto e instrucciones. Tool access, alcance y aprobació
 
 ### ¿Puedo usar otro modelo?
 
-Posiblemente, pero la configuración verificada de v1.1.0 es adaptador Discord + GitHub Actions + MiMo V2.5.
+Posiblemente, pero la configuración verificada de v1.1.0 es adaptador Discord + GitHub Actions + DeepSeek V4-Flash.
 
 ## Licencia
 

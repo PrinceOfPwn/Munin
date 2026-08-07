@@ -4,7 +4,7 @@ This guide covers authorized operation of Munin v1.1.0.
 
 ## Verified configuration
 
-The tested configuration is **Discord adapter + GitHub Actions + MiMo V2.5**.
+The tested configuration is **Discord adapter + GitHub Actions + DeepSeek V4-Flash Free (via OpenCode Zen)**.
 The Discord community adapter is the stable v1.1.0 operator surface; the Web
 GUI is the target long-term interface but frontend bugs discovered in
 live-session testing have not yet passed the full repair loop. Other models and
