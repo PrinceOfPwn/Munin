@@ -116,6 +116,8 @@ jobs:
       LLM_BASE_URL:         ${{ secrets.LLM_BASE_URL }}
       LLM_API_KEY:          ${{ secrets.LLM_API_KEY }}
       LLM_MODEL:            ${{ secrets.LLM_MODEL }}
+      # OSINT / recon
+      TAVILY_API_KEY:       ${{ secrets.TAVILY_API_KEY }}
       # MCP
       MUNIN_MCP_AUTH_TOKEN: ${{ secrets.MUNIN_MCP_AUTH_TOKEN }}
       # LDAP — the service container is reachable as hostname `ldap` on the job network
@@ -825,6 +827,10 @@ jobs:
             data/shared_state.sqlite
             data/shared_state.sqlite-wal
             data/shared_state.sqlite-shm
+            data/langgraph_checkpoints.sqlite
+            data/langgraph_checkpoints.sqlite-wal
+            data/langgraph_checkpoints.sqlite-shm
+            data/events.jsonl
             data/soul_pending/
             data/wake_artifacts/
             munin/generated/

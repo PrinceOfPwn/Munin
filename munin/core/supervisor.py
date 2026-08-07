@@ -240,6 +240,10 @@ def build_supervisor(
         from .autonomy.compaction import compose_cti_summary_prompt  # noqa: PLC0415
 
         cti_summary_prompt = compose_cti_summary_prompt()
+        # Compaction contract (kept in locals so the installed marker below
+        # reports exactly what deepagents is configured with).
+        _compact_trigger = [("tokens", 100_000)]
+        _compact_keep = ("messages", 40)
         composed_middleware.append(
             SummarizationMiddleware(
                 model=model,
@@ -254,8 +258,8 @@ def build_supervisor(
                 # 100K tokens (was 170K) — compact earlier rather than later
                 # so a DeepSeek-tier window never rides the edge before the
                 # CTI checkpoint fires.
-                trigger=[("tokens", 100_000)],
-                keep=("messages", 40),
+                trigger=_compact_trigger,
+                keep=_compact_keep,
                 # CTI compaction: insert the operator's red-team checkpoint
                 # rules into DEEPAGENTS_DEFAULT_SUMMARY_PROMPT (splice before
                 # <messages>, never replace). None falls back to the framework
@@ -263,8 +267,22 @@ def build_supervisor(
                 summary_prompt=cti_summary_prompt,
             )
         )
+        # Observability: surface an explicit marker when the CTI compaction
+        # pipeline is active so live-session logs show compaction wiring
+        # without needing debug logs or artifact forensics.
+        logger.info(
+            "supervisor: CTI SummarizationMiddleware installed (trigger=%s keep=%s)",
+            _compact_trigger,
+            _compact_keep,
+        )
     except Exception:  # noqa: BLE001
-        logger.debug("supervisor: SummarizationMiddleware not installed; using framework default", exc_info=True)
+        # A silent failure here previously hid that compaction never ran
+        # (the loop diagnosis assumed the middleware was live). Log at
+        # WARNING so runner logs are unambiguous.
+        logger.warning(
+            "supervisor: CTI SummarizationMiddleware NOT installed; using framework default",
+            exc_info=True,
+        )
 
     return create_deep_agent(
         name="munin",
