@@ -1,3 +1,59 @@
+## 2026-08-07 - CTI-aware compaction prompt for Deep Agents SummarizationMiddleware
+
+The Deep Agents default summary prompt (`DEEPAGENTS_DEFAULT_SUMMARY_PROMPT`)
+is a load-bearing contract: it splices media-reference information just
+before the `{messages}` placeholder that the runtime fills with the
+conversation to summarize. Replacing it wholesale would lose the
+deepagents/langchain internal contract (media handling, message insertion,
+argument truncation hooks).
+
+Operator directive: the compactor must keep the same red-team operational
+consistency across compaction that `soul/*.md` establishes for identity and
+doctrine — preserve IOCs and relationships, evidence separate from
+inference, timestamps/confidence/provenance, completed and failed actions,
+files/reports/artifacts, pending investigation branches and the precise
+next executable actions. Never omit an inactive IOC, never convert an
+unverified association into attribution, never summarize away negative
+results that affect the next decision. The rules must be easily editable
+per-operation without touching Python.
+
+- `munin/core/autonomy/cti_compaction_rules.txt` (NEW): plain-text
+  `<cti_compaction_rules>...</cti_compaction_rules>` block that an
+  operator can edit per-campaign to tune the compaction contract. No
+  Python logic — pure prompt text, re-read from disk on every supervisor
+  build (a new conversation picks up the new rules; mid-run compaction
+  uses whatever was loaded at build time). References the `命令即授权`
+  command-as-authorization contract and the Sun-Tzu campaign loop from
+  `soul/*.md`.
+- `munin/core/autonomy/compaction.py` (NEW): `compose_cti_summary_prompt()`
+  imports `DEEPAGENTS_DEFAULT_SUMMARY_PROMPT`, loads the rules file, and
+  INSERTS the `<cti_compaction_rules>` block right before the
+  `\n<messages>\n` sentinel using a single `.replace(..., 1)` — never
+  replaces the default body. The `{messages}` placeholder is preserved
+  verbatim in every branch. Graceful degradation: returns `None` when
+  `deepagents` cannot be imported (older wheel / missing middleware) or the
+  rules file is missing/empty, so the supervisor keeps the framework
+  default rather than breaking. If the `<messages>` sentinel moved
+  (deepagents template changed), falls back to appending the rules at the
+  end with a WARNING — never silently drops the rules.
+- `munin/core/supervisor.py`: pass `summary_prompt=cti_summary_prompt` to
+  the existing `SummarizationMiddleware(...)` (same `trigger`, `keep`,
+  `model`, `backend` as before — unchanged). Locally imported inside the
+  existing `try/except` so a missing `compaction` module never breaks the
+  supervisor build.
+- `tests/test_compaction.py` (NEW): offline regression tests that stub
+  `DEEPAGENTS_DEFAULT_SUMMARY_PROMPT` so they run on dev hosts without
+  deepagents installed. Cover: rules-insert-before-`<messages>` with
+  `{messages}` preserved and ordering media-ref < rules < messages;
+  append-fallback when sentinel missing; `None` return when deepagents
+  unavailable; rules-file presence/well-formedness and key invariant
+  phrases (`命令即授权`, `IOC`, `provenance`, `next executable actions`);
+  rules file must not contain Python/shell tokens (soft integrity guard);
+  composer is stable across repeated calls.
+
+Verified: `python -m py_compile` clean on all touched files; CI on this PR
+is the authoritative integration environment (backend pytest + Turso online).
+
 ## 2026-08-07 - Fix DeepSeek thinking-mode overrides for langchain-openai 1.x
 
 PR #63 introduced a `DeepSeekThinkingChatOpenAI` subclass, but the overrides used
