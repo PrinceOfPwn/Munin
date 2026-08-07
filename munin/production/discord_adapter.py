@@ -1263,6 +1263,67 @@ async def _handle_command(
         return
 
 
+async def _active_run_guidance(
+    *,
+    store: Any,
+    conversation_id: str,
+    actor: Any,
+    message: Any,
+    prompt: str,
+    channel_id: str,
+) -> bool:
+    """Feed a message as guidance to a live run, or return False.
+
+    Returns ``True`` when the conversation still owns a run in
+    ``queued`` / ``running`` / ``waiting_for_human`` and the text was
+    enqueued to the durable guidance outbox — the calling turn then
+    returns WITHOUT creating a new run.  Returns ``False`` when there is
+    no active run (normal dispatch path) or on any store failure (we fall
+    through to the regular turn creation rather than eating the prompt).
+    """
+    try:
+        active_run = store.active_run_for_conversation(conversation_id=conversation_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: active-run probe failed conv=%s: %s", conversation_id, exc)
+        return False
+    if active_run is None:
+        return False
+    active_run_id = str(active_run.get("id") or "")
+    active_state = str(active_run.get("state") or "")
+    log.info(
+        "discord: active run %s state=%s — treating message as guidance len=%d",
+        active_run_id, active_state, len(prompt),
+    )
+    try:
+        store.enqueue_guidance(
+            run_id=active_run_id,
+            actor_id=actor["id"],
+            actor_username=str(message.author),
+            body=prompt[:4000],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: guidance enqueue failed run=%s: %s", active_run_id, exc)
+        with contextlib.suppress(Exception):
+            await message.reply(
+                f"⚠️ There is an active operation `{active_run_id[:16]}` in this thread "
+                f"(state: `{active_state}`) but your hint could not be recorded: {exc}"
+            )
+        return True
+    if active_state == "waiting_for_human":
+        note = (
+            "applied when you approve/quiet the pending request "
+            "(use the buttons or `/approvals`)"
+        )
+    else:
+        note = "applied on the next model cycle"
+    with contextlib.suppress(Exception):
+        await message.reply(
+            f"📌 Recorded as guidance for active run `{active_run_id[:16]}` "
+            f"(state: `{active_state}`) — will be {note}."
+        )
+    return True
+
+
 async def _handle_message(
     message: Any,
     *,
@@ -1466,6 +1527,27 @@ async def _handle_message(
                 title=f"discord:{message.author}",
                 is_dm=False,
             )
+
+    # --- Active-run guard: mid-run guidance instead of a new run ----------
+    #
+    # If the thread's conversation still owns a live run (queued / running /
+    # waiting_for_human), a new operator message in the SAME thread is
+    # GUIDANCE for that run, not a fresh operation.  Minting a second turn
+    # here was the "every message starts over" bug from live session
+    # 31194804677 — the new run raced the resume claim and orphaned the
+    # existing graph.  We instead persist the text to the durable
+    # run_guidance_queue; ``OperatorGuidanceMiddleware`` drains it before
+    # the model's next call, so the hint reaches the running graph without
+    # breaking the run lifecycle.
+    if await _active_run_guidance(
+        store=store,
+        conversation_id=conversation_id,
+        actor=actor,
+        message=message,
+        prompt=prompt,
+        channel_id=channel_id,
+    ):
+        return
 
     try:
         turn = store.create_turn(
