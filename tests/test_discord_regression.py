@@ -403,3 +403,35 @@ def test_publisher_publish_false_when_detached() -> None:
     p = DiscordPublisher()
     result = asyncio.run(p.publish(run_id="run_z", content="hello"))
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# classify_runner_exception — provider error surface (2026-08-07)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_runner_exception_provider_timeout_readable() -> None:
+    """A real live-session failure surfaced as a raw ``httpcore.ReadTimeout``
+    ("Operation failed: httpcore.ReadTimeout(...)").  The Discord surface
+    must instead name the provider timeout so the operator knows the run did
+    not complete and can retry it, rather than decoding a transport type."""
+    from munin.production.discord_adapter import classify_runner_exception
+
+    exc = TimeoutError("timed out")
+    exc.__cause__ = RuntimeError("httpcore.ReadTimeout('timed out')")
+    message = classify_runner_exception(exc)
+
+    assert message.startswith("⚠️ **Operation failed — provider timeout")
+    assert "did NOT complete" in message
+    assert "provider" in message.lower()
+
+
+def test_classify_runner_exception_generic_keeps_contract() -> None:
+    """Non-provider failures keep the historical ``Operation failed: {exc}``
+    contract that operators and automation already rely on."""
+    from munin.production.discord_adapter import classify_runner_exception
+
+    exc = ValueError("boom")
+    message = classify_runner_exception(exc)
+
+    assert message == "Operation failed: boom"

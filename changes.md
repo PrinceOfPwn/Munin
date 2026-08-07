@@ -1,4 +1,38 @@
-﻿## 2026-08-07 - Fix Discord invocation contract: "if it says munin, respond"
+﻿## 2026-08-07 - Discord surface: classify provider errors instead of leaking raw transport exceptions
+
+Live session 31190961414 (run `run_e9aaee...`) failed with a raw
+`httpcore.ReadTimeout` raised from the model stream's chunk timer
+(`asyncio.wait_for(it.__anext__(), ...)` -> `openai/_streaming.py` ->
+`httpx.ReadTimeout`). The Discord surface rendered it as a bare
+`Operation failed: httpcore.ReadTimeout('timed out')` — accurate but useless
+to an operator: it does not say the run did NOT complete, whether it is a
+provider problem, or what to do next.
+
+Operator directive (2026-08-07): the failure message must name the provider
+failure clearly (timeout vs connection) while preserving the historical
+`Operation failed: {exc}` contract for non-provider failures. Applies ONLY to
+the Discord surface — `munin/production/chat.py` is intentionally untouched.
+
+- `munin/production/discord_adapter.py`:
+  - NEW `classify_runner_exception(exc)` — provider-originated failures return a
+    readable embed prefix ("**Operation failed — provider timeout** ...") with
+    an explicit "did NOT complete / will not auto-resume without an operator
+    retry" statement; all other failures keep the previous
+    `Operation failed: {exc}` string so automation relying on that shape keeps
+    working.
+  - NEW `_classify_provider_error(exc)` + `_PROVIDER_TIMEOUT_NAMES` /
+    `_PROVIDER_CONNECTION_NAMES` — walks the `__cause__` chain and classifies by
+    exception class name without hard-importing `httpx`/`httpcore`/`openai`
+    into the adapter, so the runtime never couples the Discord surface to a
+    provider dependency version.
+  - The `except Exception` handler in the run-stream loop now calls
+    `classify_runner_exception(exc)` instead of formatting `exc` directly.
+- `tests/test_discord_regression.py`: NEW
+  `test_classify_runner_exception_provider_timeout_readable` (a TimeoutError
+  surfaces the readable provider message) and
+  `test_classify_runner_exception_generic_keeps_contract` (ValueError keeps the
+  exact `Operation failed: boom` contract).
+## 2026-08-07 - Fix Discord invocation contract: "if it says munin, respond"
 
 Live sessions 31147196158 and 31148018808 (head df2f952) showed the bot
 silently `extract-drop`-ing the operator's messages with NO `discord:

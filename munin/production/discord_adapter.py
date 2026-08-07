@@ -2114,7 +2114,7 @@ async def _stream_run(
         log.exception("discord: supervisor_runner failed run_id=%s", run_id)
         outcome = "failed"
         ok = False
-        final_content = f"Operation failed: {exc}"
+        final_content = classify_runner_exception(exc)
     finally:
         # Close the generator explicitly so supervisor_runner's finally
         # resets its ContextVars on THIS task, not on a deferred GC finaliser.
@@ -2150,6 +2150,77 @@ async def _stream_run(
             ok=ok,
             paused=paused_for_human,
         )
+
+
+# Provider error classification ----------------------------------------------
+# The Discord surface should tell the operator *what kind* of failure ended
+# the run, not leak a raw transport exception.  We heuristically classify the
+# exception tree from the LLM provider stack (httpx / httpcore / openai /
+# langchain_openai) without hard-importing those libs here: the runtime owns
+# the authoritative traceback in logs; the chat message only needs to say
+# "provider timeout" vs "provider connection" vs "generic failure" clearly.
+
+_PROVIDER_TIMEOUT_NAMES = {
+    "ReadTimeout",
+    "ReadTimeoutException",
+    "WriteTimeout",
+    "WriteTimeoutException",
+    "PoolTimeout",
+    "ConnectTimeout",
+    "ConnectTimeoutException",
+    "APITimeoutError",
+    "TimeoutError",
+    "Timeout",
+}
+_PROVIDER_CONNECTION_NAMES = {
+    "ConnectError",
+    "ConnectException",
+    "ConnectionError",
+    "APIConnectionError",
+    "NetworkError",
+    "RemoteProtocolError",
+}
+
+
+def _classify_provider_error(exc: BaseException) -> str | None:
+    """Return a concise, operator-facing classification for provider errors."""
+    # Walk the cause chain: a ReadTimeout is often wrapped inside a
+    # LangChain callback or an asyncio/py3.11 TimeoutError.
+    chain: BaseException | None = exc
+    while chain is not None:
+        chain_name = type(chain).__name__
+        if chain_name in _PROVIDER_TIMEOUT_NAMES:
+            return ("provider timeout — the model stream stalled / exceeded "
+                    "the provider's response window. The operation did NOT "
+                    "complete. Instructions were not executed past the point "
+                    "they were streamed; retry the request once the provider "
+                    "is responsive.")
+        if chain_name in _PROVIDER_CONNECTION_NAMES:
+            return ("provider connection error — the model API could not be "
+                    "reached (network / DNS / auth transport). The operation "
+                    "did NOT complete.")
+        chain = chain.__cause__
+    return None
+
+
+def classify_runner_exception(exc: BaseException) -> str:
+    """Map a supervisor/runner exception to a clear Discord message.
+
+    Provider-originated failures (timeout, connection, transport) get an
+    explicit classification; anything else falls back to the historical
+    ``Operation failed: {exc}`` contract so automation and operators that
+    rely on that string keep working.
+    """
+    classified = _classify_provider_error(exc)
+    if classified:
+        return (
+            "⚠️ **Operation failed — {0}**\n"
+            "The remote model provider reported a failure while this run was "
+            "in flight. Previous durable state is preserved; the run is marked "
+            "`failed` and will NOT auto-resume without an operator retry.\n"
+            "```\n{1}\n```"
+        ).format(classified, exc)
+    return f"Operation failed: {exc}"
 
 
 def create_discord_task(
