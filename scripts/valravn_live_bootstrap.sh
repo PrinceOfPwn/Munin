@@ -39,7 +39,7 @@ if [[ "${GITHUB_WORKFLOW:-}" == "Munin Live Session" ]]; then
     echo "Installing Java/Xvfb runtime required by Burp MCP Ultimate..."
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      default-jdk xvfb xauth
+      default-jdk xvfb xauth expect
   fi
 fi
 

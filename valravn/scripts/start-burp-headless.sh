@@ -152,13 +152,13 @@ else
 fi
 
 echo "Starting Burp with burp-mcp-ultimate preloaded..."
-# Bash bug: `script` is util-linux pty wrapper. Launching java under a pty
-# makes the JVM treat stdout/stderr as a TTY and flush line-by-line. A plain
-# `nohup java >burp.log 2>&1` redirects to a non-tty fd, java buffers 8KB of
-# stdout internally, and the log stays empty while Burp hangs — so we would
-# have no way to diagnose why the MCP port never opened.
-if command -v script >/dev/null 2>&1; then
-  nohup script -q -c "${LAUNCH[*]}" "$BURP_LOG" </dev/null >/dev/null 2>&1 &
+# Java buffers ~8 KB of stdout internally when the fd is not a TTY, so a
+# plain `nohup java >burp.log 2>&1` can leave the log empty while Burp hangs
+# or crashes mid-startup. `unbuffer` (expect) gives java a real pty so the
+# JVM line-buffers and CI can finally see the actual error. Fall back to the
+# plain redirect when unbuffer is unavailable.
+if command -v unbuffer >/dev/null 2>&1; then
+  nohup unbuffer "${LAUNCH[@]}" >"$BURP_LOG" 2>&1 &
 else
   nohup "${LAUNCH[@]}" >"$BURP_LOG" 2>&1 &
 fi
@@ -271,8 +271,15 @@ if os.path.exists(log):
         log_tail = "".join(lines[-120:])
     except OSError:
         log_tail = ""
+proc_state = "unknown"
+try:
+    proc_state = "alive" if alive() else "dead"
+except OSError:
+    proc_state = "exited"
 raise SystemExit(
-    f"Timed out waiting for Burp MCP Ultimate: {last_error}; inspect {log}\n"
-    f"--- {log} tail ---\n{log_tail}"
+    f"Timed out waiting for Burp MCP Ultimate: {last_error} (process {proc_state}); "
+    f"inspect {log}\n"
+    f"--- {log} tail ({os.path.getsize(log) if os.path.exists(log) else 0} bytes) ---\n"
+    f"{log_tail}"
 )
 PY
