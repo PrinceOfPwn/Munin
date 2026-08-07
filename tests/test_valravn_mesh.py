@@ -86,6 +86,41 @@ def test_talons_prefers_ultimate_and_uses_compact_listing(monkeypatch):
     assert called["result"] == {"ok": True}
 
 
+def test_talons_falls_back_to_awesome_when_ultimate_is_unavailable(monkeypatch):
+    monkeypatch.setenv("VALRAVN_TALON_ULTIMATE_URL", "http://ultimate.test/mcp")
+    monkeypatch.setenv("VALRAVN_TALON_AWESOME_URL", "http://awesome.test/mcp")
+    talons._TOOL_CACHE.clear()
+
+    def fake_call(provider, method, params=None):
+        if provider.name == "valravn-ultimate":
+            raise RuntimeError("ultimate offline")
+        if provider.name == "valravn-awesome":
+            if method == "tools/list":
+                return {
+                    "tools": [
+                        {
+                            "name": "list_proxy_http_history",
+                            "description": "Awesome stable-ID history",
+                            "inputSchema": {"type": "object", "properties": {}},
+                        }
+                    ]
+                }
+            if method == "tools/call":
+                return {"content": [{"type": "text", "text": '{"fallback":true}'}], "isError": False}
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(talons, "_call_provider", fake_call)
+
+    status = talons.status(refresh=True)
+    assert status["preferred"] == "valravn-awesome"
+    ultimate = next(item for item in status["providers"] if item["name"] == "valravn-ultimate")
+    assert ultimate["reachable"] is False
+
+    called = talons.call_tool("list_proxy_http_history")
+    assert called["provider"] == "valravn-awesome"
+    assert called["result"] == {"fallback": True}
+
+
 def test_arsenal_command_override_supports_real_or_fixture_server(monkeypatch):
     command = [sys.executable, str(ROOT / "tests" / "fixtures" / "mock_stdio_mcp.py")]
     monkeypatch.setenv("VALRAVN_ARSENAL_NUCLEI_MCP_COMMAND_JSON", json.dumps(command))
