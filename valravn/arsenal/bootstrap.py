@@ -57,6 +57,7 @@ def bootstrap_burp(build: bool) -> None:
     clone_pinned(AWESOME_REPO, awesome, AWESOME_COMMIT)
     if build:
         run("./gradlew", "test", "shadowJar", cwd=ultimate)
+        run("./gradlew", "test", "shadowJar", cwd=awesome)
 
 
 def bootstrap_arsenal(profile: str) -> None:
@@ -74,7 +75,7 @@ def bootstrap_arsenal(profile: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bootstrap Valravn Talons + Arsenal")
     parser.add_argument("--burp", action="store_true", help="clone pinned Ultimate and Awesome Burp MCP providers")
-    parser.add_argument("--build-burp", action="store_true", help="also run Ultimate tests and build its shadow JAR")
+    parser.add_argument("--build-burp", action="store_true", help="also run tests and build shadow JARs for both Burp providers")
     parser.add_argument(
         "--arsenal",
         choices=("none", "bounty", "all"),
