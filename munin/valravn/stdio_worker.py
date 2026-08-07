@@ -16,6 +16,23 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+_PASSTHROUGH_ENV = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "SystemRoot",
+    "PATHEXT",
+    "JAVA_HOME",
+    "VIRTUAL_ENV",
+    "PYTHONPATH",
+)
+
 
 def _dump(value: Any) -> Any:
     if hasattr(value, "model_dump"):
@@ -37,7 +54,10 @@ async def _run(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(params, dict):
         raise ValueError("params must be an object")
 
-    child_env = dict(os.environ)
+    # Third-party MCPs receive only process/bootstrap essentials by default.
+    # Provider credentials must be forwarded explicitly by the selected
+    # Valravn gateway through request["env"].
+    child_env = {key: os.environ[key] for key in _PASSTHROUGH_ENV if key in os.environ}
     extra_env = request.get("env") or {}
     if isinstance(extra_env, dict):
         child_env.update({str(key): str(value) for key, value in extra_env.items()})
