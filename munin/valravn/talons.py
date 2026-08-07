@@ -54,6 +54,16 @@ def _official_command() -> tuple[str, ...]:
     return tuple(shlex.split(raw)) if raw else ()
 
 
+def _official_env() -> dict[str, str]:
+    raw = os.environ.get("VALRAVN_TALON_OFFICIAL_ENV_JSON", "").strip()
+    if not raw:
+        return {}
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("VALRAVN_TALON_OFFICIAL_ENV_JSON must be a JSON object")
+    return {str(key): str(item) for key, item in value.items()}
+
+
 def providers() -> tuple[TalonProvider, ...]:
     """Return provider order. Valravn aliases never hide upstream identity."""
     return (
@@ -94,7 +104,7 @@ def _call_provider(provider: TalonProvider, method: str, params: dict[str, Any] 
             raise McpTransportError(
                 "official Burp MCP requires VALRAVN_TALON_OFFICIAL_STDIO(_JSON) pointing at its packaged stdio proxy"
             )
-        return stdio_call(list(provider.command), method, params).result
+        return stdio_call(list(provider.command), method, params, env=_official_env()).result
     raise McpTransportError(f"unsupported talon transport: {provider.transport}")
 
 
@@ -108,7 +118,9 @@ def _provider_tools(provider: TalonProvider, *, refresh: bool = False) -> tuple[
         _TOOL_CACHE[provider.name] = (now, tools, "")
         return tools, ""
     except Exception as exc:
-        message = f"{type(exc).__name__}: {exc}"
+        # Public discovery results expose only the failure class, never remote
+        # URLs, command arguments, credentials, or raw upstream diagnostics.
+        message = type(exc).__name__
         _TOOL_CACHE[provider.name] = (now, [], message)
         return [], message
 
@@ -118,7 +130,7 @@ def status(*, refresh: bool = False) -> dict[str, Any]:
     for provider in providers():
         tools, error = _provider_tools(provider, refresh=refresh)
         row = provider.describe()
-        row.update({"reachable": bool(tools), "tool_count": len(tools), "error": error or None})
+        row.update({"reachable": not error, "tool_count": len(tools), "error": error or None})
         rows.append(row)
     preferred = next((row["name"] for row in rows if row["reachable"]), None)
     return {
@@ -175,7 +187,9 @@ def _resolve(tool_name: str, provider_name: str = "auto") -> tuple[TalonProvider
     if provider_name not in {"", "auto"} and not candidates:
         raise ValueError(f"unknown Valravn talon provider: {provider_name}")
     for provider in candidates:
-        tools, _ = _provider_tools(provider)
+        tools, error = _provider_tools(provider)
+        if error:
+            continue
         for tool in tools:
             if tool.get("name") == tool_name:
                 return provider, tool
@@ -195,7 +209,7 @@ def call_tool(tool_name: str, arguments: dict[str, Any] | None = None, *, provid
         "upstream": selected.upstream,
         "tool": tool_name,
         "result": decode_tool_content(result),
-        "raw_is_error": bool(result.get("isError")),
+        "raw_is_error": bool(result.get("isError") or result.get("is_error")),
     }
 
 
@@ -203,10 +217,9 @@ def read_resource(uri: str, *, provider: str = "auto") -> dict[str, Any]:
     candidates = [item for item in providers() if provider in {"", "auto", item.name}]
     errors: list[str] = []
     for item in candidates:
-        tools, error = _provider_tools(item)
-        if not tools:
-            if error:
-                errors.append(f"{item.name}: {error}")
+        _tools, error = _provider_tools(item)
+        if error:
+            errors.append(f"{item.name}: {error}")
             continue
         try:
             result = _call_provider(item, "resources/read", {"uri": uri})
@@ -218,5 +231,5 @@ def read_resource(uri: str, *, provider: str = "auto") -> dict[str, Any]:
                 "result": result,
             }
         except Exception as exc:
-            errors.append(f"{item.name}: {type(exc).__name__}: {exc}")
+            errors.append(f"{item.name}: {type(exc).__name__}")
     raise McpTransportError("resource could not be read: " + "; ".join(errors))
