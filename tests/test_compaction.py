@@ -26,7 +26,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _install_deepagents_stub(monkeypatch: pytest.MonkeyPatch, prompt: str) -> types.ModuleType:
+def _install_deepagents_stub(monkeypatch: pytest.MonkeyPatch, prompt: str) -> None:
     pkg = types.ModuleType("deepagents")
     mw = types.ModuleType("deepagents.middleware")
     summ = types.ModuleType("deepagents.middleware.summarization")
@@ -36,7 +36,6 @@ def _install_deepagents_stub(monkeypatch: pytest.MonkeyPatch, prompt: str) -> ty
     monkeypatch.setitem(sys.modules, "deepagents", pkg)
     monkeypatch.setitem(sys.modules, "deepagents.middleware", mw)
     monkeypatch.setitem(sys.modules, "deepagents.middleware.summarization", summ)
-    return summ
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +51,7 @@ def test_compose_inserts_rules_before_messages_when_sentinel_present(monkeypatch
         "<media_reference_information>\nmedia refs here\n</media_reference_information>\n"
         "<messages>\n{messages}\n</messages>\n"
     )
-    summ = _install_deepagents_stub(monkeypatch, prompt=default_prompt)
+    _install_deepagents_stub(monkeypatch, prompt=default_prompt)
 
     # Force a re-import of the composer so it picks up the stubbed module.
     for mod in list(sys.modules):

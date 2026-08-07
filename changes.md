@@ -37,8 +37,12 @@ per-operation without touching Python.
   (deepagents template changed), falls back to appending the rules at the
   end with a WARNING — never silently drops the rules.
 - `munin/core/supervisor.py`: pass `summary_prompt=cti_summary_prompt` to
-  the existing `SummarizationMiddleware(...)` (same `trigger`, `keep`,
-  `model`, `backend` as before — unchanged). Locally imported inside the
+  the existing `SummarizationMiddleware(...)` with retuned trigger/keep:
+  `trigger=[("tokens", 100_000)]` (was `[("tokens", 170_000), ("messages", 80)]`
+  — compact by token pressure only, conservative 100K threshold so the
+  window never rides the edge before the CTI checkpoint fires) and
+  `keep=("messages", 40)` (was `("messages", 12)` — retain more live campaign
+  history across compaction). `model`/`backend` unchanged. Imported inside the
   existing `try/except` so a missing `compaction` module never breaks the
   supervisor build.
 - `tests/test_compaction.py` (NEW): offline regression tests that stub
