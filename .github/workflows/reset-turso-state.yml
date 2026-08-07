@@ -22,7 +22,7 @@ jobs:
     env:
       MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
-    steps:
+steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -31,3 +31,44 @@ jobs:
         run: pip install .
       - name: Wipe remote operational state
         run: python scripts/reset_turso_state.py --confirm WIPE_MUNIN_TURSO
+      - name: Clean CI/CD test fixtures (scoped janitor)
+        # Belt-and-suspenders: after the total wipe, still run the scoped
+        # Production Suite janitor so every e2e_*/llm_smoke_* fixture that
+        # CI/CD created (even without a completed cleanup step) is removed by
+        # exact id, not just by table wipe. Safe on any DB: it no-ops with a
+        # message when Turso is not configured.
+        run: python scripts/production_fixture_janitor.py --janitor
+      - name: Verify Turso is clean and operational
+        # Post-wipe acceptance: every table must report zero rows while the
+        # schema_migrations bookkeeping table still exists. Fails the reset if
+        # a residual row survived (cyclic FK edge or a new table appearing
+        # between wipe and verification), so the operator never trusts a
+        # silently half-wiped database.
+        env:
+          MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
+          MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
+        run: |
+          python - <<'PY'
+          from munin.mcp.config import get_settings
+          from munin.mcp.shared_state import SharedStateStore
+
+          settings = get_settings()
+          if not settings.db_url.startswith(("libsql://", "libsqls://")):
+              raise SystemExit("verify skipped: Turso not configured")
+          state = SharedStateStore(settings)
+          preserved = {"schema_migrations"}
+          with state._connect(authoritative=True) as conn:
+              tables = [r[0] for r in conn.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+              ).fetchall()]
+              dirty = {}
+              for table in tables:
+                  if table in preserved:
+                      continue
+                  count = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                  if count:
+                      dirty[table] = count
+          if dirty:
+              raise RuntimeError(f"reset verification failed — residual rows in {dirty}")
+          print(f"Turso clean and operational: {len(tables)} tables, 0 residual rows")
+          PY
