@@ -50,6 +50,25 @@ def clone_pinned(url: str, dest: Path, commit: str) -> None:
     run("git", "checkout", "--detach", commit, cwd=dest)
 
 
+def _compose_command() -> tuple[str, ...]:
+    """Resolve Docker Compose v2 or legacy docker-compose before cloning."""
+    if shutil.which("docker"):
+        probe = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return ("docker", "compose")
+    legacy = shutil.which("docker-compose")
+    if legacy:
+        return (legacy,)
+    raise SystemExit(
+        "Docker Compose is required to build Valravn Arsenal images; install the Docker Compose v2 plugin or docker-compose."
+    )
+
+
 def bootstrap_burp(build: bool) -> None:
     ultimate = UPSTREAMS / "burp-mcp-ultimate"
     clone_pinned(ULTIMATE_REPO, ultimate, ULTIMATE_COMMIT)
@@ -62,14 +81,13 @@ def bootstrap_burp(build: bool) -> None:
 
 def bootstrap_arsenal(profile: str) -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    compose = _compose_command() if profile != "none" else ()
     security_hub = UPSTREAMS / "mcp-security-hub"
     clone_pinned(SECURITY_HUB_REPO, security_hub, str(manifest["upstream_commit"]))
     if profile == "none":
         return
-    if not shutil.which("docker"):
-        raise SystemExit("docker is required to build Valravn Arsenal images")
     services = [item["service"] for item in manifest["servers"]] if profile == "all" else list(BOUNTY_SERVICES)
-    run("docker", "compose", "build", *services, cwd=security_hub)
+    run(*compose, "build", *services, cwd=security_hub)
 
 
 def main() -> int:
