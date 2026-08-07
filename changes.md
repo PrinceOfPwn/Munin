@@ -1,3 +1,24 @@
+## 2026-08-07 - Fix DeepSeek thinking-mode overrides for langchain-openai 1.x
+
+PR #63 introduced a `DeepSeekThinkingChatOpenAI` subclass, but the overrides used
+pre-1.x signatures (`_convert_chunk_to_generation_chunk(chunk, message,
+metadata=...)` and `_convert_message_to_dict` as an instance method) that
+are wrong for `langchain-openai` 1.4.x. The canary (run 31144169915) failed
+with `TypeError: BaseChatOpenAI._convert_chunk_to_generation_chunk() ... unexpected
+keyword argument 'metadata'` before any tool call could complete (tools=0).
+
+- `munin/core/llm_client.py`: rewrite the overrides against the verified 1.x
+  contracts (DeepWiki 2026-08-07):
+  - `_convert_chunk_to_generation_chunk(self, chunk: dict, default_chunk_class:
+    type, base_generation_info: dict|None)` — mirrors the official
+    `ChatDeepSeek` implementation, reading `choices[0].delta.reasoning_content`
+    (or `reasoning` for OpenRouter) into `AIMessageChunk.additional_kwargs`.
+  - Replace the broken `_convert_message_to_dict` override with a
+    `_get_request_payload(self, input_, *, stop=None, **kwargs)` override
+    that re-attaches `reasoning_content` (empty-string fallback) on every
+    assistant entry in the assembled chat-completions payload. This is the
+    canonical instance method on `BaseChatOpenAI` 1.x that builds the request.
+
 ## 2026-08-06 - Fix DeepSeek V4 thinking-mode: reasoning_content contract + Discord reasoning stream
 
 Post-merge canary (CI run 31135978248) failed with HTTP 400
