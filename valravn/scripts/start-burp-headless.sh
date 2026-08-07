@@ -157,9 +157,19 @@ if [[ -z "${DISPLAY:-}" ]]; then
   fi
   export DISPLAY="$XE_DISPLAY"
   require_cmd xwininfo
-  LAUNCH=(java "${JAVA_ARGS[@]}")
+  # Keep a pty through unbuffer so the JVM line-buffers stdout into burp.log;
+  # without it java buffers ~8 KB and the log stays empty while Burp hangs.
+  if command -v unbuffer >/dev/null 2>&1; then
+    LAUNCH=(unbuffer java "${JAVA_ARGS[@]}")
+  else
+    LAUNCH=(java "${JAVA_ARGS[@]}")
+  fi
 else
-  LAUNCH=(java "${JAVA_ARGS[@]}")
+  if command -v unbuffer >/dev/null 2>&1; then
+    LAUNCH=(unbuffer java "${JAVA_ARGS[@]}")
+  else
+    LAUNCH=(java "${JAVA_ARGS[@]}")
+  fi
 fi
 
 echo "Starting Burp with burp-mcp-ultimate preloaded..."
@@ -291,8 +301,8 @@ except OSError:
 
 # A silent-but-alive Burp usually means a modal X11 dialog (EULA, plaintext
 # config warning, updater, extension error) is blocking startup. List the
-# visible windows, listening ports and java process tree so CI reports the
-# real blocker instead of another "Connection refused".
+# visible windows, capture the display, and report listeners + java process
+# tree so CI reports the real blocker instead of another connection refused.
 diag = []
 try:
     w = subprocess.run(
@@ -304,6 +314,16 @@ try:
         diag.append(w.stdout.strip())
 except Exception as exc:
     diag.append(f"(xwininfo failed: {exc})")
+try:
+    shot = subprocess.run(
+        ["bash", "-c", "DISPLAY=${DISPLAY:-:99} import -window root /home/runner/work/_temp/valravn-burp/failure.png 2>/dev/null || DISPLAY=${DISPLAY:-:99} xwd -root -out /home/runner/work/_temp/valravn-burp/failure.xwd 2>/dev/null; ls -la /home/runner/work/_temp/valravn-burp/failure.* 2>/dev/null || true"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if shot.stdout.strip():
+        diag.append("--- screenshot ---")
+        diag.append(shot.stdout.strip())
+except Exception as exc:
+    diag.append(f"(screenshot failed: {exc})")
 try:
     s = subprocess.run(
         ["bash", "-c", "ss -tlnp 2>/dev/null | grep -E '9444|8080|:99' || true; ps -ef | grep -E '[j]ava|[X]vfb' | head -10"],
