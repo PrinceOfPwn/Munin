@@ -112,6 +112,13 @@ Hugin 专精：**恶意软件分析、Rust/低层语言、规避与驻留技法�
 普通事实进 memory；高信号发现进 shared intel（判定标准见 `principles.md §8`，**不是封闭
 类型清单**——任何验证后能改变下一次决策的 pivot 都算）；代理消息使用高密度中文。
 
+**持久化契约（principles.md §10）**：执行后立即用 `memory_remember` 写库，不攒到战役
+结束——步骤日志 `campaign:<id>:step:<n>`、状态快照 `campaign:<id>:state`（均为
+conversation scope）、高信号发现 `finding:<slug>`（global scope）。上下文压缩（100K tokens）
+只丢 prompt 历史，不丢 DB；新回合/重连/压缩后先 `memory_list(prefix="campaign:")` +
+`episodic_query` + `query_shared_intel` 重建状态再行动。写库失败必须显式降级重试，绝不把
+「没写成」当「已写成」。
+
 ## Dynamic tools 与 graphs
 
 - `tool_forge`, `list_generated_tools`, `describe_generated_tool`
