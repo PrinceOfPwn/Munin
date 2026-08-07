@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -128,22 +129,6 @@ def streamable_http_call(
         raise McpTransportError(f"streamable MCP call failed: {type(exc).__name__}: {exc}") from exc
 
 
-def _parse_stdio_results(stdout: str) -> dict[int, dict[str, Any]]:
-    found: dict[int, dict[str, Any]] = {}
-    for line in stdout.splitlines():
-        raw = line.strip()
-        if not raw.startswith("{"):
-            continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict) or not isinstance(payload.get("id"), int):
-            continue
-        found[payload["id"]] = payload
-    return found
-
-
 def stdio_call(
     command: list[str],
     method: str,
@@ -152,32 +137,31 @@ def stdio_call(
     env: dict[str, str] | None = None,
     timeout: float = 30.0,
 ) -> McpCallResult:
-    """Spawn a stdio MCP server for one request and close it after the response."""
+    """Call a stdio MCP through an isolated official-SDK lifecycle.
+
+    A prior implementation wrote initialize + request frames and immediately
+    closed stdin. That worked with trivial fixtures but caused real SDK-backed
+    servers (including FuzzingLabs Nuclei MCP) to enter EOF shutdown while a
+    request was still being processed. The worker uses ``mcp.ClientSession``
+    and ``stdio_client`` so initialize/ready/call/close ordering matches the
+    protocol implementation used by those servers.
+    """
     if not command:
         raise McpTransportError("empty stdio MCP command")
-    messages = [
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": _PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": _CLIENT_INFO,
-            },
-        },
-        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-        {"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}},
-    ]
-    payload = "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in messages)
-    proc_env = dict(os.environ)
-    if env:
-        proc_env.update({str(k): str(v) for k, v in env.items()})
+    if not all(isinstance(item, str) and item for item in command):
+        raise McpTransportError("stdio MCP command must contain non-empty strings")
 
+    request = {
+        "command": command,
+        "method": method,
+        "params": params or {},
+        "env": env or {},
+    }
+    proc_env = dict(os.environ)
     try:
         process = subprocess.run(
-            command,
-            input=payload,
+            [sys.executable, "-m", "munin.valravn.stdio_worker"],
+            input=json.dumps(request, ensure_ascii=False),
             capture_output=True,
             text=True,
             env=proc_env,
@@ -187,18 +171,25 @@ def stdio_call(
     except subprocess.TimeoutExpired as exc:
         raise McpTransportError(f"stdio MCP timed out after {timeout}s") from exc
     except OSError as exc:
-        raise McpTransportError(f"cannot start stdio MCP: {exc}") from exc
+        raise McpTransportError(f"cannot start stdio MCP worker: {exc}") from exc
 
-    responses = _parse_stdio_results(process.stdout)
-    response = responses.get(2)
-    if response is None:
-        stderr = (process.stderr or "").strip()[-800:]
+    try:
+        envelope = json.loads((process.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        stderr = (process.stderr or "").strip()[-1200:]
         raise McpTransportError(
-            f"stdio MCP returned no response for request 2 (exit={process.returncode}, stderr={stderr!r})"
-        )
-    if response.get("error"):
-        raise McpTransportError(f"MCP error: {response['error']}")
-    result = response.get("result")
+            f"stdio MCP worker returned invalid JSON (exit={process.returncode}, stderr={stderr!r})"
+        ) from exc
+    if not isinstance(envelope, dict):
+        raise McpTransportError("stdio MCP worker returned a non-object envelope")
+    if not envelope.get("ok"):
+        error = envelope.get("error") or {}
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        stderr = (process.stderr or "").strip()[-1200:]
+        detail = f"; stderr={stderr!r}" if stderr else ""
+        raise McpTransportError(f"stdio MCP failed: {message or 'unknown error'}{detail}")
+
+    result = envelope.get("result")
     return McpCallResult(
         result=result if isinstance(result, dict) else {"value": result},
         transport="stdio",
@@ -237,4 +228,4 @@ def decode_tool_content(result: dict[str, Any]) -> Any:
             return json.loads(texts[0])
         except json.JSONDecodeError:
             return texts[0]
-    return {"content": content, "is_error": bool(result.get("isError"))}
+    return {"content": content, "is_error": bool(result.get("isError") or result.get("is_error"))}
