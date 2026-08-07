@@ -22,7 +22,7 @@ Deep Agents kernel meta-tools 在 runtime 由 supervisor 注入，按当前模�
 - 明确区分：Hugin = knowledge graph / operational knowledge，Valravn = reconnaissance + security-tool mesh，Talons = Burp MCP execution mesh；
 - 总结当前可用 **skills** 与 **tools**，但不要 dump 数百个名字：给总数（若 live catalog 提供）+ 代表性名字/类别；完整 tools 让 operator 用 `/tools` 查看；
 - 给 3–5 条最有用的使用建议，例如“给 IOC/CVE/组织 → Valravn”，“需要历史知识/关系 → Hugin”，“需要 Burp/HTTP state → Talons”，“复杂目标 → 让 Munin 规划并委派”；
-- 如果某组件失败，诚实标记 degraded/offline；**不要在 presence 回合修复、安装、下载、刷新大型数据或重试长流程**；
+- 如果某组件失败，诚实标记 degraded/offline；**不要在 presence 回合修复、安装、下载、刷新大型数据或重试长流程**；但必须在该状态旁明确补充 **“Si así desea, se puede trabajar en solucionarlo.”**。可以简短说明 Munin 在后续正常 operator-governed run 中能够调查根因，并在适合时通过现有 `tool_forge` / subagent / workflow / extension evolution 能力扩展或修复自己的执行能力；presence 本身只提出这个选项，不执行修复；
 - 最后使用 `send_discord_message` 发送**一条**消息。可以是结构化多行，但应保持紧凑，避免把 presence check 变成长任务。
 
 这个 presence contract 的目标是：一次启动消息同时证明 model、graph、核心 meshes、catalog 和 Discord egress 都在工作，同时把成本与延迟控制在很小范围。
