@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -69,7 +70,12 @@ def streamable_http_call(
     token: str = "",
     timeout: float = 15.0,
 ) -> McpCallResult:
-    """Perform one MCP request using Streamable HTTP with a fresh session."""
+    """Perform one MCP request using Streamable HTTP with a fresh session.
+
+    The initialize response negotiates the protocol revision. Subsequent
+    requests carry that revision plus any server-issued session ID, and a
+    best-effort DELETE releases stateful sessions once the call completes.
+    """
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
@@ -79,54 +85,87 @@ def streamable_http_call(
 
     try:
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            init_id = 1
-            init = client.post(
-                url,
-                headers=headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": init_id,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": _PROTOCOL_VERSION,
-                        "capabilities": {},
-                        "clientInfo": _CLIENT_INFO,
-                    },
-                },
-            )
-            init.raise_for_status()
-            _json_payload_from_response(init, init_id)
-            session_id = init.headers.get("mcp-session-id", "")
+            session_id = ""
             session_headers = dict(headers)
-            if session_id:
-                session_headers["Mcp-Session-Id"] = session_id
+            try:
+                init_id = 1
+                init = client.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": init_id,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": _PROTOCOL_VERSION,
+                            "capabilities": {},
+                            "clientInfo": _CLIENT_INFO,
+                        },
+                    },
+                )
+                init.raise_for_status()
+                init_result = _json_payload_from_response(init, init_id)
+                negotiated = str(init_result.get("protocolVersion") or _PROTOCOL_VERSION)
+                session_id = init.headers.get("mcp-session-id", "")
+                session_headers["MCP-Protocol-Version"] = negotiated
+                if session_id:
+                    session_headers["Mcp-Session-Id"] = session_id
 
-            ready = client.post(
-                url,
-                headers=session_headers,
-                json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-            )
-            if ready.status_code >= 400:
-                ready.raise_for_status()
+                ready = client.post(
+                    url,
+                    headers=session_headers,
+                    json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+                )
+                if ready.status_code >= 400:
+                    ready.raise_for_status()
 
-            request_id = 2
-            response = client.post(
-                url,
-                headers=session_headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": method,
-                    "params": params or {},
-                },
-            )
-            response.raise_for_status()
-            result = _json_payload_from_response(response, request_id)
-            return McpCallResult(result=result, transport="streamable_http")
+                request_id = 2
+                response = client.post(
+                    url,
+                    headers=session_headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": method,
+                        "params": params or {},
+                    },
+                )
+                response.raise_for_status()
+                result = _json_payload_from_response(response, request_id)
+                return McpCallResult(result=result, transport="streamable_http")
+            finally:
+                if session_id:
+                    try:
+                        client.delete(url, headers=session_headers)
+                    except httpx.HTTPError:
+                        # Session deletion is optional server-side and must not
+                        # overwrite the actual tool result/failure.
+                        pass
     except (httpx.HTTPError, McpTransportError):
         raise
     except Exception as exc:  # pragma: no cover - defensive boundary
         raise McpTransportError(f"streamable MCP call failed: {type(exc).__name__}: {exc}") from exc
+
+
+def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate the worker and any MCP/container descendants after timeout."""
+    if process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def stdio_call(
@@ -139,12 +178,9 @@ def stdio_call(
 ) -> McpCallResult:
     """Call a stdio MCP through an isolated official-SDK lifecycle.
 
-    A prior implementation wrote initialize + request frames and immediately
-    closed stdin. That worked with trivial fixtures but caused real SDK-backed
-    servers (including FuzzingLabs Nuclei MCP) to enter EOF shutdown while a
-    request was still being processed. The worker uses ``mcp.ClientSession``
-    and ``stdio_client`` so initialize/ready/call/close ordering matches the
-    protocol implementation used by those servers.
+    The isolated worker prevents async event-loop ownership conflicts. It runs
+    in its own process group so a timeout also kills descendant MCP processes
+    such as ``docker compose run`` rather than leaving them orphaned.
     """
     if not command:
         raise McpTransportError("empty stdio MCP command")
@@ -158,35 +194,48 @@ def stdio_call(
         "env": env or {},
     }
     proc_env = dict(os.environ)
+    popen_kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             [sys.executable, "-m", "munin.valravn.stdio_worker"],
-            input=json.dumps(request, ensure_ascii=False),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             env=proc_env,
-            timeout=timeout,
-            check=False,
+            **popen_kwargs,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise McpTransportError(f"stdio MCP timed out after {timeout}s") from exc
+        try:
+            stdout, stderr = process.communicate(
+                input=json.dumps(request, ensure_ascii=False),
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_tree(process)
+            stdout, stderr = process.communicate()
+            raise McpTransportError(f"stdio MCP timed out after {timeout}s") from exc
     except OSError as exc:
         raise McpTransportError(f"cannot start stdio MCP worker: {exc}") from exc
 
     try:
-        envelope = json.loads((process.stdout or "").strip())
+        envelope = json.loads((stdout or "").strip())
     except json.JSONDecodeError as exc:
-        stderr = (process.stderr or "").strip()[-1200:]
+        tail = (stderr or "").strip()[-1200:]
         raise McpTransportError(
-            f"stdio MCP worker returned invalid JSON (exit={process.returncode}, stderr={stderr!r})"
+            f"stdio MCP worker returned invalid JSON (exit={process.returncode}, stderr={tail!r})"
         ) from exc
     if not isinstance(envelope, dict):
         raise McpTransportError("stdio MCP worker returned a non-object envelope")
     if not envelope.get("ok"):
         error = envelope.get("error") or {}
         message = error.get("message") if isinstance(error, dict) else str(error)
-        stderr = (process.stderr or "").strip()[-1200:]
-        detail = f"; stderr={stderr!r}" if stderr else ""
+        tail = (stderr or "").strip()[-1200:]
+        detail = f"; stderr={tail!r}" if tail else ""
         raise McpTransportError(f"stdio MCP failed: {message or 'unknown error'}{detail}")
 
     result = envelope.get("result")
