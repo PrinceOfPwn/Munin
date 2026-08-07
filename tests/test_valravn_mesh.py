@@ -21,6 +21,10 @@ def _clear_talon_cache():
     talons._TOOL_CACHE.clear()
 
 
+def _mock_stdio_command() -> list[str]:
+    return [sys.executable, str(ROOT / "tests" / "fixtures" / "mock_stdio_mcp.py")]
+
+
 def test_security_hub_manifest_covers_all_38_servers():
     data = arsenal.list_servers()
     assert data["count"] == 38
@@ -29,13 +33,26 @@ def test_security_hub_manifest_covers_all_38_servers():
 
 
 def test_stdio_transport_lists_and_calls_tools():
-    command = [sys.executable, str(ROOT / "tests" / "fixtures" / "mock_stdio_mcp.py")]
+    command = _mock_stdio_command()
     listed = stdio_call(command, "tools/list").result
     names = {tool["name"] for tool in listed["tools"]}
     assert {"quick_scan", "list_templates"} <= names
 
     called = stdio_call(command, "tools/call", {"name": "list_templates", "arguments": {}}).result
     assert json.loads(called["content"][0]["text"])["called"] == "list_templates"
+
+
+def test_stdio_transport_does_not_leak_parent_secrets(monkeypatch):
+    monkeypatch.setenv("VALRAVN_TEST_SECRET", "must-not-reach-upstream")
+    called = stdio_call(
+        _mock_stdio_command(),
+        "tools/call",
+        {"name": "env_probe", "arguments": {}},
+        env={"VALRAVN_ALLOWED": "explicitly-forwarded"},
+    ).result
+    payload = json.loads(called["content"][0]["text"])
+    assert payload["allowed"] == "explicitly-forwarded"
+    assert payload["secret"] is None
 
 
 def test_streamable_http_transport_roundtrip():
@@ -136,7 +153,7 @@ def test_arsenal_plain_command_override_counts_as_available(monkeypatch):
 
 
 def test_arsenal_command_override_supports_real_or_fixture_server(monkeypatch):
-    command = [sys.executable, str(ROOT / "tests" / "fixtures" / "mock_stdio_mcp.py")]
+    command = _mock_stdio_command()
     monkeypatch.setenv("VALRAVN_ARSENAL_NUCLEI_MCP_COMMAND_JSON", json.dumps(command))
     listed = arsenal.list_tools("web/nuclei")
     assert {item["name"] for item in listed["tools"]} >= {"quick_scan", "list_templates"}
