@@ -2,11 +2,13 @@
 
 Valravn treats provider credentials as optional capability switches. Missing secrets must degrade only the affected provider; they must not prevent Munin from starting.
 
-The Munin Live Session workflow forwards the supported repository secrets below into the Valravn runtime. Keep active/submission capabilities disabled unless the operator explicitly enables the matching repository variable.
+The names below are the environment variables consumed by the current Valravn native adapters. For local/container deployments, expose them directly as environment variables. For GitHub Actions, storing a repository secret does **not** automatically inject it into a job: the workflow must explicitly map the secret into `env`, or a Munin credential-vault layer must export it before Valravn initializes.
+
+The Live Session bootstrap added in PR #72 is independent of these intelligence credentials: it brings Juice Shop, Burp MCP Ultimate and Talons online before Munin starts. Provider API credentials remain optional enrichment capabilities.
 
 ## Priority 1 — highest operational value
 
-| GitHub Actions secret | Provider | Primary value |
+| Environment / secret name | Provider | Primary value |
 |---|---|---|
 | `SHODAN_API_KEY` | Shodan | Internet-exposed services, banners, ports, ASN/org pivots |
 | `VT_API_KEY` | VirusTotal | IP/domain/hash reputation and malware context |
@@ -17,7 +19,7 @@ The Munin Live Session workflow forwards the supported repository secrets below 
 
 ## Priority 2 — strong complementary coverage
 
-| GitHub Actions secret | Provider | Primary value |
+| Environment / secret name | Provider | Primary value |
 |---|---|---|
 | `NETLAS_API_KEY` | Netlas | Internet asset and response search |
 | `LEAKIX_API_KEY` | LeakIX | Exposed services, leaks, domains and subdomains |
@@ -43,11 +45,13 @@ The current Valravn native adapter still targets the Censys Legacy Search API an
 
 The current GreyNoise adapter uses the public Community endpoint and does not read a GreyNoise API key. RIPEstat, Wayback Machine and Common Crawl are also available without repository secrets.
 
+SecurityTrails is not wired into the current native Valravn provider set. Adding a `SECURITYTRAILS_API_KEY` by itself therefore does nothing until an adapter/provider is implemented.
+
 ## Recommended repository variables
 
-These are variables, not secrets, and default conservatively in Live Session:
+These are variables, not secrets, and default conservatively:
 
-- `VALRAVN_USAGE_MODE=personal` (default for the operator Live Session; set deliberately for another usage context)
+- `VALRAVN_USAGE_MODE=personal`
 - `VALRAVN_URLSCAN_SUBMIT_ENABLED=false`
 - `VALRAVN_CLOUDFLARE_URL_SCAN_ENABLED=false`
 - `VALRAVN_FULLHUNT_ENABLED=false`
