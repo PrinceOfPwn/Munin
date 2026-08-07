@@ -150,7 +150,7 @@ jobs:
       - name: Install virtual display and Munin
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb expect
+          sudo apt-get install -y xvfb expect x11-utils
           python -m pip install --upgrade pip
           python -m pip install poetry
           poetry install --no-interaction
@@ -214,6 +214,9 @@ jobs:
         env:
           BURP_HOME: ${{ runner.temp }}/valravn-burp
         run: |
+          if [ -f "$BURP_HOME/xvfb.pid" ]; then
+            kill "$(cat "$BURP_HOME/xvfb.pid")" 2>/dev/null || true
+          fi
           if [ -f "$BURP_HOME/burp.pid" ]; then
             BURP_PID="$(cat "$BURP_HOME/burp.pid")"
             pkill -TERM -P "$BURP_PID" 2>/dev/null || true

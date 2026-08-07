@@ -144,9 +144,20 @@ JAVA_ARGS=(
 
 # Ultimate registers a suite tab, so CI uses a virtual display rather than
 # forcing java.awt.headless=true. Operator hosts with DISPLAY use it directly.
+# Launching our own fixed-display Xvfb (instead of xvfb-run -a) lets the probe
+# and CI diagnose modal dialogs (EULA, extension error, updater) that block
+# Burp startup silently under a headless display.
 if [[ -z "${DISPLAY:-}" ]]; then
-  require_cmd xvfb-run
-  LAUNCH=(xvfb-run -a java "${JAVA_ARGS[@]}")
+  require_cmd Xvfb
+  XE_DISPLAY=:99
+  if ! (xdpyinfo -display "$XE_DISPLAY" >/dev/null 2>&1); then
+    Xvfb "$XE_DISPLAY" -screen 0 1280x1024x24 -nolisten tcp >"$BURP_LOG.xvfb" 2>&1 &
+    echo $! > "$BURP_HOME/xvfb.pid"
+    sleep 1
+  fi
+  export DISPLAY="$XE_DISPLAY"
+  require_cmd xwininfo
+  LAUNCH=(java "${JAVA_ARGS[@]}")
 else
   LAUNCH=(java "${JAVA_ARGS[@]}")
 fi
@@ -175,6 +186,7 @@ BURP_LOG="$BURP_LOG" \
 python - <<'PY'
 import json
 import os
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -276,10 +288,36 @@ try:
     proc_state = "alive" if alive() else "dead"
 except OSError:
     proc_state = "exited"
+
+# A silent-but-alive Burp usually means a modal X11 dialog (EULA, plaintext
+# config warning, updater, extension error) is blocking startup. List the
+# visible windows, listening ports and java process tree so CI reports the
+# real blocker instead of another "Connection refused".
+diag = []
+try:
+    w = subprocess.run(
+        ["bash", "-c", "xwininfo -root -tree 2>/dev/null | grep -E '0x[0-9a-f]+' | grep -viE 'has no name|(child|parent) windows' | head -40"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if w.stdout.strip():
+        diag.append("--- X windows on $DISPLAY ---")
+        diag.append(w.stdout.strip())
+except Exception as exc:
+    diag.append(f"(xwininfo failed: {exc})")
+try:
+    s = subprocess.run(
+        ["bash", "-c", "ss -tlnp 2>/dev/null | grep -E '9444|8080|:99' || true; ps -ef | grep -E '[j]ava|[X]vfb' | head -10"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if s.stdout.strip():
+        diag.append("--- listeners/processes ---")
+        diag.append(s.stdout.strip())
+except Exception as exc:
+    diag.append(f"(ss/ps failed: {exc})")
 raise SystemExit(
     f"Timed out waiting for Burp MCP Ultimate: {last_error} (process {proc_state}); "
     f"inspect {log}\n"
     f"--- {log} tail ({os.path.getsize(log) if os.path.exists(log) else 0} bytes) ---\n"
-    f"{log_tail}"
+    f"{log_tail}\n" + "\n".join(diag)
 )
 PY
