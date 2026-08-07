@@ -1,4 +1,28 @@
-﻿# Changes
+## 2026-08-06 - Fix DeepSeek V4 thinking-mode: reasoning_content contract + Discord reasoning stream
+
+Post-merge canary (CI run 31135978248) failed with HTTP 400
+`[invalid_request_error] The reasoning_content in the thinking mode must be
+passed back to the API.` Root cause: `langchain-openai.ChatOpenAI` neither
+re-serializes `reasoning_content` on assistant messages during tool-call turns
+nor captures it from stream deltas, so DeepSeek V4 thinking-mode rejected
+follow-up requests once reasoning state had started.
+
+- `munin/core/llm_client.py`: new `make_deepseek_thinking_langchain(settings, *,
+  effort="max")` returning a `DeepSeekThinkingChatOpenAI(ChatOpenAI)` subclass
+  that (a) forces thinking enabled via `extra_body={"thinking": {"type":
+  "enabled"}, "reasoning_effort": effort}`, (b) re-injects `reasoning_content`
+  (empty-string fallback) on every assistant message through
+  `_convert_message_to_dict`, and (c) captures `reasoning_content` deltas
+  into `additional_kwargs` via `_convert_chunk_to_generation_chunk`.
+  `make_langchain` now dispatches automatically for any model whose name
+  contains `deepseek`; other OpenAI-compatible providers keep plain
+  `ChatOpenAI`.
+- `munin/production/discord_adapter.py`: the operator run stream now surfaces
+  `provider_reasoning` envelopes via `session.add_reasoning`, so DeepSeek
+  reasoning streams live as 💭 status posts; legacy `assistant_text`
+  handling unchanged.
+- No config change: default remains `deepseek-v4-flash-free` via OpenCode Zen.
+# Changes
 
 Living changelog and hand-off log for Munin. Newest entries first. Entries
 record the engineering timeline; use `ARCHITECTURE.md` and the operator guides

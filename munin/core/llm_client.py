@@ -278,6 +278,11 @@ class LLMClient:
     def make_langchain(self) -> Any:
         from langchain_openai import ChatOpenAI
 
+        # DeepSeek V4 thinking-mode models need the reasoning_content contract;
+        # anything else keeps the plain OpenAI-compatible path.
+        if "deepseek" in (self.settings.llm_model or "").lower():
+            return make_deepseek_thinking_langchain(self.settings)
+
         return ChatOpenAI(
             model=self.settings.llm_model,
             api_key=self.settings.llm_api_key,
@@ -286,3 +291,100 @@ class LLMClient:
             timeout=self._compute_timeout(),
             max_retries=3,
         )
+
+
+def make_deepseek_thinking_langchain(settings: Settings, *, effort: str = "max") -> Any:
+    """Build a ChatOpenAI tuned for DeepSeek V4 thinking-mode models.
+
+    DeepSeek's thinking-mode contract (``api-docs.deepseek.com/guides/thinking_mode``)
+    requires two things that plain ``ChatOpenAI`` does not provide:
+
+    1. Assistant messages that participated in a tool-call turn must include
+       ``reasoning_content`` on every subsequent request; omitting it makes the
+       provider reject the chat with HTTP 400 ("The ``reasoning_content`` in the
+       thinking mode must be passed back to the API").
+    2. The ``reasoning_content`` delta must be captured from the stream so Munin
+       can replay it as ``provider_reasoning`` envelopes (Discord, event store).
+
+    This helper returns a ``DeepSeekThinkingChatOpenAI`` subclass that forces
+    thinking enabled with the given ``reasoning_effort`` and re-injects
+    ``reasoning_content`` (empty string for history without reasoning) on every
+    assistant message so tool-call turns stay valid.
+    """
+    from langchain_openai import ChatOpenAI
+
+    class DeepSeekThinkingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
+        """ChatOpenAI subclass satisfying the DeepSeek V4 thinking contract."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            extra = dict(kwargs.get("extra_body") or {})
+            extra.update({"thinking": {"type": "enabled"}, "reasoning_effort": effort})
+            kwargs["extra_body"] = extra
+            if "model_kwargs" in kwargs:
+                kwargs.pop("model_kwargs")
+            super().__init__(**kwargs)
+
+        def _convert_message_to_dict(self, message: Any) -> dict[str, Any]:
+            # langchain-openai >= 0.2 exposes the fixed message->request dict
+            # conversion on the base class. Re-inject reasoning_content from
+            # additional_kwargs; fall back to empty string so DeepSeek accepts.
+            converter = getattr(super(), "_convert_message_to_dict", None)
+            if converter is None:
+                # Fallback: legacy private helper name in older 1.x releases.
+                converter = getattr(super(), "_get_message_to_dict", None)
+            data: dict[str, Any] = converter(message) if converter is not None else dict(message)
+            if getattr(message, "type", "") == "ai":
+                extra = getattr(message, "additional_kwargs", None) or {}
+                data["reasoning_content"] = str(extra.get("reasoning_content") or "")
+            return data
+
+        def _convert_chunk_to_generation_chunk(
+            self,
+            chunk: Any,
+            message: Any,
+            metadata: dict[str, Any] | None = None,
+            **__: Any,
+        ) -> Any:
+            # Keep provider reasoning visible on the AIMessageChunk so
+            # runtime_adapter._stream_parts can turn it into provider_reasoning
+            # envelopes (Discord streaming) and the tool-call turn can re-send it.
+            try:
+                generation = super()._convert_chunk_to_generation_chunk(
+                    chunk, message, metadata=metadata, **__
+                )
+                delta = chunk.model_dump().get("choices", [{}])[0].get("delta", {})
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                if reasoning:
+                    current = generation.message.additional_kwargs or {}
+                    generation.message.additional_kwargs = {
+                        **current,
+                        "reasoning_content": reasoning,
+                    }
+                return generation
+            except TypeError:
+                # Older signature without metadata kwarg.
+                generation = super()._convert_chunk_to_generation_chunk(chunk, message, **__)
+                return _attach_reasoning(generation, chunk)
+
+    def _attach_reasoning(generation: Any, chunk: Any) -> Any:
+        try:
+            delta = chunk.model_dump().get("choices", [{}])[0].get("delta", {})
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+            if reasoning and hasattr(generation, "message"):
+                current = generation.message.additional_kwargs or {}
+                generation.message.additional_kwargs = {
+                    **current,
+                    "reasoning_content": reasoning,
+                }
+        except Exception:
+            pass
+        return generation
+
+    return DeepSeekThinkingChatOpenAI(
+        model=settings.llm_model,
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        temperature=0.2,
+        timeout=float(getattr(settings, "llm_timeout_floor", 40)),
+        max_retries=3,
+    )
