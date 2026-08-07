@@ -1228,8 +1228,6 @@ def test_flush_loop_beats_without_new_events(monkeypatch: pytest.MonkeyPatch) ->
     import munin.production.discord_adapter as adapter
 
     async def _scenario() -> None:
-        edits: list[str] = []
-
         class _FakeStatus:
             def __init__(self) -> None:
                 self.edits: list[str] = []
