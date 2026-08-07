@@ -51,9 +51,13 @@ def main() -> int:
     print(f"waiting for Valravn Burp API at {burp_api}")
     _wait_http(burp_api + "/api/health")
 
-    # Explicitly constrain active lab traffic to Juice Shop. Strict mode makes
-    # an accidental request outside the local target fail closed.
+    # Force interception off via the live Montoya API, then explicitly
+    # constrain active lab traffic to Juice Shop. Strict mode makes an
+    # accidental request outside the local target fail closed.
     with httpx.Client(base_url=burp_api, timeout=20) as client:
+        intercept = client.post("/api/intercept/disable", json={})
+        intercept.raise_for_status()
+
         response = client.post(
             "/api/scope/configure",
             json={
