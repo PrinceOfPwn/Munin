@@ -825,6 +825,10 @@ jobs:
             data/shared_state.sqlite
             data/shared_state.sqlite-wal
             data/shared_state.sqlite-shm
+            data/langgraph_checkpoints.sqlite
+            data/langgraph_checkpoints.sqlite-wal
+            data/langgraph_checkpoints.sqlite-shm
+            data/events.jsonl
             data/soul_pending/
             data/wake_artifacts/
             munin/generated/
