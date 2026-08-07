@@ -38,7 +38,7 @@ python valravn/arsenal/bootstrap.py --arsenal bounty
 # All 38 Security Hub images
 python valravn/arsenal/bootstrap.py --arsenal all
 
-# Clone Ultimate + Awesome; test/build Ultimate JAR
+# Clone pinned Ultimate + Awesome; test/build both Burp extension JARs
 python valravn/arsenal/bootstrap.py --arsenal none --build-burp
 ```
 
@@ -66,6 +66,7 @@ Generic remote execution is classified as active and requires `authorized=true`;
 3. Munin -> stdio MCP -> Valravn gateway -> Streamable HTTP Burp provider round trips;
 4. Munin -> Valravn Arsenal -> the real FuzzingLabs Nuclei MCP over stdio;
 5. explicit active-dispatch authorization gates;
-6. upstream `burp-mcp-ultimate` tests and shadow-JAR build on JDK 21.
+6. pinned `burp-mcp-ultimate` tests and shadow-JAR build on JDK 21;
+7. pinned `burp-awesome-mcp` tests and shadow-JAR build on JDK 21.
 
-A real Burp GUI is intentionally not required in GitHub-hosted CI; Ultimate's own tests/build cover its extension code while Munin's transport E2E uses a protocol-faithful local MCP fixture.
+A real Burp GUI is intentionally not required in GitHub-hosted CI; both Burp providers' own tests/builds cover their extension code while Munin's transport E2E uses a protocol-faithful local MCP fixture.
