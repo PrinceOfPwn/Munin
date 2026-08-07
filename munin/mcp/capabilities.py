@@ -58,24 +58,16 @@ CAPABILITY_PROFILES: tuple[dict[str, Any], ...] = (
         "generated_tool_guidance": "Forge narrow, deterministic helpers with typed parameters. Store durable findings in memory/intel, not module globals.",
     },
     {
-        "id": "burp_dast",
-        "title": "Valravn Burp extension — direct DAST bridge",
-        "safety": "active_authorization_required",
-        "native_tools": (
-            "burp_status", "burp_health_check", "burp_check_scope", "burp_get_proxy_count", "burp_invoke",
-        ),
-        "generated_tool_guidance": "Legacy direct REST bridge to the bundled Valravn Burp extension at 127.0.0.1:8111. Prefer Valravn Talons for multi-provider MCP discovery; keep this path as a resilient local fallback.",
-    },
-    {
         "id": "valravn_talons",
-        "title": "Valravn Talons — Burp MCP provider mesh",
+        "title": "Valravn Talons — Burp MCP execution mesh",
         "safety": "active_authorization_required",
         "native_tools": (
             "valravn_talons_status", "valravn_talons_tools", "valravn_talons_read", "valravn_talons_call",
         ),
         "generated_tool_guidance": (
-            "Use list -> focused schema -> call. Provider order is Ultimate, Awesome, then the official PortSwigger stdio proxy when configured. "
-            "Do not surface all remote schemas at once; generic calls require explicit authorized=true."
+            "Burp MCP Ultimate is the primary execution backend. Use status -> focused tool discovery -> call, "
+            "and read MCP resources such as burp://proxy/history when state is more useful than a tool call. "
+            "The legacy Valravn REST bridge is retired; generic active calls require explicit authorized=true."
         ),
     },
     {

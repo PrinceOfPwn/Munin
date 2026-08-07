@@ -8,47 +8,44 @@ on:
       - "munin/mcp/main.py"
       - "munin/mcp/tools/valravn_mesh_tool.py"
       - "munin/mcp/tools/valravn_tool.py"
-      - "munin/mcp/tools/burp_tool.py"
       - "munin/mcp/tools/__init__.py"
       - "munin/mcp/capabilities.py"
       - "pyproject.toml"
       - "poetry.lock"
       - "valravn/arsenal/**"
-      - "valravn/burp-extension/**"
       - "valravn/.claude/skills/**"
+      - "valravn/mcp-server/src/burpsuite_mcp/knowledge/**"
+      - "valravn/mcp-server/src/burpsuite_mcp/payloads/**"
       - "valravn/scripts/start-burp-headless.sh"
       - "scripts/valravn_mesh_e2e.py"
       - "scripts/valravn_burp_juiceshop_e2e.py"
       - "tests/test_valravn_mesh.py"
       - "tests/test_valravn_skill_adapter.py"
-      - "tests/test_burp_resilience.py"
       - "tests/fixtures/mock_*_mcp.py"
       - ".github/workflows/valravn-mesh-e2e.yml"
   push:
     branches:
       - main
-      - raven-mind/integrate-valravn
-      - agent/valravn-unified-security-mesh
+      - agent/valravn-burp-ultimate
     paths:
       - "munin/valravn/**"
       - "munin/core/autonomy/skill_library.py"
       - "munin/mcp/main.py"
       - "munin/mcp/tools/valravn_mesh_tool.py"
       - "munin/mcp/tools/valravn_tool.py"
-      - "munin/mcp/tools/burp_tool.py"
       - "munin/mcp/tools/__init__.py"
       - "munin/mcp/capabilities.py"
       - "pyproject.toml"
       - "poetry.lock"
       - "valravn/arsenal/**"
-      - "valravn/burp-extension/**"
       - "valravn/.claude/skills/**"
+      - "valravn/mcp-server/src/burpsuite_mcp/knowledge/**"
+      - "valravn/mcp-server/src/burpsuite_mcp/payloads/**"
       - "valravn/scripts/start-burp-headless.sh"
       - "scripts/valravn_mesh_e2e.py"
       - "scripts/valravn_burp_juiceshop_e2e.py"
       - "tests/test_valravn_mesh.py"
       - "tests/test_valravn_skill_adapter.py"
-      - "tests/test_burp_resilience.py"
       - "tests/fixtures/mock_*_mcp.py"
       - ".github/workflows/valravn-mesh-e2e.yml"
   workflow_dispatch:
@@ -58,7 +55,7 @@ permissions:
 
 jobs:
   mesh-e2e:
-    name: Munin -> Valravn -> MCP E2E
+    name: Munin -> Valravn Talons + Arsenal E2E
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -106,18 +103,17 @@ jobs:
         run: |
           poetry run pytest -q \
             tests/test_valravn_mesh.py \
-            tests/test_valravn_skill_adapter.py \
-            tests/test_burp_resilience.py
+            tests/test_valravn_skill_adapter.py
 
       - name: Full protocol E2E with real Security Hub Nuclei MCP
         run: |
           poetry run python scripts/valravn_mesh_e2e.py \
             --security-hub-nuclei "$RUNNER_TEMP/mcp-security-hub/web-security/nuclei-mcp/server.py"
 
-  burp-juice-shop-lab:
-    name: Headless Burp -> OWASP Juice Shop lab
+  burp-ultimate-juice-shop-lab:
+    name: Burp MCP Ultimate -> OWASP Juice Shop live lab
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     services:
       juice-shop:
         image: bkimminich/juice-shop:v20.1.1
@@ -130,84 +126,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Java 21 for Burp and Montoya extension
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install Munin runtime
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install poetry
-          poetry install --no-interaction
-
-      - name: Wait for OWASP Juice Shop
-        run: |
-          for i in $(seq 1 90); do
-            if curl -fsS http://127.0.0.1:3000/ >/dev/null; then
-              echo "Juice Shop is ready"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "Juice Shop did not become ready" >&2
-          exit 1
-
-      - name: Download, configure, and start Burp headlessly
-        env:
-          BURP_HOME: ${{ runner.temp }}/valravn-burp
-          BURP_API_HOST: 127.0.0.1
-          BURP_API_PORT: "8111"
-          BURP_PROXY_HOST: 127.0.0.1
-          BURP_PROXY_PORT: "8080"
-          BURP_MAX_HEAP: 2g
-        run: |
-          chmod +x valravn/scripts/start-burp-headless.sh
-          valravn/scripts/start-burp-headless.sh
-          curl -fsS http://127.0.0.1:8111/api/health
-
-      - name: Prove Munin traffic traverses real Burp Proxy into Juice Shop
-        env:
-          BURP_HOME: ${{ runner.temp }}/valravn-burp
-          BURP_API_HOST: 127.0.0.1
-          BURP_API_PORT: "8111"
-          BURP_PROXY_HOST: 127.0.0.1
-          BURP_PROXY_PORT: "8080"
-          JUICE_SHOP_URL: http://127.0.0.1:3000
-        run: |
-          poetry run python scripts/valravn_burp_juiceshop_e2e.py
-
-      - name: Upload Burp runtime log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: valravn-burp-juice-shop-log
-          path: ${{ runner.temp }}/valravn-burp/burp.log
-          if-no-files-found: warn
-
-      - name: Stop headless Burp
-        if: always()
-        env:
-          BURP_HOME: ${{ runner.temp }}/valravn-burp
-        run: |
-          if [ -f "$BURP_HOME/burp.pid" ]; then
-            BURP_PID="$(cat "$BURP_HOME/burp.pid")"
-            kill "$BURP_PID" 2>/dev/null || true
-          fi
-
-  ultimate-upstream-contract:
-    name: burp-mcp-ultimate upstream contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout pinned Ultimate provider
+      - name: Checkout pinned burp-mcp-ultimate
         uses: actions/checkout@v4
         with:
           repository: 3ntr0pyX/burp-mcp-ultimate
@@ -222,55 +141,94 @@ jobs:
           java-version: "21"
           cache: gradle
 
-      - name: Run upstream tests and build extension
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install virtual display and Munin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          python -m pip install --upgrade pip
+          python -m pip install poetry
+          poetry install --no-interaction
+
+      - name: Test and build pinned Ultimate provider
         working-directory: ultimate
         run: |
           chmod +x gradlew
           ./gradlew test shadowJar --no-daemon
-          test -n "$(find build/libs -maxdepth 1 -name '*.jar' -print -quit)"
+          ULTIMATE_JAR="$(find build/libs -maxdepth 1 -name 'burp-mcp-ultimate*.jar' -print -quit)"
+          test -n "$ULTIMATE_JAR"
+          test -s "$ULTIMATE_JAR"
           grep -q "MIT License" LICENSE
 
-  awesome-upstream-contract:
-    name: burp-awesome-mcp upstream contract
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout pinned Awesome provider
-        uses: actions/checkout@v4
-        with:
-          repository: vvvvvvvvvvel/burp-awesome-mcp
-          ref: 4d6b8c1aaccaf56e383430790fa67c463f83d72f
-          path: awesome
-          persist-credentials: false
-
-      - name: Set up Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
-
-      - name: Run upstream tests and build extension
-        working-directory: awesome
+      - name: Wait for OWASP Juice Shop
         run: |
-          chmod +x gradlew
-          ./gradlew test shadowJar --no-daemon
-          test -n "$(find build/libs -maxdepth 1 -name '*.jar' -print -quit)"
-          grep -q "MIT License" LICENSE
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:3000/ >/dev/null; then
+              echo "Juice Shop is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Juice Shop did not become ready" >&2
+          exit 1
+
+      - name: Download and start Burp with Ultimate preloaded
+        env:
+          BURP_HOME: ${{ runner.temp }}/valravn-burp
+          BURP_MCP_HOST: 127.0.0.1
+          BURP_MCP_PORT: "9444"
+          BURP_MCP_TOKEN: valravn-ci-local-only
+          BURP_MAX_HEAP: 2g
+        run: |
+          ULTIMATE_JAR="$(find "$GITHUB_WORKSPACE/ultimate/build/libs" -maxdepth 1 -name 'burp-mcp-ultimate*.jar' -print -quit)"
+          test -n "$ULTIMATE_JAR"
+          chmod +x valravn/scripts/start-burp-headless.sh
+          BURP_ULTIMATE_JAR="$ULTIMATE_JAR" valravn/scripts/start-burp-headless.sh
+
+      - name: Prove real Ultimate + Burp Proxy + Juice Shop path
+        env:
+          BURP_HOME: ${{ runner.temp }}/valravn-burp
+          BURP_MCP_TOKEN: valravn-ci-local-only
+          VALRAVN_TALON_ULTIMATE_URL: http://127.0.0.1:9444/mcp
+          BURP_PROXY_HOST: 127.0.0.1
+          BURP_PROXY_PORT: "8080"
+          JUICE_SHOP_URL: http://127.0.0.1:3000
+        run: |
+          poetry run python scripts/valravn_burp_juiceshop_e2e.py
+
+      - name: Upload Burp runtime log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valravn-burp-ultimate-juice-shop-log
+          path: ${{ runner.temp }}/valravn-burp/burp.log
+          if-no-files-found: warn
+
+      - name: Stop unattended Burp
+        if: always()
+        env:
+          BURP_HOME: ${{ runner.temp }}/valravn-burp
+        run: |
+          if [ -f "$BURP_HOME/burp.pid" ]; then
+            BURP_PID="$(cat "$BURP_HOME/burp.pid")"
+            pkill -TERM -P "$BURP_PID" 2>/dev/null || true
+            kill "$BURP_PID" 2>/dev/null || true
+          fi
 
   gate:
     name: Valravn Mesh required gate
     if: always()
     needs:
       - mesh-e2e
-      - burp-juice-shop-lab
-      - ultimate-upstream-contract
-      - awesome-upstream-contract
+      - burp-ultimate-juice-shop-lab
     runs-on: ubuntu-latest
     steps:
-      - name: Require every mesh job
+      - name: Require the mesh and live Burp lab
         run: |
           test "${{ needs.mesh-e2e.result }}" = "success"
-          test "${{ needs.burp-juice-shop-lab.result }}" = "success"
-          test "${{ needs.ultimate-upstream-contract.result }}" = "success"
-          test "${{ needs.awesome-upstream-contract.result }}" = "success"
+          test "${{ needs.burp-ultimate-juice-shop-lab.result }}" = "success"

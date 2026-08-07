@@ -13,36 +13,32 @@ on:
         required: false
         default: false
         type: boolean
-      probe_burp_wrapper:
-        description: "Probe the Munin burp_tool wrapper resilience (expects extension_unreachable)"
-        required: false
-        default: true
-        type: boolean
   push:
     paths:
       - "munin/valravn/**"
       - "munin/mcp/tools/valravn_tool.py"
-      - "munin/mcp/tools/burp_tool.py"
+      - "munin/mcp/tools/valravn_mesh_tool.py"
       - "munin/mcp/tools/tavily_tool.py"
       - "munin/mcp/capabilities.py"
       - "soul/valravn.md"
       - "valravn/**"
       - "tests/test_valravn_integration.py"
-      - "tests/test_burp_wrapper_resilience.py"
+      - "tests/test_valravn_mesh.py"
       - "scripts/valravn_protocol_smoke.py"
       - ".github/workflows/valravn-smoke.yml"
   pull_request:
     paths:
       - "munin/valravn/**"
       - "munin/mcp/tools/valravn_tool.py"
-      - "munin/mcp/tools/burp_tool.py"
+      - "munin/mcp/tools/valravn_mesh_tool.py"
       - "munin/mcp/tools/tavily_tool.py"
       - "munin/mcp/capabilities.py"
       - "soul/valravn.md"
       - "valravn/**"
       - "tests/test_valravn_integration.py"
-      - "tests/test_burp_wrapper_resilience.py"
+      - "tests/test_valravn_mesh.py"
       - "scripts/valravn_protocol_smoke.py"
+      - ".github/workflows/valravn-smoke.yml"
 
 permissions:
   contents: read
@@ -63,8 +59,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install poetry
           poetry install --no-interaction
-      - name: Compile Valravn
-        run: poetry run python -m compileall -q munin/valravn munin/mcp/tools/valravn_tool.py
+      - name: Compile Valravn runtime
+        run: poetry run python -m compileall -q munin/valravn munin/mcp/tools/valravn_tool.py munin/mcp/tools/valravn_mesh_tool.py
       - name: Protocol smoke
         run: poetry run python scripts/valravn_protocol_smoke.py
       - name: Catalog smoke
@@ -82,7 +78,7 @@ jobs:
           print(status)
           PY
       - name: Valravn integration tests
-        run: poetry run pytest -q tests/test_valravn_integration.py
+        run: poetry run pytest -q tests/test_valravn_integration.py tests/test_valravn_mesh.py
       - name: Existing Munin tests
         run: poetry run pytest -q
       - name: External API probe
@@ -131,10 +127,10 @@ jobs:
               print(result["summary"])
           PY
 
-  valravn-burp-import:
-    name: Valravn Burp import smoke (no Burp install)
+  valravn-assets:
+    name: Valravn skills + knowledge assets
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -142,163 +138,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install Munin
+      - name: Validate preserved skills and knowledge
         run: |
-          python -m pip install --upgrade pip
-          pip install poetry
-          poetry install --no-interaction
-      - name: Compile new valravn/ mcp-server Python
-        run: poetry run python -m compileall -q valravn/mcp-server/src valravn/scripts
-      - name: AST-validate every Python file under valravn/
-        run: |
-          poetry run python - <<'PY'
-          import ast
-          import pathlib
-          files = list(pathlib.Path("valravn").rglob("*.py"))
-          assert files, "No .py found under valravn/ -- check checkout"
-          failures = []
-          for f in files:
-              try:
-                  ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
-              except SyntaxError as e:
-                  failures.append(f"{f}: {e}")
-          if failures:
-              print("\n".join(failures))
-              raise SystemExit(1)
-          print(f"AST OK: {len(files)} .py files under valravn/")
-          PY
-      - name: JSON-validate every knowledge-base and payload file
-        run: |
-          poetry run python - <<'PY'
-          import json
-          import pathlib
-          kb = list((pathlib.Path("valravn/mcp-server/src/burpsuite_mcp/knowledge")).glob("*.json"))
-          payloads = list((pathlib.Path("valravn/mcp-server/src/burpsuite_mcp/payloads")).rglob("*.json"))
-          data = list((pathlib.Path("valravn/mcp-server/src/burpsuite_mcp/data")).glob("*.json"))
-          all_json = sorted(kb + payloads + data)
-          assert all_json, "No JSON files found under valravn/mcp-server/src/burpsuite_mcp"
-          bad = []
-          for f in all_json:
-              try:
-                  json.loads(f.read_text(encoding="utf-8"))
-              except json.JSONDecodeError as e:
-                  bad.append(f"{f}: {e}")
-          if bad:
-              print("\n".join(bad))
-              raise SystemExit(1)
-          print(f"JSON OK: {len(all_json)} files (kb={len(kb)} payloads={len(payloads)} data={len(data)})")
-          PY
-      - name: Validate skill.json shape
-        run: |
-          poetry run python - <<'PY'
+          python - <<'PY'
           import json
           from pathlib import Path
-          raw = Path("valravn/skill.json").read_text(encoding="utf-8")
-          doc = json.loads(raw)
-          required = {"name", "display_name", "description", "version", "license"}
-          missing = required - set(doc)
-          assert not missing, f"skill.json missing required keys: {missing}"
+
+          skills = sorted(Path("valravn/.claude/skills").glob("*.md"))
+          agents = sorted(Path("valravn/.claude/agents").glob("*.md"))
+          kb = sorted(Path("valravn/mcp-server/src/burpsuite_mcp/knowledge").glob("*.json"))
+          payloads = sorted(Path("valravn/mcp-server/src/burpsuite_mcp/payloads").rglob("*.json"))
+          assert len(skills) >= 50, len(skills)
+          assert len(agents) >= 10, len(agents)
+          assert len(kb) >= 140, len(kb)
+          for path in kb + payloads:
+              json.loads(path.read_text(encoding="utf-8"))
+          print(f"preserved assets: skills={len(skills)} agents={len(agents)} kb={len(kb)} payloads={len(payloads)}")
+          PY
+      - name: Validate skill metadata and attribution
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          doc = json.loads(Path("valravn/skill.json").read_text(encoding="utf-8"))
           assert doc["name"] == "valravn"
           assert doc["license"] == "Apache-2.0"
-          # upstream_attribution block must retain an upstream_source link
           ups = doc.get("upstream_attribution", {})
-          assert ups.get("license") == "Apache-2.0"
           notice = ups.get("notice_required_by_section_4d", {})
-          assert notice.get("upstream_source", "").startswith("https://github.com/PrinceOfPwn/Valravn"), notice
-          print(f"skill.json OK -- upstream attribution retained: {notice.get('upstream_source')}")
+          assert notice.get("upstream_source", "").startswith("https://github.com/PrinceOfPwn/Valravn")
+          raw_notice = Path("valravn/NOTICE").read_text(encoding="utf-8")
+          assert "https://github.com/PrinceOfPwn/Valravn" in raw_notice
+          print("Valravn attribution retained")
           PY
-      - name: Verify NOTICE keeps Apache-2.0 §4(d) upstream attribution
+      - name: Assert legacy Burp REST bridge is gone from runtime
         run: |
-          poetry run python - <<'PY'
-          notice = (__import__("pathlib").Path("valravn/NOTICE")).read_text(encoding="utf-8")
-          assert "https://github.com/PrinceOfPwn/Valravn" in notice, "Upstream attribution missing from NOTICE"
-          assert "Apache-2.0" in notice.upper() or "Apache" in notice, "Apache-2.0 reference missing from NOTICE"
-          print("NOTICE OK -- upstream attribution retained per Apache-2.0 §4(d)")
-          PY
-      - name: Assert .gitignore covers .valravn-intel/ and the zip
-        run: |
-          poetry run python - <<'PY'
-          from pathlib import Path
-          gi = Path("valravn/.gitignore").read_text(encoding="utf-8")
-          assert ".valravn-intel/" in gi, ".valravn-intel/ not gitignored in valravn/.gitignore"
-          assert "target/" in gi, "burp-extension/target/ not gitignored"
-          top = Path(".gitignore").read_text(encoding="utf-8")
-          assert "Valravn.zip" in top, "Valravn.zip not gitignored in repo root .gitignore"
-          print(".gitignore OK")
-          PY
-      - name: Resilience probe -- burp_tool wrapper must degrade gracefully
-        if: ${{ github.event_name != 'pull_request' || true }}
-        env:
-          BURP_API_HOST: 127.0.0.1
-          BURP_API_PORT: "65533"  # unused port: must return extension_unreachable, never raise
-        run: |
-          poetry run python - <<'PY'
-          # The wrapper MUST return a structured error envelope when Burp is
-          # unreachable -- it must NOT raise. This is the resilience contract.
-          from munin.mcp.tools.burp_tool import (
-              burp_status,
-              burp_health_check,
-              burp_check_scope,
-              burp_get_proxy_count,
-              burp_invoke,
-              BURP_TOOLS,
-          )
-          assert BURP_TOOLS == frozenset({
-              "burp_status", "burp_health_check", "burp_check_scope",
-              "burp_get_proxy_count", "burp_invoke",
-          }), BURP_TOOLS
-
-          # Each call returns a dict envelope; no exception escapes.
-          r1 = burp_health_check()
-          assert isinstance(r1, dict), type(r1)
-          assert r1.get("ok") is False, r1
-          assert r1["error"]["code"] == "extension_unreachable", r1
-          print("burp_health_check unreachable OK:", r1["error"]["code"])
-
-          r2 = burp_status(probe=False)
-          assert r2.get("ok") is False, r2
-          assert r2["error"]["code"] == "extension_unreachable", r2
-          print("burp_status unreachable OK:", r2["error"]["code"])
-
-          r3 = burp_check_scope("https://example.com")
-          assert r3.get("ok") is False, r3
-          assert r3["error"]["code"] == "extension_unreachable", r3
-          print("burp_check_scope unreachable OK:", r3["error"]["code"])
-
-          r4 = burp_get_proxy_count()
-          assert r4.get("ok") is False, r4
-          assert r4["error"]["code"] == "extension_unreachable", r4
-          print("burp_get_proxy_count unreachable OK:", r4["error"]["code"])
-
-          r5 = burp_invoke(endpoint="/api/health", method="GET")
-          assert r5.get("ok") is False, r5
-          assert r5["error"]["code"] == "extension_unreachable", r5
-          print("burp_invoke unreachable OK:", r5["error"]["code"])
-
-          # bad_args must also be a structured envelope, never an exception
-          r6 = burp_invoke(endpoint="", method="GET")
-          assert r6.get("ok") is False, r6
-          assert r6["error"]["code"] == "bad_args", r6
-          print("burp_invoke bad_args OK:", r6["error"]["code"])
-
-          r7 = burp_check_scope(url="")
-          assert r7.get("ok") is False, r7
-          assert r7["error"]["code"] == "bad_args", r7
-          print("burp_check_scope bad_args OK:", r7["error"]["code"])
-
-          print("All resilience probes passed.")
-          PY
-      - name: Capability catalog exposes burp_dast
-        run: |
-          poetry run python - <<'PY'
+          test ! -e valravn/burp-extension
+          test ! -e munin/mcp/tools/burp_tool.py
+          python - <<'PY'
           from munin.mcp.capabilities import CAPABILITY_PROFILES
-          ids = [p.get("id") for p in CAPABILITY_PROFILES]
-          assert "burp_dast" in ids, ids
-          profile = next(p for p in CAPABILITY_PROFILES if p.get("id") == "burp_dast")
-          assert profile["safety"] == "active_authorization_required", profile
-          assert "burp_status" in profile["native_tools"]
-          assert "burp_invoke" in profile["native_tools"]
-          print("burp_dast capability registered:", profile["title"])
+          ids = {p["id"] for p in CAPABILITY_PROFILES}
+          assert "burp_dast" not in ids, ids
+          assert "valravn_talons" in ids, ids
+          profile = next(p for p in CAPABILITY_PROFILES if p["id"] == "valravn_talons")
+          assert "valravn_talons_call" in profile["native_tools"]
+          print("Talons is the only Munin Burp execution gateway")
           PY
-      - name: Existing Munin tests (regression guard)
-        run: poetry run pytest -q
