@@ -4,9 +4,12 @@ on:
   pull_request:
     paths:
       - "munin/valravn/**"
+      - "munin/mcp/main.py"
       - "munin/mcp/tools/valravn_mesh_tool.py"
       - "munin/mcp/tools/__init__.py"
       - "munin/mcp/capabilities.py"
+      - "pyproject.toml"
+      - "poetry.lock"
       - "valravn/arsenal/**"
       - "valravn/.claude/skills/**"
       - "scripts/valravn_mesh_e2e.py"
@@ -20,9 +23,12 @@ on:
       - agent/valravn-unified-security-mesh
     paths:
       - "munin/valravn/**"
+      - "munin/mcp/main.py"
       - "munin/mcp/tools/valravn_mesh_tool.py"
       - "munin/mcp/tools/__init__.py"
       - "munin/mcp/capabilities.py"
+      - "pyproject.toml"
+      - "poetry.lock"
       - "valravn/arsenal/**"
       - "valravn/.claude/skills/**"
       - "scripts/valravn_mesh_e2e.py"
@@ -42,6 +48,8 @@ jobs:
     steps:
       - name: Checkout Munin
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -49,23 +57,23 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install Munin and test dependencies
+      - name: Install Munin in declared Poetry environment
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
-          python -m pip install pytest pytest-asyncio pydantic-settings
+          python -m pip install poetry
+          poetry install --no-interaction
 
       - name: Clone pinned FuzzingLabs Security Hub
         run: |
           git clone --filter=blob:none https://github.com/FuzzingLabs/mcp-security-hub.git "$RUNNER_TEMP/mcp-security-hub"
           git -C "$RUNNER_TEMP/mcp-security-hub" checkout --detach b6800740da9965e9dd3fde2ec3cf4c775c358f72
-          python -m pip install -r "$RUNNER_TEMP/mcp-security-hub/web-security/nuclei-mcp/requirements.txt"
+          poetry run python -m pip install -r "$RUNNER_TEMP/mcp-security-hub/web-security/nuclei-mcp/requirements.txt"
 
       - name: Validate all 38 Arsenal mappings against upstream
         env:
           SECURITY_HUB_ROOT: ${{ runner.temp }}/mcp-security-hub
         run: |
-          python - <<'PY'
+          poetry run python - <<'PY'
           import json, os
           from pathlib import Path
           manifest = json.loads(Path('valravn/arsenal/security_hub.json').read_text())
@@ -80,14 +88,14 @@ jobs:
 
       - name: Unit and regression tests
         run: |
-          python -m pytest -q \
+          poetry run pytest -q \
             tests/test_valravn_mesh.py \
             tests/test_valravn_skill_adapter.py \
             tests/test_burp_resilience.py
 
       - name: Full protocol E2E with real Security Hub Nuclei MCP
         run: |
-          python scripts/valravn_mesh_e2e.py \
+          poetry run python scripts/valravn_mesh_e2e.py \
             --security-hub-nuclei "$RUNNER_TEMP/mcp-security-hub/web-security/nuclei-mcp/server.py"
 
   ultimate-upstream-contract:
@@ -101,6 +109,7 @@ jobs:
           repository: 3ntr0pyX/burp-mcp-ultimate
           ref: 1c2ffc541e15d7fcd45d750485e23b979e875295
           path: ultimate
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@v4
@@ -128,6 +137,7 @@ jobs:
           repository: vvvvvvvvvvel/burp-awesome-mcp
           ref: 4d6b8c1aaccaf56e383430790fa67c463f83d72f
           path: awesome
+          persist-credentials: false
 
       - name: Set up Java 21
         uses: actions/setup-java@v4
