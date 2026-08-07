@@ -1,3 +1,50 @@
+## 2026-08-07 - Fix Discord invocation contract: "if it says munin, respond"
+
+Live sessions 31147196158 and 31148018808 (head df2f952) showed the bot
+silently `extract-drop`-ing the operator's messages with NO `discord:
+dispatch` log. Forensics pinpoints the regression to commit `3a560bb`
+(CodeRabbit review on PR #58, merged as `badf9f6`): the lenient leading-
+mention fallback from `ecc8100` (which accepted any leading mention tag —
+user, legacy nickname, role) was hardened to accept ONLY the bot's own
+snowflake tag when `bot_user_id` was known, rejecting any mention to
+another member or role. DeepWiki (discord-api-docs) confirmed that a
+native `@Munin` mention is always inserted by Discord as `<@BOT_ID>`,
+which WOULD pass the strict gate — so the extract-drop proves the
+operator's message did NOT contain the bot's native tag; it contained a
+mention to another entity (nick/role) that the strict gate rejected.
+
+Operator directive (2026-08-07): if the message says "munin" in ANY form
+(case-insensitive: native tag, literal `@Munin`/`@munin`, mid-sentence
+`hey munin do X`, bare `munin`), the bot must respond. Channel- and
+author-level allowlists upstream of `_extract_prompt` still bound WHO
+reaches this code path, so the broader text gate does not widen the raw
+trigger surface beyond operator-curated channels.
+
+- `munin/production/discord_adapter.py` `_extract_prompt`:
+  - reordered so DM/reply/prefix paths run first;
+  - bot-tag path (`<@BOT_ID>`/`<@!BOT_ID>`) strips the tag and returns
+    the rest verbatim (or None if empty);
+  - NEW text gate: if `"munin" in content.lower()` → invocation; strips an
+    optional leading `@Munin`/`@munin` prefix, otherwise returns the whole
+    content as the prompt (mid-sentence intent preserved);
+  - the strict `re.match(r"^<@!?(\d+)>...")` fallback and its role/other-
+    user rejection are removed — the text gate subsumes them and is
+    regression-proof against the `ecc8100`/`3a560bb` loop.
+- `munin/production/discord_adapter.py` `_handle_message` extract-drop
+  log: added a safe shape fingerprint (`shape=`, `mention_ids=`,
+  `starts_with_mention=`, `has_munin=`) — identifiers and structural flags
+  only, NO content — so the next live run reveals why a drop happened
+  without re-opening a full diagnostic cycle.
+- `tests/test_discord_regression.py`: rewritten invocation tests against
+  the new contract (native tag strip, legacy nick strip, literal `@Munin`
+  case-insensitive, mid-sentence munin, role-named-Munin, command prefix,
+  unknown-bot window, multi-tag strip, bare-mention-no-spawn, chatter-
+  without-munin-rejected, other-user-mention-WITH-munin-invokes, case
+  variants). The old strict `test_extract_prompt_other_user_mention_
+  rejected_when_bot_known` and role-rejection tests are replaced: roles/
+  nicks WITHOUT "munin" are still rejected chatter; mentions WITH "munin"
+  now invoke.
+
 ## 2026-08-07 - Fix DeepSeek thinking-mode overrides for langchain-openai 1.x
 
 PR #63 introduced a `DeepSeekThinkingChatOpenAI` subclass, but the overrides used

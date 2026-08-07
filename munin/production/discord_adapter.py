@@ -610,12 +610,32 @@ class _RunSession:
 def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
     """Return the trimmed prompt text, or ``None`` if the message should be ignored.
 
-    Rules:
-    * DMs → whole content (including slash commands).
-    * Guild channel → require a mention of the bot, a reply to the bot,
-      or one of the ``COMMAND_PREFIXES``.  This keeps the bot out of
-      unrelated channel chatter while letting the whole community talk
-      to it deliberately.
+    Invocation contract (operator decision, 2026-08-07):
+
+    * DMs → whole content (DMs are a private surface; the conversation key
+      ``dm:{author_id}`` already scopes the graph).
+    * Guild channel → the message is an invocation when ANY of:
+        - it is a reply to the bot;
+        - it contains the literal name ``munin`` in ANY casing/tag form
+          (``@Munin``, ``@munin``, ``<@BOT_ID>``, ``<@!BOT_ID>``, ``Munin ...``,
+          or even ``... munin ...`` mid-sentence);
+        - it starts with one of the ``COMMAND_PREFIXES`` (``/munin ``/``!munin ``).
+
+    The previous hardening (commit ``3a560bb`` / PR #58, CodeRabbit review)
+    restricted the leading-native-mention fallback to the bot's own snowflake
+    tag and rejected any mention to other members or roles.  That closed a
+    hypothetical arbitrary-mention trigger surface but ALSO broke the
+    operator's real-world invocation shape: mentioning a nick/role that
+    resolves to a non-bot entity (e.g. ``@NIGHT``, a role named ``Munin``)
+    produced a silent ``extract-drop`` with NO dispatch log — exactly the
+    failure observed in live sessions 31147196158 and 31148018808.
+
+    The operator's directive is unambiguous: if the message says ``munin``
+    in any form (case-insensitive, native tag, literal text, mid-sentence),
+    the bot must respond.  Channel- and author-level allowlists upstream of
+    this function still bound WHO reaches this code path, so the broader
+    text gate does not widen the raw trigger surface beyond operator-curated
+    channels.
     """
     content = (message.content or "").strip()
     if not content:
@@ -633,49 +653,42 @@ def _extract_prompt(message: Any, *, bot_user_id: int | None) -> str | None:
             if int(getattr(resolved.author, "id", 0) or 0) == int(bot_user_id or 0):
                 return content
 
-    if bot_user_id is not None:
-        for tag in (f"<@{bot_user_id}>", f"<@!{bot_user_id}>"):
-            if tag in content:
-                return content.replace(tag, "", 1).strip()
-
+    # Command-prefix invocations: ``/munin ...`` / ``!munin ...``.
     for prefix in COMMAND_PREFIXES:
         if content.startswith(prefix):
             return content[len(prefix):].strip()
 
-    # A mention that Discord renders as plain text (e.g. typing "@Munin"
-    # without using the native mention, or a role mention the client cannot
-    # resolve) still counts as an invocation.  Be lenient ONLY for the bot's
-    # own name so "Nico wrote @Munin and got nothing" cannot happen again;
-    # ordinary channel chatter is NOT an invocation (otherwise every message
-    # spawns an empty INV thread, as observed in the 1:11 PM live session).
     lowered = content.lower()
-    if "@munin" in lowered or lowered.startswith("munin "):
-        return content.replace("@munin", "", 1).strip().replace("@Munin", "", 1).strip()
 
-    # Final fallback for a leading native Discord mention tag —
-    # ``<@ID>`` (user) or ``<@!ID>`` (legacy nickname).  Security rule:
-    # when ``bot_user_id`` is known, ONLY the bot's own tag is accepted
-    # (a mention to another member/role is not an invocation — the
-    # operator must confirm identity server-side).  Role mentions
-    # ``<@&ROLE_ID>`` are NEVER accepted: no authoritative invocation
-    # role is configured, and accepting any role would let any member
-    # of the role trigger runs in the channel.
-    #
-    # When ``bot_user_id`` is None (the brief startup window before
-    # ``client.user`` populated, which was the cause of silent drops on
-    # 2026-08-06), user tags are still accepted so backlog messages do
-    # not vanish; role tags remain rejected.  This keeps the operator's
-    # "wrote @Munin and got nothing" failure mode fixed without opening
-    # an arbitrary-mention invocation surface on the steady state.
-    # The caller's allowlist gate on operator-curated channels already
-    # bounds who reaches this code path.
-    mention = re.match(r"^<@!?(\d+)>\s*", content)
-    if mention is not None:
-        mentioned_id = int(mention.group(1))
-        if bot_user_id is not None and mentioned_id != int(bot_user_id):
-            return None
-        rest = content[mention.end():].strip()
-        return rest or None
+    # Native mention tag of the bot: ``<@BOT_ID>`` / ``<@!BOT_ID>`` (legacy
+    # nickname).  Strip the leading tag and return the rest.  bot_user_id may
+    # be None during the brief startup window before ``client.user`` is
+    # populated; in that case the text gate below still catches any literal
+    # "munin", so this is an optimization, not the only path.
+    if bot_user_id is not None:
+        for tag in (f"<@{bot_user_id}>", f"<@!{bot_user_id}>"):
+            if tag in content:
+                rest = content.replace(tag, "", 1).strip()
+                return rest or None
+
+    # Operator directive (2026-08-07): if the message contains the literal
+    # name "munin" in ANY casing — native render, literal "@Munin", a role
+    # mention the client shows as "@Munin", mid-sentence "hey munin do X",
+    # or a bare "munin" call — treat it as an invocation.  This collapses
+    # the ecc8100/3a560bb regression loop: the prior strict gate rejected
+    # mentions to any non-bot entity (other member, role named "Munin",
+    # nickname) and silently dropped the operator's messages.  The only
+    # thing we strip is an optional leading "@munin" / "@Munin"; everything
+    # else (including the word mid-sentence) is returned verbatim as the
+    # prompt text, because the operator's instruction carries intent even
+    # when it doesn't lead with a stripped mention.
+    if "munin" in lowered:
+        orig = content
+        for tok in ("@ Munin", "@munin", "@Munin", "@ munin"):
+            if orig.lower().startswith(tok.lower()):
+                orig = orig[len(tok):].lstrip()
+                break
+        return orig.strip() or None
 
     return None
 
@@ -1290,10 +1303,34 @@ async def _handle_message(
         # respond" investigations can see that _extract_prompt rejected it.
         # Raw message content is intentionally NOT included (rejected
         # messages may carry credentials/PII — CodeRabbit security review).
+        # Shape fingerprint (2026-08-07): identifiers and structural flags
+        # only — no content — so the NEXT live run reveals why a drop
+        # happened without another full diagnostic cycle.
         _content = (getattr(message, "content", "") or "")
+        _lower = _content.lower()
+        _mentions = getattr(message, "mentions", None)
+        _mention_ids = ",".join(
+            str(int(getattr(m, "id", 0) or 0))
+            for m in (_mentions or [])
+            if int(getattr(m, "id", 0) or 0)
+        )
+        _shape = (
+            "self" if bot_user_id is not None and f"<@{bot_user_id}>" in _content
+            else "nick" if bot_user_id is not None and f"<@!{bot_user_id}>" in _content
+            else "reply" if getattr(message, "reference", None) is not None
+            else "prefix" if any(_content.startswith(p) for p in COMMAND_PREFIXES)
+            else "text-munin" if "munin" in _lower
+            else "tag-other" if re.search(r"<@!?\d+>", _content) is not None
+            else "tag-role" if "<@&" in _content
+            else "chatter"
+        )
         log.info(
-            "discord: extract-drop author=%s bot_user_id=%s channel=%s content_len=%d",
+            "discord: extract-drop author=%s bot_user_id=%s channel=%s content_len=%d "
+            "shape=%s mention_ids=%s starts_with_mention=%s has_munin=%s",
             author_id, bot_user_id, channel_id, len(_content),
+            _shape, _mention_ids or "-",
+            bool(re.match(r"^<@!?\&?\d+>\s*", _content)),
+            "munin" in _lower,
         )
         return
 
