@@ -23,6 +23,26 @@ require_cmd() {
   }
 }
 
+# The normal Live Session Kali image intentionally starts small. Keep the
+# workflow itself lean and make this component own the runtime it needs.
+# On developer hosts we never mutate the system automatically.
+if [[ "${GITHUB_WORKFLOW:-}" == "Munin Live Session" ]]; then
+  JAVA_MAJOR="$(java -version 2>&1 | awk -F'[\".]' '/version/ {print $2; exit}' || true)"
+  if ! command -v java >/dev/null 2>&1 \
+      || [[ -z "$JAVA_MAJOR" ]] \
+      || [[ "$JAVA_MAJOR" -lt 21 ]] \
+      || ! command -v xvfb-run >/dev/null 2>&1; then
+    if [[ "$(id -u)" != "0" ]] || ! command -v apt-get >/dev/null 2>&1; then
+      echo "::error::Live Session needs Java 21+ and Xvfb, and automatic package installation is unavailable" >&2
+      exit 2
+    fi
+    echo "Installing Java/Xvfb runtime required by Burp MCP Ultimate..."
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      default-jdk xvfb xauth
+  fi
+fi
+
 for command in git java curl sha256sum xvfb-run; do
   require_cmd "$command"
 done
@@ -36,11 +56,36 @@ else
   exit 2
 fi
 
+# start-burp-headless.sh historically calls `python`; Kali guarantees
+# python3 but not the compatibility alias. Create only a process-host alias
+# in the disposable Live Session container, never on normal operator hosts.
+if ! command -v python >/dev/null 2>&1 \
+    && [[ "${GITHUB_WORKFLOW:-}" == "Munin Live Session" ]] \
+    && [[ "$(id -u)" == "0" ]]; then
+  ln -sf "$(command -v python3)" /usr/local/bin/python
+fi
+
 JAVA_MAJOR="$(java -version 2>&1 | awk -F'[\".]' '/version/ {print $2; exit}')"
 if [[ -z "$JAVA_MAJOR" || "$JAVA_MAJOR" -lt 21 ]]; then
   echo "::error::Burp MCP Ultimate requires Java 21+; got $(java -version 2>&1 | head -1)" >&2
   exit 2
 fi
+
+# Service containers are launched by GitHub before the job steps, but the app
+# may still be warming up when the pre-server bootstrap begins. Explicitly
+# require the vulnerable box to be alive before validating the Burp path.
+echo "Waiting for authorized Juice Shop fixture at ${JUICE_SHOP_URL}..."
+for i in $(seq 1 90); do
+  if curl -fsS "${JUICE_SHOP_URL}/" >/dev/null; then
+    echo "Juice Shop ready"
+    break
+  fi
+  if [[ "$i" -eq 90 ]]; then
+    echo "::error::Juice Shop did not become ready at ${JUICE_SHOP_URL}" >&2
+    exit 5
+  fi
+  sleep 2
+done
 
 rm -rf "$ULTIMATE_ROOT"
 git clone --filter=blob:none --no-checkout "$ULTIMATE_REPO" "$ULTIMATE_ROOT"
