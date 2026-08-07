@@ -42,6 +42,25 @@ python valravn/arsenal/bootstrap.py --arsenal all
 python valravn/arsenal/bootstrap.py --arsenal none --build-burp
 ```
 
+## Provider environment isolation
+
+Third-party stdio MCP servers do **not** inherit Munin's complete process environment. Valravn forwards only OS/runtime bootstrap variables by default. Provider credentials and other configuration must be opted in explicitly.
+
+For Arsenal servers:
+
+```bash
+# Shared values intentionally exposed to every Arsenal provider
+export VALRAVN_ARSENAL_ENV_JSON='{"HTTP_PROXY":"http://127.0.0.1:8080"}'
+
+# Values exposed only to one service
+export VALRAVN_ARSENAL_SHODAN_MCP_ENV_JSON='{"SHODAN_API_KEY":"..."}'
+export VALRAVN_ARSENAL_NUCLEI_MCP_ENV_JSON='{"NUCLEI_RATE_LIMIT":"50"}'
+```
+
+The per-service object overrides the shared object. For the external official Burp stdio proxy, use `VALRAVN_TALON_OFFICIAL_ENV_JSON`.
+
+Ultimate's HTTP token stays local to its provider through `BURP_MCP_TOKEN`; it is not forwarded to Arsenal servers.
+
 ## Runtime pattern
 
 Do not inject all remote schemas into the agent context.
@@ -63,7 +82,7 @@ Generic remote execution is classified as active and requires `authorized=true`;
 
 1. all 38 Security Hub manifest paths against the pinned upstream commit;
 2. Security Hub Docker Compose syntax;
-3. Munin -> stdio MCP -> Valravn gateway -> Streamable HTTP Burp provider round trips;
+3. Munin -> stdio MCP -> Valravn gateway -> Streamable HTTP Burp provider round trips, including protocol/session headers;
 4. Munin -> Valravn Arsenal -> the real FuzzingLabs Nuclei MCP over stdio;
 5. explicit active-dispatch authorization gates;
 6. pinned `burp-mcp-ultimate` tests and shadow-JAR build on JDK 21;
