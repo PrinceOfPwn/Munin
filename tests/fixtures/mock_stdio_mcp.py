@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 TOOLS = [
     {"name": "quick_scan", "description": "mock quick scan", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_templates", "description": "list templates", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "env_probe", "description": "report selected environment values", "inputSchema": {"type": "object", "properties": {}}},
 ]
 
 for line in sys.stdin:
@@ -27,8 +29,17 @@ for line in sys.stdin:
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = msg.get("params") or {}
+        name = params.get("name")
+        payload = {"called": name}
+        if name == "env_probe":
+            payload.update(
+                {
+                    "allowed": os.environ.get("VALRAVN_ALLOWED"),
+                    "secret": os.environ.get("VALRAVN_TEST_SECRET"),
+                }
+            )
         result = {
-            "content": [{"type": "text", "text": json.dumps({"called": params.get("name")})}],
+            "content": [{"type": "text", "text": json.dumps(payload)}],
             "isError": False,
         }
     else:
