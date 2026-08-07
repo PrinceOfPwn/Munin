@@ -1,12 +1,11 @@
-# tags: [capabilities, mcp, mcp-tool, registry, orchestrator, CAPABILITY_PROFILES, generated_tool_context, capabilities_catalog, Settings, directory_read, knowledge_graph, web_recon, network_service_recon, agent_composition, preflight_policy]
+# tags: [capabilities, mcp, mcp-tool, registry, orchestrator, CAPABILITY_PROFILES, generated_tool_context, capabilities_catalog, Settings, directory_read, knowledge_graph, web_recon, network_service_recon, agent_composition, preflight_policy, valravn]
 """Declarative capability catalog and safe execution context for Munin.
 
-The catalog is intentionally independent of the MCP transport.  It gives agents a
+The catalog is intentionally independent of the MCP transport. It gives agents a
 single, stable description of what is available without teaching them to infer a
-tool's contract from a prose ``skills.md`` file.  It also provides *non-secret*
+tool's contract from a prose ``skills.md`` file. It also provides non-secret
 configuration that a forged tool may receive as an optional ``context`` argument.
 """
-
 from __future__ import annotations
 
 from typing import Any
@@ -14,9 +13,6 @@ from typing import Any
 from .config import Settings
 
 
-# Keep this declarative: the list is useful to an LLM even if a binary is absent.
-# Calls to active native tools still perform their existing dependency and OPSEC
-# checks, and are never implied to be authorised by appearing here.
 CAPABILITY_PROFILES: tuple[dict[str, Any], ...] = (
     {
         "id": "directory_read",
@@ -63,30 +59,42 @@ CAPABILITY_PROFILES: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "burp_dast",
-        "title": "Valravn Burp extension — agentic DAST bridge",
+        "title": "Valravn Burp extension — direct DAST bridge",
         "safety": "active_authorization_required",
         "native_tools": (
-            "burp_status", "burp_health_check", "burp_check_scope",
-            "burp_get_proxy_count", "burp_invoke",
+            "burp_status", "burp_health_check", "burp_check_scope", "burp_get_proxy_count", "burp_invoke",
+        ),
+        "generated_tool_guidance": "Legacy direct REST bridge to the bundled Valravn Burp extension at 127.0.0.1:8111. Prefer Valravn Talons for multi-provider MCP discovery; keep this path as a resilient local fallback.",
+    },
+    {
+        "id": "valravn_talons",
+        "title": "Valravn Talons — Burp MCP provider mesh",
+        "safety": "active_authorization_required",
+        "native_tools": (
+            "valravn_talons_status", "valravn_talons_tools", "valravn_talons_read", "valravn_talons_call",
         ),
         "generated_tool_guidance": (
-            "Target the Valravn Burp extension REST API at 127.0.0.1:8111 (BURP_API_HOST / BURP_API_PORT "
-            "override via env). burp_invoke is the generic dispatcher; prefer the typed wrappers "
-            "(burp_status, burp_check_scope, burp_get_proxy_count) when they fit. The extension owns scope "
-            "enforcement; this wrapper never bypasses check_scope. The wrapper is resilient: an unreachable "
-            "extension returns ok=False with code=extension_unreachable and never cancels the Munin run."
+            "Use list -> focused schema -> call. Provider order is Ultimate, Awesome, then the official PortSwigger stdio proxy when configured. "
+            "Do not surface all remote schemas at once; generic calls require explicit authorized=true."
+        ),
+    },
+    {
+        "id": "valravn_arsenal",
+        "title": "Valravn Arsenal — external security MCP fleet",
+        "safety": "active_authorization_required",
+        "native_tools": (
+            "valravn_arsenal_status", "valravn_arsenal_list", "valravn_arsenal_tools", "valravn_arsenal_call",
+        ),
+        "generated_tool_guidance": (
+            "The Arsenal namespaces FuzzingLabs/mcp-security-hub behind a compact gateway. Select one category/server first, inspect only that server's tools, "
+            "then call the chosen tool. Generic execution requires explicit authorized=true."
         ),
     },
 )
 
 
 def generated_tool_context(settings: Settings) -> dict[str, Any]:
-    """Return safe runtime defaults for a generated tool.
-
-    Credentials deliberately never appear here. A tool that needs an authenticated
-    LDAP connection should use the native LDAP tool or obtain credentials only from
-    its controlled runtime, never from an MCP argument or generated source.
-    """
+    """Return safe runtime defaults for a generated tool."""
     return {
         "version": 1,
         "ldap": {
@@ -115,10 +123,7 @@ def generated_tool_context(settings: Settings) -> dict[str, Any]:
 
 def capabilities_catalog(settings: Settings, *, include_context: bool = False) -> dict[str, Any]:
     """Build a serializable catalog suitable for the agent and UI."""
-    profiles = [
-        {**profile, "native_tools": list(profile["native_tools"])}
-        for profile in CAPABILITY_PROFILES
-    ]
+    profiles = [{**profile, "native_tools": list(profile["native_tools"])} for profile in CAPABILITY_PROFILES]
     result: dict[str, Any] = {
         "profiles": profiles,
         "count": len(profiles),
@@ -127,6 +132,7 @@ def capabilities_catalog(settings: Settings, *, include_context: bool = False) -
             "Availability is checked at call time; installed binaries and configured providers can vary by runner.",
             "Active profiles require explicit authorised scope and retain native OPSEC/dependency checks.",
             "Generated tools are for bounded transformations and safe integrations, not a bypass around native policy.",
+            "Valravn remote MCP surfaces are discovered lazily to avoid flooding model context with hundreds of schemas.",
         ],
     }
     if include_context:

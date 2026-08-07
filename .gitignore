@@ -32,3 +32,6 @@ valravn/mcp-server/dist/
 valravn/mcp-server/build/
 valravn/mcp-server/.eggs/
 valravn/mcp-server/*.egg-info/
+
+# Third-party Valravn providers are bootstrapped locally from pinned upstreams.
+valravn/upstreams/
