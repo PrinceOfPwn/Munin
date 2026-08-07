@@ -5,6 +5,9 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+PROTOCOL_VERSION = "2025-03-26"
+SESSION_ID = "valravn-e2e"
+
 TOOLS = [
     {
         "name": "list_proxy_http_history",
@@ -32,20 +35,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
         if session:
-            self.send_header("Mcp-Session-Id", "valravn-e2e")
+            self.send_header("Mcp-Session-Id", SESSION_ID)
         self.end_headers()
         if body:
             self.wfile.write(body)
+
+    def _session_headers_valid(self) -> bool:
+        return (
+            self.headers.get("MCP-Protocol-Version") == PROTOCOL_VERSION
+            and self.headers.get("Mcp-Session-Id") == SESSION_ID
+        )
 
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
         message = json.loads(raw)
         method = message.get("method")
-        if method == "notifications/initialized":
-            self._send(202)
-            return
         request_id = message.get("id")
+
         if method == "initialize":
             self._send(
                 200,
@@ -53,13 +60,21 @@ class Handler(BaseHTTPRequestHandler):
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
-                        "protocolVersion": "2025-03-26",
+                        "protocolVersion": PROTOCOL_VERSION,
                         "capabilities": {"tools": {}, "resources": {}},
                         "serverInfo": {"name": "mock-ultimate", "version": "1"},
                     },
                 },
                 session=True,
             )
+            return
+
+        if not self._session_headers_valid():
+            self._send(400, {"error": "missing MCP protocol/session headers"})
+            return
+
+        if method == "notifications/initialized":
+            self._send(202)
             return
         if method == "tools/list":
             result = {"tools": TOOLS}
@@ -81,6 +96,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": method}})
             return
         self._send(200, {"jsonrpc": "2.0", "id": request_id, "result": result})
+
+    def do_DELETE(self):
+        if not self._session_headers_valid():
+            self._send(400, {"error": "missing MCP protocol/session headers"})
+            return
+        self._send(204)
 
 
 def main():
