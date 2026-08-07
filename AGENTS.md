@@ -1,7 +1,7 @@
 # Working on Munin
 
 This guide is for coding agents and contributors working on `PrinceOfPwn/Munin`.
-It describes the v1.0.0 repository and runtime; it is not an instruction to use
+It describes the v1.1.0 repository and runtime; it is not an instruction to use
 the CTF-oriented prompts in `soul/` as the default personality.
 
 ## Project contract
@@ -11,13 +11,16 @@ operations. The server owns identity, policy, approvals, state and capability
 composition. The Web GUI, MCP and Discord are control surfaces over that same
 runtime.
 
-The configuration tested and verified for **v1.0.0** is:
+The configuration tested and verified for **v1.1.0** is:
 
-- Web GUI
+- Discord community adapter (stable operator surface)
 - GitHub Actions execution environment
-- MiMo V2.5
+- DeepSeek V4-Flash Free (via OpenCode Zen)
 
-Other combinations may work, but are not verified unless documented.
+The Web GUI remains the target long-term interface, but live-session testing
+uncovered frontend bugs that have not yet passed the full repair loop; treat
+GUI-only claims as unverified until they do. Other combinations may work, but
+are not verified unless documented.
 
 ## Repository map
 
@@ -83,7 +86,7 @@ For Burp runtime failures and how to obtain free-tier API keys for the CTI
 providers, see the [`valravn-diagnostic` skill](.opencode/skills/valravn-diagnostic/SKILL.md).
 
 CI is the authoritative integration environment. Local tests remain useful, but
-the verified v1.0.0 path is the GUI on GitHub Actions with MiMo V2.5.
+the verified v1.1.0 path is the Discord adapter on GitHub Actions with DeepSeek V4-Flash Free (via OpenCode Zen).
 
 Start at [docs/README.md](docs/README.md), [ARCHITECTURE.md](ARCHITECTURE.md)
 and [MAP.md](MAP.md).

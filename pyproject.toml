@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "munin"
-version = "0.1.0"
+version = "1.1.0"
 description = "Agente ReAct de offensive-security con memoria persistente, soul editable, forjado dinámico de tools y grafos, y MCP OFFX integrado."
 license = "Proprietary"
 readme = "README.md"
@@ -40,7 +40,10 @@ click = ">=8.1"
 python-dotenv = ">=1.0"
 libsql = ">=0.1.11"
 "discord.py" = ">=2.4"
-cryptography = ">=42.0"
+# cryptography >=50.0.0 fixes GHSA-g6cj-pr64-35w5 (PKCS#7 EnvelopedData
+# decryption Bleichenbacher oracle), released 2026-08. Dependabot alert #1.
+# Deps google-auth (>=38.0.3) and PyJWT extra crypto (>=3.4.0) are satisfied.
+cryptography = ">=50.0.0"
 argon2-cffi = ">=25.1.0"
 starlette = ">=0.37.2"
 uvicorn = { extras = ["standard"], version = ">=0.29.0" }

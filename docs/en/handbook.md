@@ -5,12 +5,16 @@
 ## Overview
 
 Munin is a durable, operator-governed runtime for autonomous security
-operations. It combines a Web GUI, authenticated API, MCP, optional Discord,
-LangGraph execution, durable events, checkpoints, human approvals, live
-capability composition, Hugin knowledge and Valravn reconnaissance.
+operations. It combines the Discord operator surface, authenticated API, MCP,
+evolving Web GUI, LangGraph execution, durable events, checkpoints, human
+approvals, live capability composition, Hugin knowledge and Valravn
+reconnaissance.
 
-The verified v1.0.0 configuration is **Web GUI + GitHub Actions + MiMo V2.5**.
-Other models and deployments may work but remain experimental until documented.
+The verified v1.1.0 configuration is **Discord adapter + GitHub Actions +
+DeepSeek V4-Flash**. The Web GUI is the target long-term interface but is under repair
+after live-session frontend bugs; treat GUI-only claims as unverified until the
+repair loop passes. Other models and deployments may work but remain
+experimental until documented.
 
 ## Core model
 
@@ -31,10 +35,10 @@ flowchart LR
 
 ## Interfaces
 
-The Web GUI is the primary v1.0.0 interface. `/api/*` serves authenticated
-application operations. `/mcp/` exposes the live capability surface. Discord is
-an optional remote view into the same server-owned operation. None of these
-clients owns independent authority.
+Discord is the stable v1.1.0 operator surface: presence, commands, threads and
+approvals. The Web GUI remains in active development. `/api/*` serves
+authenticated application operations. `/mcp/` exposes the live capability
+surface. None of these clients owns independent authority.
 
 ## Runs, events and recovery
 
@@ -84,7 +88,8 @@ Soul never grants authorization, tools or scope.
 
 ## Deployment
 
-For v1.0.0, the tested path is the Web GUI on GitHub Actions with MiMo V2.5.
+For v1.1.0, the tested path is the Discord adapter on GitHub Actions with
+DeepSeek V4-Flash. The Web GUI follows once its repair loop passes.
 Ephemeral runners require explicit persistence through artifacts or remote
 storage. Production deployments need durable volumes, protected ingress,
 strong secrets, strict origins and retention controls.

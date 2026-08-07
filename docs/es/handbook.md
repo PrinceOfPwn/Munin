@@ -5,12 +5,17 @@
 ## Descripción general
 
 Munin es un runtime durable y gobernado por operadores para operaciones
-autónomas de seguridad. Integra GUI web, API autenticada, MCP, Discord opcional,
-ejecución LangGraph, eventos persistentes, checkpoints, aprobaciones humanas,
-composición viva de capacidades, conocimiento Hugin y reconocimiento Valravn.
+autónomas de seguridad. Integra el adaptador Discord (superficie operador), API
+autenticada, MCP, GUI web en desarrollo, ejecución LangGraph, eventos
+persistentes, checkpoints, aprobaciones humanas, composición viva de
+capacidades, conocimiento Hugin y reconocimiento Valravn.
 
-La configuración verificada de v1.0.0 es **GUI web + GitHub Actions + MiMo V2.5**.
-Otras combinaciones pueden funcionar, pero son experimentales hasta documentarse.
+La configuración verificada de v1.1.0 es **adaptador Discord + GitHub Actions +
+DeepSeek V4-Flash**. La GUI web es la interfaz objetivo a largo plazo, pero sigue en
+reparación tras bugs de frontend detectados en sesiones en vivo; trata las
+afirmaciones solo-GUI como no verificadas hasta que pase el ciclo de arreglo.
+Otras combinaciones pueden funcionar, pero son experimentales hasta
+documentarse.
 
 ## Modelo central
 
@@ -21,9 +26,10 @@ preservan lo ocurrido.
 
 ## Interfaces
 
-La GUI web es la interfaz principal de v1.0.0. `/api/*` expone operaciones
-autenticadas, `/mcp/` publica capacidades vivas y Discord es una ventana opcional
-a la misma operación. Ninguna interfaz crea autoridad propia.
+Discord es la superficie de operador estable de v1.1.0: presencia, comandos,
+threads y aprobaciones. La GUI web sigue en desarrollo activo. `/api/*` expone
+operaciones autenticadas, `/mcp/` publica capacidades vivas. Ninguna interfaz
+crea autoridad propia.
 
 ## Runs, eventos y recuperación
 
@@ -74,7 +80,8 @@ autorización, tools ni alcance.
 
 ## Despliegue
 
-El camino verificado es GUI web en GitHub Actions con MiMo V2.5. Los runners
+El camino verificado es adaptador Discord en GitHub Actions con DeepSeek V4-Flash. La
+GUI web se une una vez que pase su ciclo de reparación. Los runners
 efímeros requieren persistencia explícita mediante artifacts o almacenamiento
 remoto. Producción necesita volúmenes durables, ingreso protegido, secretos
 fuertes, orígenes estrictos y políticas de retención.

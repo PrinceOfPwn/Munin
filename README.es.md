@@ -28,26 +28,31 @@
 > [!WARNING]
 > **Solo para uso autorizado.** Munin está diseñado para investigación legítima de seguridad, inteligencia de amenazas y operaciones controladas de red team. El operador es responsable de obtener autorización, definir alcance, proteger credenciales, evaluar impacto y cumplir la legislación aplicable.
 
-## Configuración verificada de v1.0.0
+## Configuración verificada de v1.1.0
 
 > [!IMPORTANT]
-> La configuración probada y verificada para **Munin v1.0.0** es la **GUI web ejecutada mediante GitHub Actions usando MiMo V2.5** como modelo.
+> La configuración probada y verificada para **Munin v1.1.0** es el **adaptador de Discord ejecutado mediante GitHub Actions usando DeepSeek V4-Flash** como modelo.
 >
-> Otros proveedores, modelos, destinos de despliegue e interfaces pueden funcionar, pero no forman parte de la configuración verificada de v1.0.0 salvo que se documenten explícitamente.
+> **Discord es la superficie de operador estable hoy.** La GUI web es la interfaz
+> objetivo a largo plazo, pero las sesiones en vivo detectaron bugs de frontend
+> que aún se están arreglando; hasta que pase el ciclo de reparación, Discord es
+> la superficie de referencia para operaciones completas.
+>
+> Otros proveedores, modelos, destinos de despliegue e interfaces pueden funcionar, pero no forman parte de la configuración verificada de v1.1.0 salvo que se documenten explícitamente.
 
 | Componente | Configuración verificada |
 | --- | --- |
-| Versión | **Munin v1.0.0** |
-| Interfaz | **GUI web** |
+| Versión | **Munin v1.1.0** |
+| Interfaz | **Adaptador Discord** (GUI web en reparación) |
 | Entorno de ejecución | **GitHub Actions** |
-| Modelo | **MiMo V2.5** |
+| Modelo | **DeepSeek V4-Flash** |
 
 ```mermaid
 flowchart LR
-    Operador --> GUI[GUI web de Munin]
-    GUI --> Actions[Runner de GitHub Actions]
-    Actions --> Runtime[Munin v1.0.0]
-    Runtime --> Modelo[MiMo V2.5]
+    Operador --> Discord[Superficie Discord de Munin]
+    Discord --> Actions[Runner de GitHub Actions]
+    Actions --> Runtime[Munin v1.1.0]
+    Runtime --> Modelo[DeepSeek V4-Flash]
     Runtime --> Evidencia[Eventos, reportes y evidencia durable]
 ```
 
@@ -280,7 +285,7 @@ No. Una skill aporta contexto e instrucciones. Tool access, alcance y aprobació
 
 ### ¿Puedo usar otro modelo?
 
-Posiblemente, pero la configuración verificada de v1.0.0 es GUI + GitHub Actions + MiMo V2.5.
+Posiblemente, pero la configuración verificada de v1.1.0 es adaptador Discord + GitHub Actions + DeepSeek V4-Flash.
 
 ## Licencia
 

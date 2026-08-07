@@ -1,4 +1,4 @@
-# tags: [mcp, mcp-tool, soul, memory, episodic-memory, subagent, orchestrator, list_generated_tools, munin_chat, munin_wake, soul_propose_edit, munin_read_source, munin_self_diagnose, read_wake_artifact, turso_conversation]
+# tags: [mcp, mcp-tool, soul, memory, episodic-memory, subagent, orchestrator, list_generated_tools, munin_chat, munin_wake, soul_propose_edit, munin_read_source, munin_self_diagnose, read_wake_artifact, turso_conversation, memory-scoping, conversation_id, actor_id, scope]
 """Munin-native MCP tools: wake/sleep orchestration, soul I/O, memory helpers, and
 the catalog of generated tools (`list_generated_tools`) that Munin queries every ReAct
 step before invoking `tool_forge`."""
@@ -341,21 +341,39 @@ def soul_propose_edit(path: str, new_content: str, rationale: str = "", run_id: 
 
 @MCP.tool()
 @audited_tool("memory_remember", "documentation", lambda *a, **k: "sync")
-def memory_remember(key: str, value_json: str, run_id: str = "") -> dict[str, Any]:
-    """Persist a semantic fact to shared_state.sqlite."""
+def memory_remember(
+    key: str,
+    value_json: str,
+    scope: str = "conversation",
+    run_id: str = "",
+    conversation_id: str = "",
+    actor_id: str = "",
+) -> dict[str, Any]:
+    """Persist a semantic fact to shared_state.sqlite.
+
+    scope controls the memory tier: "conversation" (default, this
+    conversation only), "user" (shared across this operator's
+    conversations) or "global" (visible to every conversation).
+    """
     try:
         value = json.loads(value_json)
     except Exception as exc:
         return {"ok": False, "tool": "memory_remember", "mode": "sync", "summary": "bad value_json", "error": {"code": "bad_input", "message": str(exc)}}
-    row = STATE.semantic_remember(key, value)
+    if scope == "global":
+        eff_conv, eff_actor = "", ""
+    elif scope == "user":
+        eff_conv, eff_actor = "", actor_id
+    else:
+        eff_conv, eff_actor = conversation_id, actor_id
+    row = STATE.semantic_remember(key, value, conversation_id=eff_conv, actor_id=eff_actor)
     return {"ok": True, "tool": "memory_remember", "mode": "sync", "summary": f"remembered {key}", "data": row}
 
 
 @MCP.tool()
 @audited_tool("memory_recall", "passive", lambda *a, **k: "sync")
-def memory_recall(key: str, run_id: str = "") -> dict[str, Any]:
-    """Recall a semantic fact."""
-    value = STATE.semantic_recall(key)
+def memory_recall(key: str, run_id: str = "", conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
+    """Recall a semantic fact (this conversation + legacy/global rows)."""
+    value = STATE.semantic_recall(key, conversation_id=conversation_id, actor_id=actor_id)
     if value is None:
         return {"ok": False, "tool": "memory_recall", "mode": "sync", "summary": "not found", "error": {"code": "not_found", "message": key}}
     return {"ok": True, "tool": "memory_recall", "mode": "sync", "summary": f"recalled {key}", "data": {"key": key, "value": value}}
@@ -363,20 +381,20 @@ def memory_recall(key: str, run_id: str = "") -> dict[str, Any]:
 
 @MCP.tool()
 @audited_tool("memory_list", "passive", lambda *a, **k: "sync")
-def memory_list(prefix: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
-    """List semantic facts. Filter by key prefix."""
+def memory_list(prefix: str = "", limit: int = 100, run_id: str = "", conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
+    """List semantic facts. Filter by key prefix (this conversation + legacy/global rows)."""
     # Coerce limit at tool boundary. Some MCP clients ship integer-typed params as
     # strings; propagating a string into the store previously triggered a TypeError
     # on `min(int, str)`. See _coerce_int docstring for detail.
-    rows = STATE.semantic_list(prefix=prefix, limit=_coerce_int(limit, 100))
+    rows = STATE.semantic_list(prefix=prefix, limit=_coerce_int(limit, 100), conversation_id=conversation_id, actor_id=actor_id)
     return {"ok": True, "tool": "memory_list", "mode": "sync", "summary": f"{len(rows)} facts", "data": {"facts": rows, "count": len(rows)}}
 
 
 @MCP.tool()
 @audited_tool("episodic_query", "passive", lambda *a, **k: "sync")
-def episodic_query(agent: str = "", action: str = "", limit: int = 100, run_id: str = "") -> dict[str, Any]:
+def episodic_query(agent: str = "", action: str = "", limit: int = 100, run_id: str = "", conversation_id: str = "", actor_id: str = "") -> dict[str, Any]:
     """Recent episodic events (tool calls, ReAct steps, orchestrator decisions)."""
-    rows = STATE.episodic_query(agent=agent, action=action, limit=_coerce_int(limit, 100))
+    rows = STATE.episodic_query(agent=agent, action=action, limit=_coerce_int(limit, 100), conversation_id=conversation_id, actor_id=actor_id)
     return {"ok": True, "tool": "episodic_query", "mode": "sync", "summary": f"{len(rows)} events", "data": {"events": rows, "count": len(rows)}}
 
 

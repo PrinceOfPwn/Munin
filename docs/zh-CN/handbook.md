@@ -4,12 +4,13 @@
 
 ## 概览
 
-Munin 是一个由操作员治理、面向自主安全行动的持久化运行时。它整合 Web GUI、认证 API、
-MCP、可选 Discord、LangGraph 执行、持久化事件、checkpoint、人工审批、实时能力组合、
-Hugin 知识和 Valravn 侦察。
+Munin 是一个由操作员治理、面向自主安全行动的持久化运行时。它整合 Discord 操作员适配器
+（稳定操作面）、认证 API、MCP、持续开发的 Web GUI、LangGraph 执行、持久化事件、
+checkpoint、人工审批、实时能力组合、Hugin 知识和 Valravn 侦察。
 
-v1.0.0 的已验证配置是 **Web GUI + GitHub Actions + MiMo V2.5**。其他组合可能可用，
-但在明确记录之前均视为实验性配置。
+v1.1.0 的已验证配置是 **适配器 Discord + GitHub Actions + DeepSeek V4-Flash**。Web GUI 是
+长期目标界面，但在实时会话前端 bug 修复通过前视为维修状态；仅限 GUI 的说法视为未验证。
+其他组合可能可用，但在明确记录之前均视为实验性配置。
 
 ## 核心模型
 
@@ -18,8 +19,8 @@ Munin 将知识、权限、执行和证据分离。知识可以建议路线；�
 
 ## 接口
 
-Web GUI 是 v1.0.0 的主要界面。`/api/*` 提供认证操作，`/mcp/` 暴露实时能力，Discord
-是同一服务器运行的可选窗口。任何客户端都不拥有独立权限。
+Discord 是 v1.1.0 的稳定操作面：状态、命令、线程与审批。Web GUI 仍在积极开发。
+`/api/*` 提供认证操作，`/mcp/` 暴露实时能力。任何客户端都不拥有独立权限。
 
 ## 运行、事件与恢复
 
@@ -62,7 +63,8 @@ Hugin 提供带来源的被动知识。Valravn 收集 IOC、CVE、资产、历�
 
 ## 部署
 
-已验证路径是 GitHub Actions 上的 Web GUI 与 MiMo V2.5。临时 runner 需要通过 artifact
+已验证路径是 GitHub Actions 上的适配器 Discord 与 DeepSeek V4-Flash。Web GUI 在修复循环
+通过后加入。临时 runner 需要通过 artifact
 或远程存储显式持久化。生产环境需要持久卷、受保护入口、强秘密、严格来源和保留策略。
 
 ## 安全模型

@@ -5,12 +5,16 @@
 ## Visão geral
 
 Munin é um runtime durável e governado por operadores para operações autônomas
-de segurança. Ele reúne GUI web, API autenticada, MCP, Discord opcional,
-LangGraph, eventos persistentes, checkpoints, aprovações humanas, composição de
-capacidades, conhecimento Hugin e reconhecimento Valravn.
+de segurança. Ele reúne o adaptador Discord (superfície de operador), API
+autenticada, MCP, GUI web em desenvolvimento, LangGraph, eventos persistentes,
+checkpoints, aprovações humanas, composição de capacidades, conhecimento Hugin
+e reconhecimento Valravn.
 
-A configuração verificada da v1.0.0 é **GUI web + GitHub Actions + MiMo V2.5**.
-Outras combinações podem funcionar, mas são experimentais até serem documentadas.
+A configuração verificada da v1.1.0 é **adaptador Discord + GitHub Actions +
+DeepSeek V4-Flash**. A GUI web é a interface alvo de longo prazo, mas está em reparo
+após bugs de frontend encontrados em sessões ao vivo; trate afirmações somente-
+GUI como não verificadas até o ciclo de correção passar. Outras combinações
+podem funcionar, mas são experimentais até serem documentadas.
 
 ## Modelo central
 
@@ -21,9 +25,10 @@ aconteceu.
 
 ## Interfaces
 
-A GUI web é a interface principal da v1.0.0. `/api/*` oferece operações
-autenticadas, `/mcp/` expõe capacidades vivas e Discord é uma janela opcional
-para a mesma operação. Nenhuma interface possui autoridade independente.
+Discord é a superfície de operador estável da v1.1.0: presença, comandos,
+threads e aprovações. A GUI web segue em desenvolvimento ativo. `/api/*` oferece
+operações autenticadas, `/mcp/` expõe capacidades vivas. Nenhuma interface
+possui autoridade independente.
 
 ## Runs, eventos e recuperação
 
@@ -74,7 +79,8 @@ tools ou escopo.
 
 ## Implantação
 
-O caminho verificado é GUI web no GitHub Actions com MiMo V2.5. Runners efêmeros
+O caminho verificado é adaptador Discord no GitHub Actions com DeepSeek V4-Flash. A GUI
+web entra assim que passar seu ciclo de correção. Runners efêmeros
 exigem persistência explícita por artifacts ou armazenamento remoto. Produção
 precisa de volumes duráveis, ingresso protegido, segredos fortes, origens
 restritas e políticas de retenção.

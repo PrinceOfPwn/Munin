@@ -50,27 +50,32 @@ Munin's research prompts use **ROGUE mode by default**: an intentionally aggress
 
 Parts of the internal control language are written in **Simplified Chinese** because it offers compact human-readable instructions and can align naturally with Chinese-developed model families used during testing. This is an empirical design choice, not a claim that Chinese is always cheaper in tokens or universally better. See [Prompt design, validation matrix and references](README.PROMPTS.md).
 
-## Verified v1.0.0 configuration
+## Verified v1.1.0 configuration
 
 > [!IMPORTANT]
-> The tested and verified operating configuration for **Munin v1.0.0** is the **web GUI running through GitHub Actions with MiMo V2.5** as the model.
+> The tested and verified operating configuration for **Munin v1.1.0** is the **Discord community adapter running through GitHub Actions with DeepSeek V4-Flash Free** (`deepseek-v4-flash-free`, via OpenCode Zen) as the model.
 >
-> Other providers, models, deployment targets and control surfaces may work, but they are not part of the verified v1.0.0 configuration unless explicitly documented.
+> **Discord is the stable operator surface today.** The Web GUI is the target
+> long-term interface, but live-session testing exposed frontend bugs that are
+> still being fixed; until the GUI repair loop passes end-to-end, Discord is the
+> reference surface for full operations.
+>
+> Other providers, models, deployment targets and control surfaces may work, but they are not part of the verified v1.1.0 configuration unless explicitly documented.
 
 | Component | Verified configuration |
 | --- | --- |
-| Version | **Munin v1.0.0** |
-| Interface | **Web GUI** |
+| Version | **Munin v1.1.0** |
+| Interface | **Discord community adapter** (Web GUI under repair) |
 | Execution environment | **GitHub Actions** |
-| Model | **MiMo V2.5** |
+| Model | **DeepSeek V4-Flash Free** (`deepseek-v4-flash-free`) |
 
 ```mermaid
 flowchart LR
-    Operator[Operator] --> GUI[Munin Web GUI]
-    GUI --> Actions[GitHub Actions runner]
-    Actions --> Runtime[Munin v1.0.0]
-    Runtime --> Model[MiMo V2.5]
-    Runtime --> Evidence[Durable events, reports and evidence]
+    operator["Operator"] --> discord["Munin Discord surface"]
+    discord --> actions["GitHub Actions runner"]
+    actions --> runtime["Munin v1.1.0"]
+    runtime --> model["DeepSeek V4-Flash"]
+    runtime --> evidence["Durable events, reports and evidence"]
 ```
 
 ## Why Munin
@@ -422,13 +427,30 @@ Not under the noncommercial licence when the use has a commercial application. A
 
 No. Skills provide context and instructions. Tool access, scope and approval are separate runtime controls.
 
-### Can I use a model other than MiMo V2.5?
+### Can I use a model other than DeepSeek V4-Flash?
 
-Potentially. However, the verified v1.0.0 configuration is the GUI on GitHub Actions with MiMo V2.5.
+Potentially. However, the verified v1.1.0 configuration is the Discord adapter on GitHub Actions with DeepSeek V4-Flash Free (`deepseek-v4-flash-free`, via OpenCode Zen).
 
 ### Does Munin replace analyst judgement?
 
 No. It preserves evidence, state and decisions so analysts can review and govern the operation more effectively.
+
+## Active development
+
+The `v1.1.0` contract above is the verified baseline. Work in progress lives
+on the `feat/discord-community-adapter` branch ([PR #52](https://github.com/PrinceOfPwn/Munin/pull/52)),
+which adds a Discord community/DM control surface alongside the web GUI and
+ships a hotfix for post-approval resume amnesia:
+
+- **HITL resume amnesia fix** (commit `f686766`): MiMo V2.5 lost thread after
+  an operator approved a tool via the HITL surface. Munin now uses a hybrid
+  resume — `Command(resume={"decisions": [...]}, update={"messages": [HumanMessage(...)]})`
+  — so the model sees both the checkpointed graph state (deepagents way)
+  and an explicit continuation directive naming the original objective
+  (opencode-style projected-history reload). See `changes.md`.
+- **Compaction raised to 170K tokens** (commit `69af42f`): Munin keeps full
+  long-context runs instead of compacting at the 60K framework default and
+  losing tool evidence mid-campaign.
 
 ## License
 

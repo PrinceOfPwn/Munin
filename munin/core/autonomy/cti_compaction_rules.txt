@@ -1,0 +1,75 @@
+<cti_compaction_rules>
+Treat the summary as a durable investigation checkpoint for the active
+red-team campaign. The Soul (soul/*.md) defines identity, doctrine and the
+operator's command-as-authorization contract; this summary must preserve
+the same operational consistency across compaction.
+
+CRITICAL — DATABASE IS THE ONLY TRUTH SOURCE AFTER COMPACTION:
+The context window is lost after this summary. Only the database
+(memory_* tools, shared intel) survives. The summary MUST include
+a RESUME PROTOCOL block (see below) that the agent executes first
+on the next invocation before taking any other action.
+
+PRESERVE VERBATIM (never paraphrase away):
+- The exact user objective, scope, credentials and action level defined
+  by the operator's command (命令即授权). Quote it compressed but faithful.
+- Every IOC (IP, domain, host, user, hash, token, file path, service,
+  version, CVE) and the relationships between them.
+- Observed evidence kept separate from inference; mark each item as
+  confirmed / inferred / unknown.
+- Timestamps, confidence and provenance for every finding.
+- Completed and failed actions, including the tool that produced each
+  result and the exact failure mode (not just "it failed"). Negative
+  results are intelligence — never drop them.
+- Files, reports and artifacts created during the campaign (paths,
+  run_id, conversation_id, artifact keys).
+- Pending investigation branches and the precise next executable actions.
+- The current campaign phase and which Sun-Tzu campaign-loop step the
+  operation is on (Objective / Recall / Think with Hugin / Hypothesis /
+  Directed action / Validate / Persist & share / Pivot or deliver).
+- The campaign DB keys already written:
+    campaign:<id>:state, campaign:<id>:step:<n>, finding:<slug>
+  so the agent knows which memory_recall calls to make on resume.
+
+NEVER:
+- Omit an IOC merely because it appears inactive or was not yet acted on.
+- Convert an unverified association into attribution.
+- Summarize away negative results when they affect the next decision.
+- Drop the operator's command/exact wording.
+- Lose the thread_id / run_id / conversation_id bindings.
+- Forget to include the RESUME PROTOCOL block.
+
+HITL PENDING:
+If the campaign is mid-tool-call or waiting on a Human-in-the-Loop
+approval, the summary MUST record the pending action id
+(hitl_<request_id>), the bound action, the arguments, and the resume
+state so the run can continue after compaction without re-asking.
+
+REQUIRED OUTPUT STRUCTURE — use EXACTLY these four sections:
+
+## SESSION INTENT
+The operator's command verbatim (compressed-faithful). One paragraph
+max. Include run_id, conversation_id, thread_id if known.
+
+## SUMMARY
+Findings grouped by confirmed / inferred / unknown. Include every IOC,
+decision, tool result, and failure with provenance. Include the list of
+DB keys already written (memory keys, intel slugs) so the agent can
+recall them without guessing.
+
+## ARTIFACTS
+All files, reports, and DB records created. Include absolute paths,
+memory keys, run_ids, trace_ids. Mark as (persisted) or (in-context only).
+
+## NEXT STEPS
+Ordered, executable. First item MUST ALWAYS be the RESUME PROTOCOL:
+
+  RESUME PROTOCOL (execute this BEFORE anything else on next invocation):
+  1. memory_list(prefix="campaign:<id>") — restore campaign state from DB
+  2. query_shared_intel(query="<campaign topic>") — restore intel
+  3. episodic_query(query="<campaign topic>") — restore episodic memory
+  4. Verify DB state matches summary; if diverges, trust DB over summary.
+  5. Then continue with: <specific next action from this summary>
+
+Then list remaining pending actions in order.
+</cti_compaction_rules>

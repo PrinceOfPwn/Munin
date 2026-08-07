@@ -278,6 +278,11 @@ class LLMClient:
     def make_langchain(self) -> Any:
         from langchain_openai import ChatOpenAI
 
+        # DeepSeek V4 thinking-mode models need the reasoning_content contract;
+        # anything else keeps the plain OpenAI-compatible path.
+        if "deepseek" in (self.settings.llm_model or "").lower():
+            return make_deepseek_thinking_langchain(self.settings)
+
         return ChatOpenAI(
             model=self.settings.llm_model,
             api_key=self.settings.llm_api_key,
@@ -286,3 +291,118 @@ class LLMClient:
             timeout=self._compute_timeout(),
             max_retries=3,
         )
+
+
+def make_deepseek_thinking_langchain(settings: Settings, *, effort: str = "max") -> Any:
+    """Build a ChatOpenAI tuned for DeepSeek V4 thinking-mode models.
+
+    DeepSeek's thinking-mode contract (``api-docs.deepseek.com/guides/thinking_mode``)
+    requires two things that plain ``ChatOpenAI`` (langchain-openai >=1.4.1) does
+    not provide:
+
+    1. Assistant messages that participated in a tool-call turn must include
+       ``reasoning_content`` on every subsequent request; omitting it makes the
+       provider reject the chat with HTTP 400 ("The ``reasoning_content`` in the
+       thinking mode must be passed back to the API").
+    2. The ``reasoning_content`` delta must be captured from the stream so Munin
+       can replay it as ``provider_reasoning`` envelopes (Discord, event store).
+
+    The reference implementation for (2) is ``ChatDeepSeek`` in the langchain
+    partner package: it overrides
+    ``_convert_chunk_to_generation_chunk(self, chunk, default_chunk_class,
+    base_generation_info)`` to extract ``choices[0].delta.reasoning_content``
+    into ``AIMessageChunk.additional_kwargs``. ``ChatDeepSeek`` does NOT do (1),
+    so tool-call turns against the raw DeepSeek API still fail with the same
+    HTTP 400 once reasoning state has started.
+
+    This helper returns a ``DeepSeekThinkingChatOpenAI`` subclass that:
+    - forces thinking enabled via ``extra_body={"thinking": {"type": "enabled"},
+      "reasoning_effort": effort}`` (default ``max`` per operator directive);
+    - reimplements the streaming capture exactly like ``ChatDeepSeek``; and
+    - re-injects ``reasoning_content`` (empty-string fallback) on every assistant
+      message via a ``_get_request_payload`` override, which is the canonical
+      ``BaseChatOpenAI`` instance method that assembles the chat-completions
+      payload (langchain-openai 1.x signatures verified 2026-08-07).
+    """
+    from langchain_openai import ChatOpenAI
+
+    class DeepSeekThinkingChatOpenAI(ChatOpenAI):  # type: ignore[misc]
+        """ChatOpenAI subclass satisfying the DeepSeek V4 thinking contract."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            extra = dict(kwargs.get("extra_body") or {})
+            extra.update({"thinking": {"type": "enabled"}, "reasoning_effort": effort})
+            kwargs["extra_body"] = extra
+            if "model_kwargs" in kwargs:
+                kwargs.pop("model_kwargs")
+            super().__init__(**kwargs)
+
+        def _convert_chunk_to_generation_chunk(
+            self,
+            chunk: dict,
+            default_chunk_class: type,
+            base_generation_info: dict | None,
+        ) -> Any:
+            # Mirrors ChatDeepSeek._convert_chunk_to_generation_chunk so the
+            # provider reasoning delta ends up on AIMessageChunk.additional_kwargs,
+            # where runtime_adapter._stream_parts reads it to emit
+            # provider_reasoning envelopes (Discord streaming + replay).
+            generation = super()._convert_chunk_to_generation_chunk(
+                chunk, default_chunk_class, base_generation_info
+            )
+            if generation is None:
+                return generation
+            choices = chunk.get("choices") if isinstance(chunk, dict) else None
+            if choices:
+                top = choices[0]
+                delta = top.get("delta", {}) if isinstance(top, dict) else {}
+                reasoning = delta.get("reasoning_content")
+                if reasoning is None:
+                    # OpenRouter compatibility alias.
+                    reasoning = delta.get("reasoning")
+                if reasoning is not None:
+                    current = generation.message.additional_kwargs or {}
+                    generation.message.additional_kwargs = {
+                        **current,
+                        "reasoning_content": reasoning,
+                    }
+            return generation
+
+        def _get_request_payload(
+            self,
+            input_: Any,
+            *,
+            stop: list[str] | None = None,
+            **kwargs: Any,
+        ) -> dict[str, Any]:
+            # The chat-completions payload builder on BaseChatOpenAI (1.x). We
+            # keep the messages list aligned by index with the converted
+            # BaseMessage list and re-attach reasoning_content (empty string
+            # fallback) on every assistant entry so DeepSeek thinking-mode accepts
+            # tool-call turns that follow a reasoning-producing step.
+            payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            messages_list: list[Any] = []
+            try:
+                messages_list = self._convert_input(input_).to_messages()
+            except Exception:  # noqa: BLE001
+                # If conversion fails here, the super() call already raised; we
+                # never reach this branch in practice. Keep the safe no-op.
+                messages_list = []
+            dict_messages = payload.get("messages") or []
+            for dict_msg, base_msg in zip(dict_messages, messages_list):
+                if not isinstance(dict_msg, dict):
+                    continue
+                if dict_msg.get("role") != "assistant":
+                    continue
+                extra = getattr(base_msg, "additional_kwargs", None) or {}
+                dict_msg["reasoning_content"] = str(extra.get("reasoning_content") or "")
+            return payload
+
+    return DeepSeekThinkingChatOpenAI(
+        model=settings.llm_model,
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        temperature=0.2,
+        timeout=float(getattr(settings, "llm_timeout_floor", 40)),
+        max_retries=3,
+    )

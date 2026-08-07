@@ -19,7 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Union, get_args, get_origin
 
 from .config import Settings, safe_slug
 from .shared_state import SharedStateStore
@@ -506,24 +506,78 @@ def purge_all(state: SharedStateStore) -> int:
     return state.procedural_purge_all()
 
 
+def _annotation_to_json_schema(annotation: Any) -> dict[str, Any]:
+    """Map one type annotation to a JSON-Schema fragment.
+
+    Handles plain scalars (int/float/bool/str) and generic containers
+    (``list[T]``, ``dict[K, V]``, ``tuple[...]``), plus ``Optional``/``Union``
+    (including PEP 604 ``X | Y``) and ``Literal``. Anything unrecognised
+    degrades to ``{"type": "string"}`` so a stale annotation never breaks the
+    persisted schema.
+    """
+    import types as _types
+
+    if isinstance(annotation, str):
+        # PEP 563 string-deferred annotation; we cannot resolve it without a
+        # namespace, so treat it as opaque (same fallback as before).
+        return {"type": "string"}
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    # Union / Optional / X | Y
+    union_types = (Union, getattr(_types, "UnionType", Union))
+    if origin in union_types:
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            inner = _annotation_to_json_schema(non_none[0])
+            inner["nullable"] = True
+            return inner
+        if non_none:
+            return {"anyOf": [_annotation_to_json_schema(a) for a in non_none]}
+        return {"type": "null"}
+
+    if origin is Literal:
+        enum = list(args)
+        value_type = "string"
+        if all(isinstance(v, int) and not isinstance(v, bool) for v in enum):
+            value_type = "integer"
+        elif all(isinstance(v, float) for v in enum):
+            value_type = "number"
+        elif all(isinstance(v, bool) for v in enum):
+            value_type = "boolean"
+        return {"type": value_type, "enum": enum}
+
+    if origin is list or annotation is list:
+        items = _annotation_to_json_schema(args[0]) if args else {}
+        return {"type": "array", "items": items}
+    if origin is tuple or annotation is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return {"type": "array", "items": _annotation_to_json_schema(args[0])}
+        return {"type": "array"}
+    if origin is dict or annotation is dict:
+        value_schema = _annotation_to_json_schema(args[1]) if len(args) == 2 else {}
+        return {"type": "object", "additionalProperties": value_schema}
+
+    # Plain scalars
+    if annotation is int:
+        return {"type": "integer"}
+    if annotation is float:
+        return {"type": "number"}
+    if annotation is bool:
+        return {"type": "boolean"}
+    if annotation is str:
+        return {"type": "string"}
+    return {"type": "string"}
+
+
 def signature_to_json_schema(sig: inspect.Signature) -> dict[str, Any]:
     """Best-effort inspect.Signature → JSON schema. Used by tool_forge before persistence."""
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, param in sig.parameters.items():
         annotation = param.annotation if param.annotation is not inspect._empty else str
-        json_type = "string"
-        if annotation in (int,):
-            json_type = "integer"
-        elif annotation in (float,):
-            json_type = "number"
-        elif annotation in (bool,):
-            json_type = "boolean"
-        elif annotation in (list, tuple):
-            json_type = "array"
-        elif annotation in (dict,):
-            json_type = "object"
-        properties[name] = {"type": json_type}
+        properties[name] = _annotation_to_json_schema(annotation)
         if param.default is inspect._empty:
             required.append(name)
         else:

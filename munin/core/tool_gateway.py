@@ -1,4 +1,4 @@
-# tags: [mcp-tool, capabilities, registry, core, runtime, get_langchain_tools, catalog_names, StructuredTool, _STATE_BOUND_TOOL_NAMES, FastMCP, _registered_mcp_tools, _active_generated_names, _HIDDEN_PARAMS, ToolManager, gen__-tool-wrapping]
+# tags: [mcp-tool, capabilities, registry, core, runtime, get_langchain_tools, catalog_names, StructuredTool, _STATE_BOUND_TOOL_NAMES, FastMCP, _registered_mcp_tools, _active_generated_names, _HIDDEN_PARAMS, ToolManager, gen__-tool-wrapping, _bind_runtime_context, memory-scoping, conversation_id, actor_id]
 """
 Tool Gateway — exposes every *registered* Munin MCP tool, state-bound domain
 tool, and generated ``gen__*`` tool as LangChain ``StructuredTool`` instances
@@ -29,7 +29,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Parameters injected by the operator/runtime, never by the model.
-_HIDDEN_PARAMS = frozenset({"run_id"})
+_HIDDEN_PARAMS = frozenset({"run_id", "conversation_id", "actor_id"})
 
 # Names of the state-bound tools produced by the ``_make_*`` factories in
 # ``munin.subagents.base``.  Kept in sync with that module — it is the same
@@ -123,47 +123,75 @@ def _strip_hidden_params(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
-def _bind_runtime_run_id(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Inject the graph run id only when a handler declares ``run_id``.
+def _bind_runtime_context(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Inject operator/runtime params only when a handler declares them.
 
-    The model never receives this parameter. Direct FastMCP calls keep an
-    empty run id and therefore cannot impersonate an approved graph run.
+    The model never receives these parameters. Direct FastMCP calls keep
+    empty values and therefore cannot impersonate an approved graph run
+    or borrow another conversation's memory scope.
+
+    Injected params:
+    * ``run_id`` from ``OperatorGuidanceMiddleware.ACTIVE_RUN_ID``
+    * ``conversation_id`` from ``ACTIVE_CONVERSATION_ID`` (3-tier memory scope)
+    * ``actor_id`` from ``ACTIVE_ACTOR_ID`` (per-user memory scope)
     """
     try:
-        if "run_id" not in inspect.signature(fn).parameters:
+        sig = inspect.signature(fn)
+        needs_run_id = "run_id" in sig.parameters
+        needs_conversation_id = "conversation_id" in sig.parameters
+        needs_actor_id = "actor_id" in sig.parameters
+        if not (needs_run_id or needs_conversation_id or needs_actor_id):
             return fn
     except (TypeError, ValueError):
         return fn
 
-    def active_run_id() -> str:
+    def _active_context() -> dict[str, str]:
+        ctx: dict[str, str] = {}
         try:
-            from .middleware.operator_guidance import ACTIVE_RUN_ID  # noqa: PLC0415
+            if needs_run_id:
+                from .middleware.operator_guidance import ACTIVE_RUN_ID  # noqa: PLC0415
 
-            return str(ACTIVE_RUN_ID.get() or "")
+                ctx["run_id"] = str(ACTIVE_RUN_ID.get() or "")
+            if needs_conversation_id:
+                from .autonomy.context import ACTIVE_CONVERSATION_ID  # noqa: PLC0415
+
+                ctx["conversation_id"] = str(ACTIVE_CONVERSATION_ID.get() or "")
+            if needs_actor_id:
+                from .autonomy.context import ACTIVE_ACTOR_ID  # noqa: PLC0415
+
+                ctx["actor_id"] = str(ACTIVE_ACTOR_ID.get() or "")
         except Exception:  # pragma: no cover - direct MCP / optional middleware
-            return ""
+            for key in ("run_id", "conversation_id", "actor_id"):
+                ctx.setdefault(key, "")
+        return ctx
 
     if inspect.iscoroutinefunction(fn):
         @wraps(fn)
         async def async_bound(*args: Any, **kwargs: Any) -> Any:
-            kwargs.setdefault("run_id", active_run_id())
+            for key, value in _active_context().items():
+                kwargs.setdefault(key, value)
             return await fn(*args, **kwargs)
 
         return async_bound
 
     @wraps(fn)
     def bound(*args: Any, **kwargs: Any) -> Any:
-        kwargs.setdefault("run_id", active_run_id())
+        for key, value in _active_context().items():
+            kwargs.setdefault(key, value)
         return fn(*args, **kwargs)
 
     return bound
+
+
+# Backwards-compatible alias — older call sites used the run_id-only binder.
+_bind_runtime_run_id = _bind_runtime_context
 
 
 def to_structured_tool(name: str, fn: Callable[..., Any]) -> Any:
     """Convert one catalog callable into a LangChain ``StructuredTool``."""
     from langchain_core.tools import StructuredTool  # noqa: PLC0415
 
-    fn = _strip_hidden_params(_bind_runtime_run_id(fn))
+    fn = _strip_hidden_params(_bind_runtime_context(fn))
     description = (inspect.getdoc(fn) or "").strip().split("\n")[0] or f"Munin tool {name}"
     if inspect.iscoroutinefunction(fn):
         return StructuredTool.from_function(

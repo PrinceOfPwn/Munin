@@ -14,6 +14,7 @@ against un-deferred annotations.
 
 import inspect
 import textwrap
+from typing import Literal
 
 
 def test_gen_prefix_and_rehydrate_active(isolated_workspace, store, monkeypatch):
@@ -123,6 +124,36 @@ def test_signature_to_json_schema_shape():
     assert "default" in schema["properties"]["count"]
     assert "text" in schema["required"]
     assert "count" not in schema["required"]
+
+
+def test_signature_to_json_schema_generics():
+    """Generic annotations no longer degrade to "string": list[T], dict[K,V],
+    Optional, Union, Literal are serialized into their real JSON-Schema shape."""
+    from munin.mcp.registry import signature_to_json_schema
+
+    def probe(
+        targets: list[dict],
+        config: dict[str, int],
+        maybe: int | None = None,
+        union: int | str = 0,
+        mode: Literal["fast", "deep"] = "fast",
+    ) -> dict:
+        ...
+
+    schema = signature_to_json_schema(inspect.signature(probe))
+    props = schema["properties"]
+
+    assert props["targets"]["type"] == "array"
+    assert props["targets"]["items"] == {"type": "object", "additionalProperties": {}}
+    assert props["config"]["type"] == "object"
+    assert props["config"]["additionalProperties"] == {"type": "integer"}
+    assert props["maybe"]["type"] == "integer"
+    assert props["maybe"]["nullable"] is True
+    assert props["union"]["anyOf"] == [{"type": "integer"}, {"type": "string"}]
+    assert props["mode"]["type"] == "string"
+    assert props["mode"]["enum"] == ["fast", "deep"]
+    assert "targets" in schema["required"]
+    assert "maybe" not in schema["required"]
 
 
 def test_max_iterations_clamp():

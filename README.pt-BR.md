@@ -29,26 +29,31 @@
 > [!WARNING]
 > **Somente para uso autorizado.** Munin foi criado para pesquisa legítima de segurança, inteligência de ameaças e operações controladas de red team. O operador é responsável por obter autorização, definir escopo, proteger credenciais, avaliar impacto e cumprir a legislação aplicável.
 
-## Configuração verificada da v1.0.0
+## Configuração verificada da v1.1.0
 
 > [!IMPORTANT]
-> A configuração testada e verificada para **Munin v1.0.0** é a **GUI web executada por GitHub Actions usando MiMo V2.5** como modelo.
+> A configuração testada e verificada para **Munin v1.1.0** é o **adaptador Discord executado por GitHub Actions usando DeepSeek V4-Flash** como modelo.
 >
-> Outros provedores, modelos, destinos de implantação e interfaces podem funcionar, mas não fazem parte da configuração verificada da v1.0.0 salvo documentação explícita.
+> **Discord é a superfície de operador estável hoje.** A GUI web é a interface
+> alvo de longo prazo, mas sessões ao vivo encontraram bugs de frontend ainda em
+> correção; até que o ciclo de reparo passe, Discord é a superfície de referência
+> para operações completas.
+>
+> Outros provedores, modelos, destinos de implantação e interfaces podem funcionar, mas não fazem parte da configuração verificada da v1.1.0 salvo documentação explícita.
 
 | Componente | Configuração verificada |
 | --- | --- |
-| Versão | **Munin v1.0.0** |
-| Interface | **GUI web** |
+| Versão | **Munin v1.1.0** |
+| Interface | **Adaptador Discord** (GUI web em reparo) |
 | Ambiente de execução | **GitHub Actions** |
-| Modelo | **MiMo V2.5** |
+| Modelo | **DeepSeek V4-Flash** |
 
 ```mermaid
 flowchart LR
-    Operador --> GUI[GUI web do Munin]
-    GUI --> Actions[Runner do GitHub Actions]
-    Actions --> Runtime[Munin v1.0.0]
-    Runtime --> Modelo[MiMo V2.5]
+    Operador --> Discord[Superfície Discord do Munin]
+    Discord --> Actions[Runner do GitHub Actions]
+    Actions --> Runtime[Munin v1.1.0]
+    Runtime --> Modelo[DeepSeek V4-Flash]
     Runtime --> Evidencia[Eventos, relatórios e evidências duráveis]
 ```
 
@@ -281,7 +286,7 @@ Não. Skills fornecem contexto e instruções. Tool access, escopo e aprovação
 
 ### Posso usar outro modelo?
 
-Possivelmente, mas a configuração verificada da v1.0.0 é GUI + GitHub Actions + MiMo V2.5.
+Possivelmente, mas a configuração verificada da v1.1.0 é adaptador Discord + GitHub Actions + DeepSeek V4-Flash.
 
 ## Licença
 

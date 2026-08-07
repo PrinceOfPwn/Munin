@@ -1,4 +1,4 @@
-# tags: [runtime, supervisor, orchestrator, core, langgraph, supervisor_runner, _split_think_tags, UNLIMITED_RECURSION_LIMIT, astream_events, _history_to_messages, _trailing_tag_prefix, DEFAULT_RECURSION_LIMIT, progress-envelopes, checkpoint-config, thread_id]
+# tags: [runtime, supervisor, orchestrator, core, langgraph, supervisor_runner, _split_think_tags, UNLIMITED_RECURSION_LIMIT, astream_events, _history_to_messages, _trailing_tag_prefix, DEFAULT_RECURSION_LIMIT, progress-envelopes, checkpoint-config, thread_id, ACTIVE_CONVERSATION_ID, ACTIVE_ACTOR_ID, memory-scoping]
 """
 Runtime adapter — the single execution path into the Deep Agents supervisor.
 
@@ -335,6 +335,7 @@ async def supervisor_runner(
     resume_from_checkpoint: bool = False,
     mode: Any = None,
     goal: dict[str, Any] | None = None,
+    actor_id: str = "",
 ) -> AsyncIterator[dict]:
     """Run one Munin turn through the Deep Agents supervisor.
 
@@ -350,6 +351,8 @@ async def supervisor_runner(
     from langchain_core.messages import HumanMessage  # noqa: PLC0415
 
     from .autonomy.context import (  # noqa: PLC0415
+        ACTIVE_ACTOR_ID,
+        ACTIVE_CONVERSATION_ID,
         ACTIVE_EMITTER,
         ACTIVE_GOAL,
         ACTIVE_MODE,
@@ -420,6 +423,8 @@ async def supervisor_runner(
     tok_mode = ACTIVE_MODE.set(str(mode or "standard").lower())
     tok_goal = ACTIVE_GOAL.set(goal)
     tok_emit = ACTIVE_EMITTER.set(wrapped_progress_sink)
+    tok_conv = ACTIVE_CONVERSATION_ID.set(str(conversation_id or ""))
+    tok_actor = ACTIVE_ACTOR_ID.set(str(actor_id or ""))
     plan_snapshot: dict[str, Any] | None = None
     try:
         plan_snapshot_provider = getattr(store, "plan_snapshot", None)
@@ -442,10 +447,43 @@ async def supervisor_runner(
         if resume_decisions is not None:
             from langgraph.types import Command  # noqa: PLC0415
 
+            # Deep Agents HITL resume: the checkpointer preserves the full
+            # graph state (all prior messages, the interrupted AIMessage with
+            # tool_calls, etc.). ``Command(resume={"decisions": [...]})`` loads
+            # that checkpoint and the HITL middleware's ``after_model`` hook
+            # replays the interrupt with the operator's decisions, muting the
+            # approved tool_calls (or removing rejected ones) and routing to
+            # the tools node. After tools execute, the graph loops back to
+            # ``before_model`` where ``OperatorGuidanceMiddleware`` drains any
+            # guidance the approval path enqueued (e.g. "Operator approved...
+            # your original objective was X... proceed now") and injects it
+            # as a ``HumanMessage`` — that is the opencode-style "projected
+            # history reload" but done INSIDE the graph at the correct point
+            # in the message flow, not via ``Command(update=...)`` which would
+            # corrupt the checkpoint's channel versions and trigger the model
+            # node with stale task_ids (causing the run to terminate silently
+            # after the model responds to the injected HumanMessage without
+            # ever processing the approved tool_calls).
+            #
+            # DO NOT add ``update={"messages": [HumanMessage(...)]}`` here.
+            # The continuation directive must be enqueued via
+            # ``store.enqueue_guidance(run_id=..., body=...)`` by the caller
+            # (chat.py resolve endpoint, discord_adapter._resume_approved_run,
+            # or chat.recover_persisted_chat_runs) so the
+            # ``OperatorGuidanceMiddleware`` injects it at ``before_model``
+            # AFTER the approved tools have run and produced ``ToolMessage``
+            # results — the correct point in the message flow.
             input_value = Command(resume={"decisions": resume_decisions})
         elif not resume_from_checkpoint:
             messages = _history_to_messages(conversation_history)
-            messages.append(HumanMessage(content=prompt))
+            # Avoid duplicating the prompt: ``run_execution_context`` already
+            # includes the current run's ``user_message`` in the history it
+            # returns. Appending it again would double the operator's
+            # instruction in the model's context, which confuses weaker
+            # models (MiMo V2.5) into regressing to the previous run's
+            # output instead of processing the new objective.
+            if not messages or getattr(messages[-1], "content", None) != prompt:
+                messages.append(HumanMessage(content=prompt))
             input_value = {"messages": messages}
 
         graph_finished = asyncio.Event()
@@ -545,6 +583,8 @@ async def supervisor_runner(
             (ACTIVE_GOAL, tok_goal),
             (ACTIVE_EMITTER, tok_emit),
             (ACTIVE_PLAN_SNAPSHOT, tok_plan),
+            (ACTIVE_CONVERSATION_ID, tok_conv),
+            (ACTIVE_ACTOR_ID, tok_actor),
         ):
             try:
                 variable.reset(token)

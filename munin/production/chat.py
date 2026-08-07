@@ -1,4 +1,4 @@
-# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key]
+# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, memory-scoping, actor_id]
 """Deep Agents supervisor → SSE bridge (Fase 1a of issue #9 migration).
 
 This module owns ``POST /api/chat``, ``GET /api/chat/{conversation_id}/stream``
@@ -982,6 +982,7 @@ async def _stream_chat(
         resume_from_checkpoint=resume_from_checkpoint,
         mode=mode,
         goal=goal,
+        actor_id=str(actor_info.get("id") or ""),
     )
     try:
         async for envelope in runner_stream:
@@ -1187,6 +1188,36 @@ async def recover_persisted_chat_runs(*, store: Any, shared_state: Any) -> list[
         goal_id = execution.get("goal_id")
         if recovery_goal and goal_id and str(recovery_goal.get("id")) != str(goal_id):
             recovery_goal = None
+
+        # When recovering a HITL-approved run after a process restart, inject
+        # a continuation directive via the durable guidance queue so the
+        # OperatorGuidanceMiddleware drains it at the next ``before_model``
+        # hook (AFTER the approved tools execute). This is the opencode-style
+        # "projected history reload" but done inside the graph at the correct
+        # point — NOT via Command(update=...) which would corrupt the
+        # checkpoint's channel versions (see runtime_adapter.py comment).
+        if resume_decisions is not None:
+            recovery_prompt = str(execution.get("message") or "")
+            guidance_body = (
+                "Operator approved the pending tool execution. "
+                "Resume the approved action, incorporate its result, "
+                "and continue the workflow toward the original objective."
+            )
+            if recovery_prompt:
+                guidance_body = (
+                    f"Operator approved the pending tool execution. "
+                    f"Your original objective was: \"{recovery_prompt[:500]}\". "
+                    f"Resume the approved action, incorporate its result, "
+                    f"and continue the workflow toward that objective. "
+                    f"Do NOT ask the operator to repeat the objective — proceed now."
+                )
+            with suppress(Exception):
+                store.enqueue_guidance(
+                    run_id=run_id,
+                    actor_id=str(candidate.get("actor_id") or ""),
+                    actor_username="recovery",
+                    body=guidance_body,
+                )
 
         _launch_chat_run(
             store=store,
@@ -1589,14 +1620,47 @@ def register_chat_routes(
                 lease_token, assistant_message_id = _claim_direct(
                     store, run_id=str(result["run_id"])
                 )
+                # Fetch the original prompt + history so the guidance
+                # message can remind the model WHAT it was doing before
+                # the interrupt. Without this the model has amnesia.
+                original_prompt = ""
+                resume_history: list = []
+                with suppress(Exception):
+                    exec_ctx = store.run_execution_context(run_id=str(result["run_id"]))
+                    original_prompt = str(exec_ctx.get("message") or "")
+                    resume_history = list(exec_ctx.get("history") or [])
+                guidance_body = (
+                    "Operator approved the pending tool execution. "
+                    "Resume the approved action, incorporate its result, "
+                    "and continue the workflow toward the original objective."
+                )
+                if original_prompt:
+                    guidance_body = (
+                        f"Operator approved the pending tool execution. "
+                        f"Your original objective was: \"{original_prompt[:500]}\". "
+                        f"Resume the approved action, incorporate its result, "
+                        f"and continue the workflow toward that objective. "
+                        f"Do NOT ask the operator to repeat the objective — proceed now."
+                    )
+                # Inject the continuation directive so the model proceeds
+                # with the approved tool work instead of hallucinating
+                # "standing by" — OperatorGuidanceMiddleware drains this
+                # before the first post-resume model call.
+                with suppress(Exception):
+                    store.enqueue_guidance(
+                        run_id=str(result["run_id"]),
+                        actor_id=str(current["id"]),
+                        actor_username=str(current.get("username") or "operator"),
+                        body=guidance_body,
+                    )
                 _launch_chat_run(
                     store=store,
                     shared_state=shared_state,
                     actor_info=current,
                     run_id=str(result["run_id"]),
                     conversation_id=str(run["conversation_id"]),
-                    prompt="",
-                    conversation_history=[],
+                    prompt=original_prompt,
+                    conversation_history=resume_history,
                     assistant_message_id=assistant_message_id,
                     lease_token=lease_token,
                     resume_decisions=[{"type": "approve"}]

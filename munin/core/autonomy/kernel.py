@@ -37,6 +37,24 @@ from .workflow_spec import WorkflowSpec
 
 logger = logging.getLogger(__name__)
 
+# The kernel meta-tool surface, exported so subagent lists/diagnostics code can reuse the
+# same names instead of hardcoding a second copy (SubagentFactory._filter_tools in
+# subagent_factory.py and the ``graphs`` health probe in munin/mcp/tools).
+KERNEL_META_TOOL_NAMES: frozenset[str] = frozenset({
+    "create_tool",
+    "invoke_registered_tool",
+    "list_registered_tools",
+    "inspect_registered_tool",
+    "create_subagent",
+    "invoke_registered_agent",
+    "list_registered_agents",
+    "inspect_registered_agent",
+    "create_workflow",
+    "invoke_registered_workflow",
+    "list_registered_workflows",
+    "schedule_workers",
+})
+
 
 def _json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=True, default=str)
@@ -185,6 +203,17 @@ class AutonomyKernel:
             test_args: dict | None = Field(
                 default=None, description="Optional smoke-test kwargs run in the sandbox"
             )
+            parameters: dict | None = Field(
+                default=None,
+                description="Explicit JSON schema for the tool parameters "
+                "({type/properties/required}). When omitted, the schema is derived "
+                "from the typed function signature in source.",
+            )
+            spec: str = Field(
+                default="",
+                description="Natural-language intent captured as provenance in the registry row",
+            )
+            tags: list[str] | None = None
 
         class InvokeToolArgs(BaseModel):
             name: str
@@ -192,6 +221,17 @@ class AutonomyKernel:
 
         class ListToolsArgs(BaseModel):
             gen_only: bool = False
+
+        class NoArgs(BaseModel):
+            """Empty args schema — the handler takes no keyword arguments.
+
+            Used by list-style meta-tools that never accept ``gen_only``; a
+            schema with ``gen_only`` here advertised a parameter the handler
+            cannot receive, and an LLM trusting the schema broke the runtime
+            with ``unexpected keyword argument 'gen_only'``.
+            """
+
+            pass
 
         class InspectArgs(BaseModel):
             name: str
@@ -229,6 +269,9 @@ class AutonomyKernel:
             function_name: str | None = None,
             allowed_imports: list[str] | None = None,
             test_args: dict | None = None,
+            parameters: dict | None = None,
+            spec: str = "",
+            tags: list[str] | None = None,
         ) -> str:
             return _json(
                 kernel.tool_factory.create_tool(
@@ -238,6 +281,9 @@ class AutonomyKernel:
                     function_name=function_name,
                     allowed_imports=allowed_imports,
                     test_args=test_args,
+                    parameters=parameters,
+                    spec=spec,
+                    tags=tags,
                 )
             )
 
@@ -369,7 +415,7 @@ class AutonomyKernel:
                "Invoke a registered or ephemeral agent by id with a task string; returns the "
                "agent's final answer (trace stays in the registry).", InvokeAgentArgs),
             st(list_registered_agents, "list_registered_agents",
-               "List agents in the Agent Registry.", ListToolsArgs),
+               "List agents in the Agent Registry.", NoArgs),
             st(inspect_registered_agent, "inspect_registered_agent",
                "Full definition + provenance + exec history for one agent.", InspectArgs),
             st(create_workflow, "create_workflow",
@@ -380,7 +426,7 @@ class AutonomyKernel:
                "Invoke a registered/ephemeral workflow with a JSON input state.",
                InvokeWorkflowArgs),
             st(list_registered_workflows, "list_registered_workflows",
-               "List workflows in the Workflow Registry.", ListToolsArgs),
+               "List workflows in the Workflow Registry.", NoArgs),
             st(schedule_workers, "schedule_workers",
                "Fan out N parallel workers with LangGraph Send: runs one gateway tool over a "
                "list of kwargs (one worker per host/URL/CVE). Individual failures do not abort "

@@ -227,12 +227,81 @@ def build_supervisor(
     prompt = system_prompt.strip() or compose_munin_prompt()
     skill_binding = bundled_skill_library().bind_all()
 
+    # Explicitly install a SummarizationMiddleware with a lower trigger
+    # threshold than Deep Agents' auto-default so long Munin conversations
+    # compact before blowing the model context window. An explicitly-supplied
+    # middleware overrides the auto-installed one by class-name match. If the
+    # class cannot be imported or constructed (older deepagents, missing
+    # backend) we silently keep the framework default so the build never breaks.
+    composed_middleware = list(middleware or ())
+    try:
+        from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: PLC0415
+
+        from .autonomy.compaction import compose_cti_summary_prompt  # noqa: PLC0415
+
+        cti_summary_prompt = compose_cti_summary_prompt()
+        # Compaction contract (kept in locals so the installed marker below
+        # reports exactly what deepagents is configured with).
+        _compact_trigger = [("tokens", 100_000)]
+        _compact_keep = ("messages", 40)
+        composed_middleware.append(
+            SummarizationMiddleware(
+                model=model,
+                backend=skill_binding.backend,
+                # Compact by CONTEXT (token pressure), not by message count —
+                # a long red-team turn with few messages should still compact
+                # when it pressures the window, and a chatty short-turn thread
+                # should NOT compact just because it hit 80 messages. Keep the
+                # last 40 messages unsummarized (up from 12) so the high
+                # context-window model retains more live campaign history
+                # across compaction events.  Trigger threshold conservative at
+                # 100K tokens (was 170K) — compact earlier rather than later
+                # so a DeepSeek-tier window never rides the edge before the
+                # CTI checkpoint fires.
+                trigger=_compact_trigger,
+                keep=_compact_keep,
+                # CTI compaction: insert the operator's red-team checkpoint
+                # rules into DEEPAGENTS_DEFAULT_SUMMARY_PROMPT (splice before
+                # <messages>, never replace). None falls back to the framework
+                # default when deepagents or the rules file is unavailable.
+                summary_prompt=cti_summary_prompt,
+                # BUG FIX: default trim_tokens_to_summarize=4000 was silently
+                # truncating the messages-to-summarize to the LAST 4000 tokens
+                # before sending them to the summary LLM.  For a 100K-token
+                # conversation that means the operator's original objective
+                # (at the start of the thread) was never seen by the summarizer
+                # — only the tail of the conversation was summarized, losing
+                # campaign intent after every compaction event.
+                # None = pass the full evicted slice to the LLM.  The evicted
+                # slice is already bounded: trigger fires at 100K, keep=40
+                # messages are preserved, so the slice sent for summarization
+                # is at most ~60K tokens — well within DeepSeek's window.
+                trim_tokens_to_summarize=None,
+            )
+        )
+        # Observability: surface an explicit marker when the CTI compaction
+        # pipeline is active so live-session logs show compaction wiring
+        # without needing debug logs or artifact forensics.
+        logger.info(
+            "supervisor: CTI SummarizationMiddleware installed (trigger=%s keep=%s)",
+            _compact_trigger,
+            _compact_keep,
+        )
+    except Exception:  # noqa: BLE001
+        # A silent failure here previously hid that compaction never ran
+        # (the loop diagnosis assumed the middleware was live). Log at
+        # WARNING so runner logs are unambiguous.
+        logger.warning(
+            "supervisor: CTI SummarizationMiddleware NOT installed; using framework default",
+            exc_info=True,
+        )
+
     return create_deep_agent(
         name="munin",
         model=model,
         tools=[*tools, *(meta_tools or [])],
         system_prompt=prompt,
-        middleware=list(middleware or ()),
+        middleware=composed_middleware,
         subagents=subagents or None,
         skills=skill_binding.sources,
         backend=skill_binding.backend,
