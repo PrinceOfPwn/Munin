@@ -1,5 +1,7 @@
 """Pure helpers used across advisor sub-tools."""
 
+import re
+
 
 def detect_tech_from_headers(headers: list[dict]) -> list[str]:
     """Extract tech hints from response headers."""
@@ -10,7 +12,7 @@ def detect_tech_from_headers(headers: list[dict]) -> list[str]:
         if name == "x-powered-by":
             if "php" in value: techs.append("php")
             if "express" in value: techs.append("express")
-            if "asp.net" in value: techs.append("asp.net")
+            if re.search(r"(?<![\w.])asp\.net(?![\w.])", value): techs.append("asp.net")
         if name == "server":
             if "apache" in value: techs.append("php")
             # nginx is a generic reverse proxy — don't assume backend tech
