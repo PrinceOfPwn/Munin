@@ -2012,7 +2012,12 @@ async def _stream_run(
                 paused_for_human = False
                 break
             kind = envelope.get("kind")
-            if kind == "assistant_text":
+            if kind == "provider_reasoning":
+                # DeepSeek V4 thinking mode streams private reasoning in
+                # reasoning_content; surface it live in the run status 💭
+                # stream so the operator can watch the model's reasoning.
+                session.add_reasoning(str(envelope.get("text") or ""))
+            elif kind == "assistant_text":
                 session.add_reasoning(str(envelope.get("text") or ""))
             elif kind == "human_request":
                 paused_for_human = True
