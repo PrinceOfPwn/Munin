@@ -6,10 +6,19 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from munin.valravn import arsenal, talons
 from munin.valravn.mcp_clients import stdio_call, streamable_http_call
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _clear_talon_cache():
+    talons._TOOL_CACHE.clear()
+    yield
+    talons._TOOL_CACHE.clear()
 
 
 def test_security_hub_manifest_covers_all_38_servers():
@@ -54,7 +63,6 @@ def test_streamable_http_transport_roundtrip():
 def test_talons_prefers_ultimate_and_uses_compact_listing(monkeypatch):
     monkeypatch.setenv("VALRAVN_TALON_ULTIMATE_URL", "http://ultimate.test/mcp")
     monkeypatch.setenv("VALRAVN_TALON_AWESOME_URL", "http://awesome.test/mcp")
-    talons._TOOL_CACHE.clear()
 
     def fake_call(provider, method, params=None):
         if provider.name == "valravn-ultimate":
@@ -89,7 +97,6 @@ def test_talons_prefers_ultimate_and_uses_compact_listing(monkeypatch):
 def test_talons_falls_back_to_awesome_when_ultimate_is_unavailable(monkeypatch):
     monkeypatch.setenv("VALRAVN_TALON_ULTIMATE_URL", "http://ultimate.test/mcp")
     monkeypatch.setenv("VALRAVN_TALON_AWESOME_URL", "http://awesome.test/mcp")
-    talons._TOOL_CACHE.clear()
 
     def fake_call(provider, method, params=None):
         if provider.name == "valravn-ultimate":
@@ -119,6 +126,13 @@ def test_talons_falls_back_to_awesome_when_ultimate_is_unavailable(monkeypatch):
     called = talons.call_tool("list_proxy_http_history")
     assert called["provider"] == "valravn-awesome"
     assert called["result"] == {"fallback": True}
+
+
+def test_arsenal_plain_command_override_counts_as_available(monkeypatch):
+    command = f'{sys.executable} "{ROOT / "tests" / "fixtures" / "mock_stdio_mcp.py"}"'
+    monkeypatch.setenv("VALRAVN_ARSENAL_NUCLEI_MCP_COMMAND", command)
+    rows = arsenal.list_servers(category="web", available_only=True)["servers"]
+    assert any(item["id"] == "web/nuclei" for item in rows)
 
 
 def test_arsenal_command_override_supports_real_or_fixture_server(monkeypatch):
