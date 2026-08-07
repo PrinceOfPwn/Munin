@@ -6,12 +6,18 @@ on:
       - agent/valravn-burp-ultimate
     paths:
       - .github/workflows/pr72-apply-live-session.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/pr72-apply-live-session.yml
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
