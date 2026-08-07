@@ -4,11 +4,18 @@ The second replica starts from a different empty directory. If it can read the
 marker written by the first one, persistence crossed the network and did not
 silently fall back to a local SQLite file. Cross-host spawn, task, and wake
 claims then compete through direct authoritative Turso connections.
+
+Munin Live Session already executes this acceptance test as its last mandatory
+pre-server Python step. In that workflow only, a successful Turso round-trip
+also chains into the Valravn live bootstrap so Juice Shop, Burp MCP Ultimate,
+and Talons are proven ready before ``munin serve`` can announce presence.
+Other workflows and local executions retain the original Turso-only behavior.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +26,22 @@ from pathlib import Path
 from munin.mcp.config import get_settings
 from munin.mcp.persistence import describe_backend
 from munin.mcp.shared_state import SharedStateStore
+
+
+def _bootstrap_live_session_mesh() -> None:
+    """Start the real Valravn/Burp lab only in the named Live Session workflow."""
+    if os.environ.get("GITHUB_WORKFLOW", "") != "Munin Live Session":
+        return
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
+    bootstrap = workspace / "scripts" / "valravn_live_bootstrap.sh"
+    if not bootstrap.is_file():
+        raise RuntimeError(f"Live Session bootstrap is missing: {bootstrap}")
+    subprocess.run(
+        ["bash", str(bootstrap)],
+        cwd=workspace,
+        env=os.environ.copy(),
+        check=True,
+    )
 
 
 def main() -> None:
@@ -127,6 +150,7 @@ def main() -> None:
         "Turso online roundtrip OK "
         f"backend={describe_backend(settings.db_url)} marker={marker_key}"
     )
+    _bootstrap_live_session_mesh()
 
 
 if __name__ == "__main__":
