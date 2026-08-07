@@ -1,4 +1,30 @@
-﻿## 2026-08-07 - Discord: active-run guard — mid-run guidance instead of a new run
+## 2026-08-07 - Discord liveness heartbeat + Burp headless CI diagnostics
+
+Live sessions repeatedly showed the Discord status embed looking "frozen":
+the run was still executing (LLM think time, slow external tool, pending
+HITL) but no new reasoning/tool events arrived, so `flush_loop` skipped every
+edit (`if not self._dirty: continue`) and the embed kept its old timestamp.
+The backend already has a silent lease heartbeat; this adds a **visible**
+heartbeat for the operator.
+
+- `munin/production/discord_adapter.py`:
+  - `_RunSession` now tracks `_heartbeat_at` (monotonic, refreshed by
+    `add_reasoning`/`add_tool_event`) and `_last_seen`.
+  - `flush_loop` re-edits the status embed at `DISCORD_HEARTBEAT_INTERVAL`
+    (15s) even when nothing changed, so "last activity Ns ago" advances and
+    proves the run is alive without spamming Discord.
+  - `close(paused=True)` (waiting_for_human) also renders the heartbeat.
+- `munin/production/discord_ui.py`: `build_run_status_embed` accepts
+  `last_activity_ago` and renders a heart LastActivity field (s/min format).
+- `tests/test_discord_adapter.py`: new heartbeat tests.
+
+The Valravn Burp CI gate (run 31214489649) failed with `URLError: Connection
+refused` after 150s and an empty `burp.log`; the previous launch buffered the
+JVM stdout so the failure was invisible.
+- `valravn/scripts/start-burp-headless.sh`:
+  - run java under `script` (pty) when available so the JVM line-buffers;
+  - probe timeout 150s to 240s, progress every 15s, dump last 120 log lines.
+## 2026-08-07 - Discord: active-run guard — mid-run guidance instead of a new run
 
 Live session 31194804677 reproduced two operator-facing failures inside the
 same INV thread:

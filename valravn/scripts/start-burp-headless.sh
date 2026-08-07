@@ -152,7 +152,16 @@ else
 fi
 
 echo "Starting Burp with burp-mcp-ultimate preloaded..."
-nohup "${LAUNCH[@]}" >"$BURP_LOG" 2>&1 &
+# Bash bug: `script` is util-linux pty wrapper. Launching java under a pty
+# makes the JVM treat stdout/stderr as a TTY and flush line-by-line. A plain
+# `nohup java >burp.log 2>&1` redirects to a non-tty fd, java buffers 8KB of
+# stdout internally, and the log stays empty while Burp hangs — so we would
+# have no way to diagnose why the MCP port never opened.
+if command -v script >/dev/null 2>&1; then
+  nohup script -q -c "${LAUNCH[*]}" "$BURP_LOG" </dev/null >/dev/null 2>&1 &
+else
+  nohup "${LAUNCH[@]}" >"$BURP_LOG" 2>&1 &
+fi
 BURP_PID=$!
 echo "$BURP_PID" > "$BURP_PID_FILE"
 
@@ -216,8 +225,9 @@ def post(payload: dict, session: str = ""):
         return decode(body, resp.headers.get("Content-Type", "")), resp.headers.get("Mcp-Session-Id", session)
 
 
-deadline = time.time() + 150
+deadline = time.time() + 240
 last_error = "not ready"
+last_report = time.time()
 while time.time() < deadline:
     if not alive():
         raise SystemExit(f"Burp exited before MCP became ready; inspect {log}")
@@ -245,7 +255,24 @@ while time.time() < deadline:
         raise SystemExit(0)
     except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
         last_error = f"{type(exc).__name__}: {exc}"
+        # Report progress so the runner log shows the probe is alive instead
+        # of a silent 4-minute hang. The tail includes the live Burp log so a
+        # pty-captured stack trace is visible in CI even before timeout.
+        if time.time() - last_report >= 15:
+            last_report = time.time()
+            print(f"probe waiting for Burp MCP: {last_error}", flush=True)
         time.sleep(2)
 
-raise SystemExit(f"Timed out waiting for Burp MCP Ultimate: {last_error}; inspect {log}")
+log_tail = ""
+if os.path.exists(log):
+    try:
+        with open(log, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+        log_tail = "".join(lines[-120:])
+    except OSError:
+        log_tail = ""
+raise SystemExit(
+    f"Timed out waiting for Burp MCP Ultimate: {last_error}; inspect {log}\n"
+    f"--- {log} tail ---\n{log_tail}"
+)
 PY
