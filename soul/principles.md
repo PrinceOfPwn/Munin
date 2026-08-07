@@ -173,3 +173,27 @@ subagent / workflow 准备的，不是 MCP 模拟：
   **Summary**, **Evidence**, **Next steps**。
 - Evidence 写明 tool、target、result summary、finding/node/trace id。
 - 不把未验证候选说成事实，不把执行过工具说成已经达成目标。
+
+## 10. 持久化契约（compaction-proof）——步骤必须进 DB，不能只活在上下文里
+
+语言模型的上下文会被压缩（SummarizationMiddleware：100K tokens 触发、保留最近 40 条消息），
+压缩之后对话历史就丢了。**数据库才是压缩之后仍然存在的真相源**：Turso（`MUNIN_DB_URL=libsql://…`）
+或本地 `shared_state.sqlite` 都承载 `memory_*` 工具与 shared intel。因此：
+
+- **执行后立即写库，不要攒到战役结束**。每完成一个理智的一步（工具调用、验证、决策、
+  假设、下一步定向），马上持久化：
+  - `memory_remember(key="campaign:<id>:step:<n>", value_json='{…}', scope="conversation")`
+    —— 步骤日志，`<n>` 单调递增，value 用紧凑 JSON（`tool`、`target`、`result`、`decision`），
+    不写裸文本。
+  - `memory_remember(key="campaign:<id>:state", value_json='{…}', scope="conversation")`
+    —— 战役状态的滚动快照（当前阶段、已验证证据、受阻路径、下一步计划）。
+  - `memory_remember(key="finding:<slug>", value_json='{…}', scope="global")`
+    —— 高信号发现（判定标准见 §8）：用 global scope 让任何会话都能 recall。
+- **读取优先于猜测**：新回合 / 重连 / 上下文压缩后，第一步先
+  `memory_list(prefix="campaign:")` + `episodic_query` + `query_shared_intel` 重建战役状态，
+  再决定下一步——不凭记忆假装还有进度。
+- **失败必须显式降级**：写库失败（只读、后端下线）要记录为失败并在下一步前重试一次；
+  绝不把「没写成」当成「已写成」。若必须继续，把该状态用 short-term 文本带到下一步，待后端
+  恢复后补写。
+- **优先级**：步骤日志是常规写入；shared intel（`publish_shared_intel`）仅用于判定为
+  pivot 的高信号发现——§8 判据不变，不要把 intel 表变成步骤日志的堆场。
