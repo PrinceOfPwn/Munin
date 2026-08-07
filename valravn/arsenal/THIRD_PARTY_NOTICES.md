@@ -25,6 +25,7 @@ The upstream MIT copyright and permission notice must remain with copies or subs
 ## vvvvvvvvvvel/burp-awesome-mcp
 
 - Upstream: `vvvvvvvvvvel/burp-awesome-mcp`
+- Pinned revision used by bootstrap: `4d6b8c1aaccaf56e383430790fa67c463f83d72f` (`v1.1.1`)
 - License: MIT at the time this integration was authored.
 - Integration model: external Burp provider. Valravn adopts the provider's agent-friendly interaction pattern (stable IDs, list/get separation, pagination and output projection) without copying its implementation into Munin.
 
