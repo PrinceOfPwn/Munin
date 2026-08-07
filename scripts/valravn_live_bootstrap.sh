@@ -106,6 +106,13 @@ export BURP_HOME BURP_MCP_HOST BURP_MCP_PORT BURP_MCP_TOKEN
 export BURP_PROXY_HOST BURP_PROXY_PORT VALRAVN_TALON_ULTIMATE_URL JUICE_SHOP_URL
 export BURP_ULTIMATE_JAR="$ULTIMATE_JAR"
 
+# GitHub Actions kills child processes that keep the per-step tracking cookie.
+# Clearing it is the same pattern the Live Session already uses for Munin and
+# the GUI, and lets Burp survive into the subsequent `munin serve` step.
+if [[ "${GITHUB_WORKFLOW:-}" == "Munin Live Session" ]]; then
+  export RUNNER_TRACKING_ID=""
+fi
+
 chmod +x valravn/scripts/start-burp-headless.sh
 valravn/scripts/start-burp-headless.sh
 
