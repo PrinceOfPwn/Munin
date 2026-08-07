@@ -42,8 +42,10 @@ def open_h2_tunnel(host: str, port: int) -> tuple[ssl.SSLSocket, h2.connection.H
         buf += chunk
     if not (buf.startswith(b"HTTP/1.1 200") or buf.startswith(b"HTTP/1.0 200")):
         raise RuntimeError(f"Burp proxy refused CONNECT: {buf[:120]!r}")
-    # TLS with ALPN h2
+    # TLS with ALPN h2. Certificate validation stays disabled for Burp MITM,
+    # but legacy TLS 1.0/1.1 are never negotiated.
     ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     ctx.set_alpn_protocols(["h2"])
