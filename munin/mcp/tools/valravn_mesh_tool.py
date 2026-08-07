@@ -2,10 +2,13 @@
 """Compact Munin MCP surface for Valravn Talons and Arsenal."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ...valravn import arsenal, talons  # noqa: TID252
 from ..main import MCP, audited_tool  # noqa: TID252
+
+logger = logging.getLogger("munin-mcp.valravn-mesh")
 
 
 def _ok(tool: str, summary: str, data: Any) -> dict[str, Any]:
@@ -13,15 +16,22 @@ def _ok(tool: str, summary: str, data: Any) -> dict[str, Any]:
 
 
 def _fail(tool: str, exc: Exception, *, code: str = "valravn_gateway_failed") -> dict[str, Any]:
+    # Remote MCP exceptions may contain command lines, local URLs, provider
+    # diagnostics, or credentials. Public tool output exposes only a stable
+    # failure envelope; logs retain the exception class but not raw text.
+    logger.warning("%s failed with %s", tool, type(exc).__name__)
     return {
         "ok": False,
         "tool": tool,
         "mode": "sync",
-        "summary": f"{tool} failed: {type(exc).__name__}: {exc}",
+        "summary": f"{tool} failed locally",
         "degraded": True,
         "failure_scope": "valravn_capability_only",
         "run_should_continue": True,
-        "error": {"code": code, "message": str(exc)},
+        "error": {
+            "code": code,
+            "message": "The Valravn capability failed locally; inspect redacted operator logs for diagnostics.",
+        },
     }
 
 
