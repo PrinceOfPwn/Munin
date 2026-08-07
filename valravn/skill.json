@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/mcp-skill.json",
   "name": "valravn",
   "display_name": "Valravn",
-  "description": "Valravn - agentic DAST fused with Burp Suite. MCP server with ~370 tools covering recon (amass / subfinder / httpx + wappalyzergo / gau / katana / wafw00f), web scan (nuclei / nikto / wpscan / dalfox / ffuf / arjun), exploit (sqlmap / commix / ysoserial gen), SAST + secrets (opengrep / gitleaks / trufflehog / git-dumper / Noir OpenAPI ingest), CloakBrowser stealth Chromium crawl + screenshots, auth-matrix (Subject x Object x Action), fuzz, race (single-packet + timeless + last-byte), smuggling (Kettle 2025), OAuth/SAML chain probes, FIDO/passkey/payment flows, business-logic, edge-vs-internal trust split, privilege-revocation, monotonic-ID enum, cross-transport IDOR, native JWT forge/crack, login-bypass + MFA-bypass + session-lifecycle + reset-token, native CSRF/SSRF/SSTI/XXE/WebSocket-CSWSH/prototype-pollution, active LLM/MCP attack probes, anonymous cloud surface, security-research bundler, cross-engagement findings graph, 151-file KB for adaptive probing, three-phase save-finding pipeline, intensity flag, engagement cost cap, SARIF + JUnit + compliance reporting, auto-PoC generator.",
-  "version": "1.0.0",
+  "description": "Valravn is Munin's offensive web-testing knowledge and workflow layer. It preserves the imported skills, agents, knowledge base, payload assets, evidence discipline, and Security Hub mappings while delegating live Burp execution to burp-mcp-ultimate through the compact Valravn Talons gateway.",
+  "version": "1.1.0",
   "license": "Apache-2.0",
   "homepage": "https://github.com/PrinceOfPwn/Munin",
   "repository": "https://github.com/PrinceOfPwn/Munin",
@@ -16,205 +16,107 @@
     "pentest",
     "bug-bounty",
     "red-team",
-    "vulnerability-scanning",
+    "vulnerability-testing",
     "owasp",
     "wstg",
-    "mastg",
     "graphql",
     "oauth",
     "webauthn",
-    "fido",
-    "passkey",
     "ssrf",
-    "rce-detection"
+    "business-logic"
   ],
   "capabilities": {
-    "tools_approx": 370,
-    "tool_files_python": 285,
-    "prompts": 5,
-    "resources": 7,
+    "execution_model": "provider_mesh",
+    "primary_burp_provider": "3ntr0pyX/burp-mcp-ultimate",
+    "primary_transport": "streamable_http",
+    "primary_endpoint_default": "http://127.0.0.1:9444/mcp",
+    "burp_proxy_default": "127.0.0.1:8080",
     "knowledge_base_files": 151,
     "skills": 54,
     "agents": 14,
-    "transport": "stdio",
-    "language": "python>=3.11",
-    "java_extension": "java>=21",
-    "burp_api_host": "127.0.0.1",
-    "burp_api_port": 8111
-  },
-  "burp_edition_support": {
-    "professional": {
-      "status": "full",
-      "notes": "All features supported. Default target environment."
-    },
-    "community": {
-      "status": "supported_with_manual_setup",
-      "notes": "Most tools work unchanged. Pro-only features (active scanner, Collaborator) gracefully degrade - operator supplies a callback URL for OOB tests, uses auto_probe / fuzz_parameter instead of scan_url, and accepts Intruder rate-throttling.",
-      "pro_only_tools_unavailable": [
-        "scan_url",
-        "crawl_target",
-        "get_scan_status",
-        "cancel_scan",
-        "get_scanner_findings",
-        "get_new_findings",
-        "get_issues_dashboard",
-        "generate_collaborator_payload",
-        "generate_collaborator_pool",
-        "auto_collaborator_test",
-        "get_collaborator_interactions",
-        "collaborator_pool_status"
-      ],
-      "community_alternatives": {
-        "active_scanner": "auto_probe (knowledge-driven, runs via HTTP API), fuzz_parameter, fuzz_with_feedback",
-        "collaborator_oob": "Operator supplies a callback URL - interact.sh / webhook.site / requestcatcher.com - passed into payloads explicitly. Rule 9a: never fabricate domains.",
-        "intruder_speed": "concurrent_requests (Python-side concurrency through Burp proxy) bypasses Community throttling for legitimate parallel testing."
-      },
-      "feature_detection": "Call check_pro_features() at session start to confirm which Pro capabilities are available on the operator's instance."
-    }
-  },
-  "mcp_server": {
-    "command": "uvx",
-    "args": [
-      "--from",
-      "git+https://github.com/PrinceOfPwn/Munin.git#subdirectory=valravn/mcp-server",
-      "valravn-mcp"
+    "legacy_python_tool_sources": 285,
+    "legacy_python_tool_sources_active_backend": false,
+    "custom_java_rest_bridge": false,
+    "munin_gateway_tools": [
+      "valravn_talons_status",
+      "valravn_talons_tools",
+      "valravn_talons_read",
+      "valravn_talons_call"
     ],
-    "alternative_installs": {
-      "pipx": "pipx install 'git+https://github.com/PrinceOfPwn/Munin.git#subdirectory=valravn/mcp-server'",
-      "uv": "uv pip install -e ./mcp-server && uv run python -m burpsuite_mcp"
-    },
-    "env": {
-      "BURP_API_HOST": {
-        "description": "Burp extension API host",
-        "default": "127.0.0.1",
-        "required": false
-      },
-      "BURP_API_PORT": {
-        "description": "Burp extension API port",
-        "default": "8111",
-        "required": false
-      },
-      "BURP_API_TIMEOUT": {
-        "description": "HTTP timeout to extension (seconds)",
-        "default": "30",
-        "required": false
-      }
-    }
+    "arsenal_gateway_tools": [
+      "valravn_arsenal_status",
+      "valravn_arsenal_list",
+      "valravn_arsenal_tools",
+      "valravn_arsenal_call"
+    ]
   },
-  "prompts": [
-    {
-      "name": "hunt-target",
-      "description": "Run the standard authorized hunt loop on a target -- recon, probe, verify, save.",
-      "arguments": [
-        {
-          "name": "target",
-          "description": "Target URL within authorized scope (e.g. https://example.com)",
-          "required": true,
-          "type": "string"
-        }
-      ]
+  "runtime": {
+    "burp_provider": {
+      "name": "valravn-ultimate",
+      "upstream": "3ntr0pyX/burp-mcp-ultimate",
+      "url_env": "VALRAVN_TALON_ULTIMATE_URL",
+      "token_env": "BURP_MCP_TOKEN",
+      "default_url": "http://127.0.0.1:9444/mcp"
     },
-    {
-      "name": "verify-finding",
-      "description": "Walk a suspected finding through the 7-Question Validation Gate before save.",
-      "arguments": [
-        {
-          "name": "vuln_type",
-          "description": "Vulnerability class (sqli, xss, ssrf, idor, ...)",
-          "required": true,
-          "type": "string"
-        },
-        {
-          "name": "endpoint",
-          "description": "Endpoint that triggered the finding",
-          "required": true,
-          "type": "string"
-        },
-        {
-          "name": "evidence",
-          "description": "What was observed (status, length, marker, error)",
-          "required": true,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "name": "triage-program",
-      "description": "Set per-program policy (never_submit_remove / add, confidence_floor) + scope + override defaults for an engagement.",
-      "arguments": [
-        {
-          "name": "program",
-          "description": "Program slug (e.g. hackerone-acme)",
-          "required": true,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "name": "chain-findings",
-      "description": "Walk saved findings and propose A->B->C chains that escalate to reportable impact.",
-      "arguments": [
-        {
-          "name": "domain",
-          "description": "Target domain whose findings should be chained",
-          "required": true,
-          "type": "string"
-        }
-      ]
-    },
-    {
-      "name": "save-finding-checklist",
-      "description": "Pre-save checklist enforcing the three-phase pipeline (replay -> assess -> save).",
-      "arguments": [
-        {
-          "name": "vuln_type",
-          "description": "Vulnerability class",
-          "required": true,
-          "type": "string"
-        },
-        {
-          "name": "endpoint",
-          "description": "Endpoint that triggered the finding",
-          "required": true,
-          "type": "string"
-        }
-      ]
-    }
-  ],
+    "unattended_launcher": "valravn/scripts/start-burp-headless.sh",
+    "live_ci": ".github/workflows/valravn-mesh-e2e.yml",
+    "legacy_rest_api_retired": "127.0.0.1:8111"
+  },
+  "knowledge": {
+    "path": "valravn/mcp-server/src/burpsuite_mcp/knowledge",
+    "role": "reasoning and workflow corpus; independent of the retired MCP/REST runtime"
+  },
+  "payload_assets": {
+    "path": "valravn/mcp-server/src/burpsuite_mcp/payloads",
+    "role": "retained reference/payload corpus"
+  },
+  "skills": {
+    "path": "valravn/.claude/skills",
+    "migration_rule": "Treat legacy tool names as workflow intent. Resolve the current provider tool through Valravn Talons; do not restore /api/* REST calls."
+  },
   "resources": [
     {
-      "uri_template": "burp://rules/{hunting,engineering}",
-      "description": "Always-active rule files."
+      "uri": "burp://proxy/history",
+      "provider": "burp-mcp-ultimate",
+      "description": "Recent Burp Proxy traffic."
     },
     {
-      "uri_template": "burp://skills/{name}",
-      "description": "Skill / playbook markdown."
+      "uri": "burp://sitemap",
+      "provider": "burp-mcp-ultimate",
+      "description": "Burp site map state."
     },
     {
-      "uri_template": "burp://knowledge/index",
-      "description": "Index of all knowledge-base categories."
+      "uri": "burp://scan/issues",
+      "provider": "burp-mcp-ultimate",
+      "description": "Burp scan issues when available."
     },
     {
-      "uri_template": "burp://knowledge/{category}",
-      "description": "Single knowledge-base file by category."
+      "uri": "burp://target_summary",
+      "provider": "burp-mcp-ultimate",
+      "description": "Compact target state."
     },
     {
-      "uri_template": "burp://intel/{domain}/{kind}",
-      "description": "Persistent target intel (profile, endpoints, coverage, findings, fingerprint, patterns, notes)."
-    },
-    {
-      "uri_template": "burp://findings/{domain}",
-      "description": "Saved findings for a domain."
+      "uri": "burp://intercept/pending",
+      "provider": "burp-mcp-ultimate",
+      "description": "Pending intercept queue state."
     }
   ],
-  "safety_rules": [
-    "Never test out-of-scope domains -- call check_scope first (Rule 1).",
-    "Never send destructive payloads (DROP TABLE, rm -rf, shutdown, format). Use benign detection payloads + Collaborator (Rule 5).",
-    "Use Burp Collaborator or operator-supplied callback for OOB tests -- never hardcode attacker domains (Rule 9a).",
-    "Save evidence (logger_index) BEFORE further exploitation -- targets get patched (Rule 12).",
-    "RCE-precondition probes detect only; real exploitation is operator-supervised (Copilot mode)."
+  "workflow_principles": [
+    "Discover tools by task before requesting a schema.",
+    "Request only the schema for the tool about to be called.",
+    "Prefer MCP resources for passive Burp state.",
+    "Use Valravn Arsenal for external security tooling rather than rebuilding it inside Burp.",
+    "Preserve evidence and finding-validation semantics when migrating a legacy skill.",
+    "Never reinterpret an MCP/provider outage as target evidence.",
+    "Generic active execution requires explicit authorization in Munin."
   ],
-  "marketplaces": {},
+  "safety_rules": [
+    "Use active tools only against explicitly authorized targets.",
+    "Provider reachability is not authorization.",
+    "Keep engagement scope and policy above the provider layer.",
+    "Preserve evidence before escalation.",
+    "Do not restore the retired 127.0.0.1:8111 REST bridge to satisfy a legacy workflow."
+  ],
   "upstream_attribution": {
     "license": "Apache-2.0",
     "notice_required_by_section_4d": {

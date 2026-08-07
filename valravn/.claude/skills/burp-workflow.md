@@ -1,313 +1,201 @@
 ---
 name: burp-workflow
-description: 高效 Burp Suite 工具编排——知何时用何工具、如何链
+description: Efficient Burp Suite orchestration through Valravn Talons and Burp MCP Ultimate
 ---
 
-# Burp Suite 工作流编排
+# Burp workflow — Ultimate-backed Valravn
 
-你经 MCP 连 Burp Suite。160+ 工具在手。知**何时**用**哪个**是浪费 50 调与 5 调找到 bug 之差。本 skill 教高效 Burp 编排。
+This skill preserves the operational workflow from the original Valravn MCP while moving execution to `burp-mcp-ultimate` through Munin's compact Talons gateway.
 
-**ADVISOR 捷径：** 调 `pick_tool('your task')` 即取对工具 + 例。调 `get_hunt_plan(target)` 取全分阶段测试计划。
+The rule is simple: **Valravn decides; Ultimate drives Burp.** Do not recreate mature Montoya operations in Python or a second Java REST API.
 
-## SMART MOVE —— 首调
+## First move
 
-- "X 用啥工具？" → `pick_tool('X')`
-- "此目标计划？" → `get_hunt_plan(domain)`
-- "捕获请求看着怪" → `smart_request_triage(index)`（一调替 get_request_detail → extract_* → smart_analyze → 推理 → 选的四步循环）
-- "找到 JS bundle" → `smart_js_analyze(index | url | urls=[])` —— 发按优先序的 (target, vuln_class, suggested_call, canary) 元组
-- "已知 CVE / 公开 PoC 需 payload 调" → `probe_cve_with_variants(cve_id, target_url)` —— 有界变体扫，首 CONFIRMED 短路
+Before assuming a tool name or schema:
 
-## DEFAULTS（Rule 29 / 30 / 31 / 32）—— 偏好，非手铐
+1. `valravn_talons_status(refresh=false)`
+2. `valravn_talons_tools(provider="valravn-ultimate", query="<intent>", include_schema=false)`
+3. request the selected schema with `include_schema=true`
+4. execute with `valravn_talons_call(..., provider="valravn-ultimate", authorized=true)`
 
-两模式并行。按**意图**选：
+For passive Burp state, prefer `valravn_talons_read` over an active call.
 
-**A) 证据取** —— 你想读 / replay / 引用户已浏览生成的请求。
-- 首工具：`search_history` / `get_proxy_history` / `extract_*` 对已捕获 index。勿用 `curl_request` 重造已有之物——捕获请求带真实 session 状态；新 curl 丢之。
+## Evidence-first workflow
 
-**B) 造流量** —— 你跑测试本身：fuzz、爆破、限速、race、业务流、WAF 探、首触、受控变体。新请求是正确首选。用合适的：
-- 自定义量 / 爆破 / 限速 / 垃圾 + 分支解码逻辑 Intruder 表达不了 → 手卷循环用 `curl_request` / `session_request`（+ `asyncio.gather` 并行发）
-- Race condition → `test_race_condition`（服务端 latch——优于客户端并发）
-- 多步业务流 → `run_flow`（线性）或显式 `session_request` 链（分支）
-- 多参数 fuzz + 异常检测 → `fuzz_parameter` / `auto_probe`
-- 绑已捕获基线的量活 → `send_to_intruder_configured`
-- 已捕获请求一击微调 → `resend_with_modification` OR `send_to_repeater` + `repeater_resend`
+When traffic already exists in Burp, reuse it instead of rebuilding requests from memory.
 
-**边干边 Annotate + Organize（Rule 31）。** 每个有趣的捕获 index 得 `annotate_request(index, color='RED|ORANGE|YELLOW|GREEN|CYAN|GRAY', comment='<f-id> | <vuln> | <evidence>')` AND `send_to_organizer(index)`。否则报告时重搜整段历史。
+- Read `burp://proxy/history` to locate captured traffic.
+- Read `burp://sitemap` for target structure.
+- Use provider discovery with queries such as `proxy`, `history`, `repeater`, `organizer`, or `annotation` to find the smallest operation needed.
+- Preserve a stable request/handle/index whenever the provider returns one.
+- Record the exact provider/tool used with evidence.
 
-**Header profile（Rule 32）。** 两子模式：
-- 像真客户端（默认常规流量）→ `get_target_headers(domain)` 一次，传 `headers=`。默认 httpx 签名被 WAF 拦并扭曲测试结果。
-- 故意**不**像浏览器（WAF 检测、header 注入、smuggling、指纹探针、malformed-input）→ bare 或手卷 headers——那**就是**测试。
+A captured authenticated request usually contains more truth than a freshly reconstructed curl command: cookies, headers, anti-CSRF state, content type, routing headers, and client quirks.
 
-全表面图：`evidence-and-tabs.md`。
+## Creating traffic
 
-## 核心原则：少工具调，多信号
+### Precise raw request
 
-每工具调烧 token 和时间。在正确抽象层用正确工具。
+Discover and call `http_send_raw` when byte-level control matters:
 
-## 工具选择决策树
-
-### "我需理解目标"
-
-```
-首访？
-  YES → full_recon(session, depth="standard")     # 一调：tech + endpoints + headers + secrets + robots
-  NO  → check_target_freshness(domain, session)    # 查自上次何变
-
-需端点图？
-  快览  → get_unique_endpoints()           # 去重列表带参数
-  全细节 → discover_attack_surface(session) # 爬 + 风险分 + 攻击优先
-  API 规 → export_sitemap(format="json")    # 结构 API 图带参数类型
-
-需分析一页？
-  全分析 → smart_analyze(index)             # tech + params + forms + endpoints + secrets 一调
-  否则   → 别 detect_tech_stack + smart_analyze + smart_analyze 分开调（费 3 调）
+```text
+valravn_talons_tools(query="http_send_raw", include_schema=true)
+valravn_talons_call(
+  tool_name="http_send_raw",
+  arguments={...schema-derived arguments...},
+  provider="valravn-ultimate",
+  authorized=true
+)
 ```
 
-### "我需发请求"
+Use it for controlled malformed-input tests, unusual headers, request-target variants, and cases where a high-level client would normalize the request.
 
-```
-简单一击请求？
-  → curl_request(url, method, headers, body)        # 如 curl，带 redirect + auth
+### Session-aware HTTP
 
-跨请求需持久认证？
-  → create_session() THEN session_request()          # Cookie jar 自动更新
+Use `http_send_with_session_handling` when Burp's session handling should participate.
 
-需改已捕获请求？
-  → resend_with_modification(index, modify_*)        # 改 headers/body/path/method
+### Parallel / race traffic
 
-需精确字节级控？
-  → send_raw_request(raw, host, port)                # smuggling、CRLF、malformed 请求
+Use `http_send_batch` or `http_send_race` when the test requires concurrency. Do not emulate races with a slow sequence of independent model tool calls.
 
-多步流（登录 → 抽 CSRF → 利用）？
-  → run_flow(session, steps=[...])                   # 一调替 5+
+### Repeater / Intruder
 
-想在 Burp UI 可见？
-  → send_to_repeater(index)                          # Burp 手动跟进
-  → send_to_intruder(index)                          # Burp 基位置攻击
-```
+Discover `repeater` or `intruder` tools when the operator should retain a visible Burp artifact or when Burp-native placement/configuration is the right abstraction.
 
-### "我需测漏洞"
+## Proxy workflow
 
-```
-多参数测多漏洞类型？
-  → auto_probe(session, targets, categories)         # 知识驱动，服务端 matchers
+Burp Proxy remains an evidence surface even though Munin communicates with Ultimate on MCP port `9444`.
 
-一特定漏洞跨多端点测？
-  → bulk_test(session, vulnerability="sqli")         # 一漏洞类，自动发现目标
+- Burp's ordinary Proxy listener remains separate (normally `127.0.0.1:8080`).
+- Ultimate's MCP endpoint is normally `http://127.0.0.1:9444/mcp`.
+- There is no Valravn REST listener on `8111` anymore.
 
-一参数深测？
-  → probe_endpoint(session, method, path, param)     # 自适应：自动探 tech、选 payload
+Useful passive resource:
 
-自定义 payload 列表上一参？
-  → fuzz_parameter(index, parameter, payloads)       # 你的 payload，异常检测
-
-需同时请求（race condition）？
-  → test_race_condition(session, request, concurrent) # 服务端 CountDownLatch
-
-需 N 端点 × M auth 状态？
-  → test_auth_matrix(endpoints, auth_states)          # IDOR 矩阵一调
+```text
+valravn_talons_read(
+  uri="burp://proxy/history",
+  provider="valravn-ultimate"
+)
 ```
 
-### "我需浏览目标并灌 proxy history"
+For intercept state, discover `intercept_*`. In unattended automation use `intercept_set_mode` with the provider-supported non-blocking mode (`observe` in the pinned CI provider) before depending on Proxy traffic.
 
-```
-自动爬（最快）  → browser_crawl(url, max_pages=20)           # 经 Burp proxy 的隐身 Chromium
-点一切        → browser_interact_all(url, max_clicks=30)   # 按钮、链接、toggle
-导航 + 观 DOM  → browser_navigate(url) then browser_execute_js(script)
-填提交表单     → browser_submit_form(fields, submit_selector)
-取页面总览     → browser_get_page_info()                     # 表单、cookies、inputs
-```
+## Scope
 
-### "我需从响应抽特定数据"
+Use `scope_is_in_scope` for a Burp-side scope check when that is the question. Scope enforcement for a Munin campaign still belongs above the provider: a successful MCP call is not authorization.
 
-```
-勿读整响应——用抽取工具（10× 省 token）：
-  HTML 抽 CSRF token → extract_css_selector(index, 'input[name=csrf]', attribute='value')
-  JSON 字段          → extract_json_path(index, '$.data.user.role')
-  自定义模式         → extract_regex(index, 'pattern', group=1)
-  仅安全 headers     → extract_headers(index, ['CSP', 'X-Frame-Options'])
-  全页链接           → extract_links(index, link_filter='internal')
-  快变检测           → get_response_hash(index)
-```
+Always keep the engagement's explicit authorized target set in Munin/Valravn policy. Provider scope is defense in depth, not the grant of authority.
 
-### "我需控 proxy"
+## Target understanding
 
-```
-  Intercept 开/关      → intercept(action="on") / intercept(action="off")
-  自动改流量           → match_replace(action="set", rules=[{type, match, replace}])
-  标注条目             → annotate_request(index, color='RED', comment='SQLi')
-  流量统计             → get_proxy_stats()
-  监模式               → traffic_monitor(action="register", tag, patterns)
-  轮询新流量           → get_live_requests(since_index)
-```
+Combine Valravn knowledge with Burp state rather than expecting one giant bespoke tool to do everything:
 
-### "我需迭代一请求"
+1. Observe target state (`burp://sitemap`, `burp://proxy/history`, `burp://target_summary`).
+2. Load the relevant Valravn skill / KB category.
+3. Form a narrow hypothesis.
+4. Discover one Ultimate tool that can validate it.
+5. Capture the resulting request/response evidence.
+6. Re-evaluate before escalating.
 
-```
-  Repeater 跟踪        → send_to_repeater_tracked(index, 'tab-name')
-  改后重发             → repeater_resend('tab-name', modify_path='/new/path')
-  可复用多步           → create_macro(name, steps) then run_macro(name)
-```
+This replaces legacy mega-tools such as `auto_probe`, `smart_analyze`, and `get_hunt_plan` when their implementation merely duplicated orchestration that the agent can perform with better provider primitives and Valravn knowledge.
 
-### "我需战略帮助"
+## HTTP / web testing map
 
-```
-  全 hunt 计划         → get_hunt_plan(target_url)
-  下一步最佳行动       → get_next_action(target_url, completed_phases)
-  验证发现             → assess_finding(vuln_type, evidence, endpoint)
-  选对工具             → pick_tool('task description')
-```
+Use discovery rather than hard-coding every provider schema. Typical intent -> Ultimate surface:
 
-### "我需确认发现"
+| Intent | Discover around |
+|---|---|
+| Send raw HTTP | `http_send_raw` |
+| Send with Burp session handling | `http_send_with_session_handling` |
+| Batch requests | `http_send_batch` |
+| Race requests | `http_send_race` |
+| Proxy evidence | `proxy`, `burp://proxy/history` |
+| Sitemap | `sitemap`, `burp://sitemap` |
+| Repeater | `repeater` |
+| Intruder | `intruder` |
+| Interception | `intercept_*` |
+| Scope check | `scope_is_in_scope` |
+| Scanner (Pro) | `scanner`, `burp://scan/issues` |
+| Collaborator (Pro) | `collaborator` |
+| WebSockets | `websocket`, `burp://websockets/active` |
+| JWT | `jwt_`, `util_jwt_decode` |
+| OAuth/OIDC | `oauth_`, `oidc_` |
+| GraphQL | `graphql_` |
+| JS endpoints / secrets | `js_extract_endpoints`, `js_scan_secrets`, `js_scan_response` |
+| 403 differential | `bypass_403` |
+| CORS probe | `cors_misconfig_probe` |
+| Parameter discovery | `param_miner_lite` |
+| Fingerprinting | `fingerprint_target` |
+| Open redirect probe | `open_redirect_probe` |
+| Raw Montoya capability not wrapped | `montoya_inspect`, then `montoya_invoke` |
+| Another Burp extension | `bridge_list_extensions`, then bridge tools |
 
-```
-盲漏洞（无可见输出）？
-  → auto_collaborator_test(index, parameter)          # 生成 + 注入 + 轮询一调
+## Knowledge-driven testing
 
-需比两响应？
-  快 diff   → get_response_diff(index1, index2)    # 显 diff 行
-  全比较    → compare_responses(index1, index2)     # headers + body + unique words + similarity %
-  Burp UI   → send_to_comparer(index1, index2)     # Burp Comparer tab 可视
+The retained Valravn knowledge base is a **reasoning asset**, not an MCP implementation requirement.
 
-Auth 比较（IDOR）？
-  → compare_auth_states(index, alt_cookies/alt_token)  # 同请求，不同 auth
-```
+When a skill references a legacy Valravn tool that no longer exists:
 
-## Proxy History 模式
+1. identify the intent of the legacy call;
+2. discover the equivalent Ultimate primitive;
+3. if the capability belongs to an external security tool (Nuclei, Semgrep, BloodHound, etc.), route through Valravn Arsenal instead of rebuilding it in Burp;
+4. if no direct primitive exists, use `montoya_inspect` / `montoya_invoke` only after checking that the operation genuinely belongs in Burp;
+5. preserve the evidence and validation gates from the skill even when the executor changes.
 
-Proxy history 是主数据源。高效用之：
+Never resurrect `/api/*` REST calls to make an old skill work.
 
-### 找有趣请求
-```python
-# 勿手翻 history——搜之
-search_history(query="admin", in_url=True)           # 找 admin 端点
-search_history(query="token", in_response_body=True)  # 找 token 泄露
-search_history(query="password", in_request_body=True) # 找 auth 流
-search_history(query="upload", in_url=True)            # 找 upload 端点
-search_history(query="api/v", in_url=True)             # 找 API 版本
+## Arsenal handoff
 
-# 按 status 筛有趣响应
-get_proxy_history(filter_status="500")                 # 服务端错（注入候选）
-get_proxy_history(filter_status="302")                 # 重定向（open redirect 候选）
-get_proxy_history(filter_status="403")                 # 禁（auth 绕过候选）
-get_proxy_history(filter_method="POST")                # 状态变更请求
-```
+Burp is not the right home for every security operation. For capabilities supplied by FuzzingLabs Security Hub, use:
 
-### 详读一请求
-```python
-# 总查请求 AND 响应
-detail = get_request_detail(index)
-# 找：auth headers、CSRF tokens、有趣 cookies、JSON 结构
-# 响应中：error message、堆栈跟踪、版本 string、反射输入
-```
+1. `valravn_arsenal_list`
+2. `valravn_arsenal_tools`
+3. `valravn_arsenal_call(..., authorized=true)`
 
-## Collaborator 工作流（盲漏洞检测）
+This is especially useful for scanners, SAST, binary tooling, AD tooling, and other ecosystems that are independent of Burp.
 
-盲 SSRF、盲 XXE、盲 SQLi、盲命令注入：
+## Context economy
 
-```
-首选（一调）：
-  auto_collaborator_test(index, parameter, injection_point, poll_seconds=10)
-  # 生成 payload → 注入 → 发 → 等 → 轮询 → 报
+- Do not load all 150+ Ultimate schemas.
+- Search by task and inspect one schema at a time.
+- Prefer MCP resources for passive state.
+- Prefer handles/stable IDs to embedding full bodies.
+- Paginate large histories.
+- Keep binary data out of context unless necessary.
+- Summarize repetitive responses locally before returning them to the model.
 
-手动（需控时）：
-  1. generate_collaborator_payload()         # 取唯一 URL
-  2. 手注 URL 入参数                            # 经 session_request 或 resend_with_modification
-  3. 等 5-10 秒
-  4. get_collaborator_interactions()          # 查 DNS/HTTP 回调
-```
+## Professional vs Community
 
-**何时用 Collaborator：**
-- 参数接 URL 但无可见 SSRF 输出
-- XXE 无 error message（盲）
-- 命令注入无输出（盲）
-- 任何怀疑服务端处理但看不到结果的参数
+Ultimate supports both Burp editions, but Burp-native Scanner and Collaborator capabilities still depend on edition availability.
 
-## Session 管理策略
+- Community: HTTP, Proxy, Repeater-style operations, many utilities, agent-native probes, resources, and most Montoya interactions remain useful.
+- Professional: Scanner / Collaborator and other Pro-only surfaces become available.
 
-### 何时用 session
-- 目标需认证（多数真目标）
-- 多步测试（需 cookies 持久）
-- 比对不同用户角色行为
+Discover capability and handle absence explicitly. Do not replace a missing Pro feature by silently changing the test semantics.
 
-### Session 模式
-```python
-# 模式 1：单认证用户
-create_session(name="user1", base_url="https://target.com", bearer_token="eyJ...")
+## Failure policy
 
-# 模式 2：多用户做 IDOR 测试
-create_session(name="admin", base_url="https://target.com", cookies={"session": "admin_cookie"})
-create_session(name="user_b", base_url="https://target.com", cookies={"session": "user_cookie"})
-# 然后：用两 session test_auth_matrix
+Provider errors are not target evidence.
 
-# 模式 3：带 CSRF 的登录流
-run_flow(session="s1", steps=[
-  {"method": "GET", "path": "/login", "extract": {"csrf": {"from": "body", "regex": "csrf.*value=\"([^\"]+)\""}}},
-  {"method": "POST", "path": "/login", "data": "user=admin&pass=test&_token={{csrf}}"},
-])
-```
+- Ultimate unreachable -> report provider failure, optionally discover a configured fallback.
+- tool absent -> rediscover; do not guess a renamed tool.
+- schema mismatch -> request the current schema and retry with the actual contract.
+- Burp process absent -> use the unattended launcher/runbook; do not ask the operator to manually install the extension in CI.
+- active call denied by Munin -> respect the authorization gate.
 
-## 响应比较策略
+## CI contract
 
-比响应是检测多数漏洞之法。选对比较：
+The authoritative live lab is `.github/workflows/valravn-mesh-e2e.yml`.
 
-| 场景 | 工具 | 找什么 |
-|---|---|---|
-| 同请求，不同 auth | `compare_auth_states` | 相同响应 = IDOR |
-| 同请求，带 / 不带参数 | `compare_responses` | 新内容 = 参数有效 |
-| 基线 vs 注入 | `fuzz_parameter` 异常检测 | status/length/timing 变 |
-| 两不同端点 | `get_response_diff` | 共享模式或差异 |
+It must prove all of the following:
 
-## JavaScript 分析流水线
+- pinned Ultimate builds and its upstream tests pass;
+- Burp downloads from PortSwigger and passes checksum/JAR validation;
+- Burp starts without manual interaction and preloads Ultimate;
+- MCP initialize and `tools/list` work;
+- Munin Talons invokes a real Ultimate HTTP tool against OWASP Juice Shop;
+- a request traverses the real Burp Proxy listener;
+- that request is visible again through `burp://proxy/history`.
 
-JS 文件是金矿。高效流水线：
-
-```
-1. fetch_page_resources(index)        # 取页全 JS/CSS
-2. 每 JS 文件：
-   extract_js_secrets(js_index)       # API key、token、内部 URL
-   analyze_dom(js_index)              # Sinks、sources、流
-3. 找 secrets → 立即测（击 API key、访问 URL）
-4. 找 DOM sinks → 造针对特定 sink 的 DOM XSS payload
-```
-
-## 扫描器集成（Burp Professional）
-
-战略用 Burp 内置扫描器——勿扫一切：
-
-```python
-# 对特定可疑请求定点扫
-scan_url(index=42)                    # 扫一已捕获请求
-
-# 爬 + 扫一段
-crawl_target(url="https://target.com/api/")
-# 等，然后：
-get_scan_status()                     # 查进度
-get_scanner_findings(severity="HIGH") # 取结果
-```
-
-**何时用扫描器 vs 手测：**
-- 扫描器：良端点上广覆盖、被动检测
-- 手动（你的工具）：创意测试、业务逻辑、auth 绕过、链攻击
-
-## Web TLS 审计（WSTG-CRYP-01）
-
-TLS 版本 + 密码套件无法从 Burp 内可靠观察（Burp 自握手）。每 in-scope host 跑一次 nmap 并记入 intel。
-
-```bash
-nmap --script ssl-enum-ciphers -p 443 <host>
-# FAIL: TLS 1.0, TLS 1.1, SSLv3, RC4, 3DES, NULL, EXPORT, anonymous DH
-# PASS: TLS 1.2+ only, no broken cipher
-```
-
-然后：`save_target_intel(<host>, "fingerprint", {"tls_audit": "<nmap-summary>"})`。同 `playbook-mobile-dynamic.md` Phase 3 MASTG-TEST-0218 流——独立于其他漏洞的单独发现。
-
-## 反模式（勿做）
-
-1. **勿分调 detect_tech_stack + smart_analyze + smart_analyze** —— 用 `smart_analyze`（一调）
-2. **勿 run_flow 一调搞定的事发 10 个 session_request** —— 批多步攻击
-3. **勿手建 cookie header** —— 用 `create_session` 让 cookie jar 自动更新
-4. **勿每端点测每漏洞类型** —— 用 `discover_attack_surface` 按风险分排
-5. **勿忘搜 history** —— 你要的请求可能已被捕获
-6. **勿需 auth 时用 curl_request** —— 用 `session_request`
-7. **勿扫全站** —— 对特定可疑端点点扫
+If that gate fails, fix the real integration rather than adding a mock-only exception.
