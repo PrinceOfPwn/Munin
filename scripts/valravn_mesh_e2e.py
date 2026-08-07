@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,20 @@ def _decode(result):
     raise AssertionError(f"tool returned no decodable content: {result!r}")
 
 
+def _wait_for_mock(process: subprocess.Popen, host: str, port: int, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        returncode = process.poll()
+        if returncode is not None:
+            raise RuntimeError(f"mock Streamable HTTP MCP exited before readiness (exit={returncode})")
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise TimeoutError(f"mock Streamable HTTP MCP did not become ready at {host}:{port} within {timeout}s")
+
+
 async def _run(nuclei_server: Path | None) -> None:
     mock_http = subprocess.Popen(
         [sys.executable, str(ROOT / "tests" / "fixtures" / "mock_streamable_mcp.py"), "--port", "19444"],
@@ -42,7 +57,7 @@ async def _run(nuclei_server: Path | None) -> None:
     )
     temp_root = Path(tempfile.mkdtemp(prefix="valravn-mesh-e2e-"))
     try:
-        time.sleep(0.25)
+        _wait_for_mock(mock_http, "127.0.0.1", 19444)
         env = dict(os.environ)
         env["VALRAVN_TALON_ULTIMATE_URL"] = "http://127.0.0.1:19444/mcp"
         env["VALRAVN_TALON_AWESOME_URL"] = "http://127.0.0.1:19445/mcp"
@@ -56,15 +71,20 @@ async def _run(nuclei_server: Path | None) -> None:
         env["VALRAVN_ARSENAL_NUCLEI_MCP_COMMAND_JSON"] = json.dumps(arsenal_command)
 
         # The real Security Hub Nuclei server is container-oriented and defaults
-        # to /app/output. For a direct stdio E2E run, inject writable paths while
-        # keeping the exact upstream server implementation unchanged.
+        # to /app/output. Pass only the two explicitly required variables via
+        # the per-provider Valravn env allowlist; the worker does not inherit
+        # Munin's full environment or unrelated secrets.
         if nuclei_server is not None:
             output_dir = temp_root / "nuclei-output"
             templates_dir = temp_root / "nuclei-templates"
             output_dir.mkdir(parents=True, exist_ok=True)
             templates_dir.mkdir(parents=True, exist_ok=True)
-            env["NUCLEI_OUTPUT_DIR"] = str(output_dir)
-            env["NUCLEI_TEMPLATES_PATH"] = str(templates_dir)
+            env["VALRAVN_ARSENAL_NUCLEI_MCP_ENV_JSON"] = json.dumps(
+                {
+                    "NUCLEI_OUTPUT_DIR": str(output_dir),
+                    "NUCLEI_TEMPLATES_PATH": str(templates_dir),
+                }
+            )
 
         params = StdioServerParameters(
             command=sys.executable,
@@ -162,7 +182,8 @@ async def _run(nuclei_server: Path | None) -> None:
                 )
                 assert arsenal_call["ok"] is True
     finally:
-        mock_http.terminate()
+        if mock_http.poll() is None:
+            mock_http.terminate()
         mock_http.wait(timeout=5)
         shutil.rmtree(temp_root, ignore_errors=True)
 
