@@ -22,7 +22,7 @@ jobs:
     env:
       MUNIN_DB_URL: ${{ secrets.MUNIN_DB_URL }}
       MUNIN_DB_AUTH_TOKEN: ${{ secrets.MUNIN_DB_AUTH_TOKEN }}
-steps:
+    steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:

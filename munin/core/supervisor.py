@@ -265,6 +265,18 @@ def build_supervisor(
                 # <messages>, never replace). None falls back to the framework
                 # default when deepagents or the rules file is unavailable.
                 summary_prompt=cti_summary_prompt,
+                # BUG FIX: default trim_tokens_to_summarize=4000 was silently
+                # truncating the messages-to-summarize to the LAST 4000 tokens
+                # before sending them to the summary LLM.  For a 100K-token
+                # conversation that means the operator's original objective
+                # (at the start of the thread) was never seen by the summarizer
+                # — only the tail of the conversation was summarized, losing
+                # campaign intent after every compaction event.
+                # None = pass the full evicted slice to the LLM.  The evicted
+                # slice is already bounded: trigger fires at 100K, keep=40
+                # messages are preserved, so the slice sent for summarization
+                # is at most ~60K tokens — well within DeepSeek's window.
+                trim_tokens_to_summarize=None,
             )
         )
         # Observability: surface an explicit marker when the CTI compaction
