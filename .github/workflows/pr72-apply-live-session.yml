@@ -1,0 +1,39 @@
+name: PR72 apply live-session migration
+
+on:
+  push:
+    branches:
+      - agent/valravn-burp-ultimate
+    paths:
+      - .github/workflows/pr72-apply-live-session.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/valravn-burp-ultimate
+          fetch-depth: 0
+      - name: Apply migration
+        run: python scripts/apply_pr72_live_patch.py
+      - name: Validate patch
+        run: |
+          python -m py_compile scripts/apply_pr72_live_patch.py
+          git diff --check
+          grep -q 'bkimminich/juice-shop:v20.1.1' .github/workflows/live-session.yml
+          grep -q 'SHODAN_API_KEY' .github/workflows/live-session.yml
+          grep -q 'Bootstrap Valravn Talons + Burp Ultimate' .github/workflows/live-session.yml
+          grep -q 'valravn_talons_status' .github/workflows/live-session.yml
+      - name: Commit result and remove one-shot patcher
+        run: |
+          rm .github/workflows/pr72-apply-live-session.yml scripts/apply_pr72_live_patch.py
+          git config user.name 'munin-pr72-bot'
+          git config user.email 'munin-pr72-bot@users.noreply.github.com'
+          git add .github/workflows/live-session.yml valravn/scripts/start-burp-headless.sh .github/workflows/pr72-apply-live-session.yml scripts/apply_pr72_live_patch.py
+          git diff --cached --check
+          git commit -m 'feat(valravn): boot full Burp mesh in live session'
+          git push origin HEAD:agent/valravn-burp-ultimate
