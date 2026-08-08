@@ -1,0 +1,36 @@
+# Stage: BEFORE (Plan 18 Indexes Dropped - Full Table Scans)
+# Spec: munin-pr0 PR-0 performance regression baseline
+
+# Query: list_conversations
+# SQL: SELECT c.id, c.title FROM conversations c JOIN conversation_participants p ON p.conversation_id = c.id WHERE p.user_id = ? AND p.removed_at_ms IS NULL ORDER BY c.last_activity_at_ms DESC
+SCAN p
+SEARCH c USING INDEX sqlite_autoindex_conversations_1 (id=?)
+USE TEMP B-TREE FOR ORDER BY
+
+# Query: get_run_detail_reasoning_events
+# SQL: SELECT * FROM reasoning_events WHERE run_id = ?
+SCAN reasoning_events
+
+# Query: get_run_detail_tool_calls
+# SQL: SELECT * FROM tool_calls WHERE run_id = ?
+SCAN tool_calls
+
+# Query: get_run_detail_subagent_runs
+# SQL: SELECT * FROM subagent_runs WHERE parent_run_id = ?
+SCAN subagent_runs
+
+# Query: get_run_detail_human_requests
+# SQL: SELECT * FROM human_requests WHERE run_id = ?
+SCAN human_requests
+
+# Query: get_run_detail_conversation_artifacts
+# SQL: SELECT * FROM conversation_artifacts WHERE run_id = ?
+SCAN conversation_artifacts
+
+# Query: agent_runs_by_conversation
+# SQL: SELECT * FROM agent_runs WHERE conversation_id = ?
+SEARCH agent_runs USING INDEX sqlite_autoindex_agent_runs_2 (conversation_id=?)
+
+# Query: conversation_summaries_by_conv
+# SQL: SELECT * FROM conversation_summaries WHERE conversation_id = ?
+SCAN conversation_summaries

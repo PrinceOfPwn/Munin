@@ -1,4 +1,4 @@
-// tags: [utility-library, bff-client, csrf, http-client]
+// tags: [utility-library, bff-client, csrf, http-client, cancel-run, PR-2C, cancelRun]
 // -----------------------------------------------------------------------------
 // production-api — Fase 2 (issue #9) trimmed surface.
 //
@@ -178,4 +178,43 @@ export const productionApi = {
  *  a non-fetch context can read it here. */
 export function currentCsrfToken(): string {
   return csrfToken;
+}
+
+// -----------------------------------------------------------------------------
+// PR-2C — durable run cancellation.
+//
+// ``POST /api/chat/{run_id}/cancel`` is served by the Python backend and
+// proxied by the Next.js BFF catch-all (it is NOT under ``/api/production``).
+// We call it directly from the client with the cached CSRF token so the
+// server-side participant / CSRF check stays authoritative.  Return shape:
+//   202 → { ok, status: "cancelling", run_id, requested_at_ms }
+//   200 → { ok, status: <terminal>, run_id }
+//   4xx/5xx → throws an Error with the server's message.
+// -----------------------------------------------------------------------------
+export async function cancelRun(runId: string): Promise<{ status: string; requestedAtMs?: number }> {
+  const token = currentCsrfToken();
+  const response = await fetch(`/api/chat/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { "X-CSRF-Token": token } : {}),
+    },
+    body: JSON.stringify({}),
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.ok === false) {
+    const message =
+      (typeof payload?.error === "object" && payload?.error && "message" in (payload.error as Record<string, unknown>)
+        ? String((payload.error as { message?: unknown }).message ?? "")
+        : "") ||
+      (typeof payload?.error === "string" ? String(payload.error) : "") ||
+      `cancel failed (${response.status})`;
+    throw new Error(message);
+  }
+  const status = typeof payload?.status === "string" ? payload.status : "cancelling";
+  const requestedAtMs =
+    typeof payload?.requested_at_ms === "number" ? payload.requested_at_ms : undefined;
+  return { status, requestedAtMs };
 }

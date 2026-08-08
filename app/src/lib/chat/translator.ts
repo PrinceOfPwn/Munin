@@ -1,4 +1,4 @@
-// tags: [utility-library]
+// tags: [utility-library, munin-ui-v1, guidance-lifecycle, guidance_lifecycle, PR-2D, PR-2F]
 import type { UIMessageChunk } from "ai";
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,7 @@ export type BackendEnvelopeKind =
   | "heartbeat"
   | "note"
   | "guidance"
+  | "guidance_lifecycle"
   | "plan"
   | "todo"
   | "replan"
@@ -373,6 +374,43 @@ export function createTranslator(runId: string): {
 
       case "guidance":
         return envelope.text ? [{ type: "data-guidance", data: { text: envelope.text } }] : [];
+
+      // PR-2D — durable ``guidance.<state>`` lifecycle events surface here as
+      // ``data-guidance-lifecycle`` data parts. The renderer registry routes
+      // this to a typed ``guidance-lifecycle`` renderer (PR-2G) so a connected
+      // client sees the exact moment operator guidance transitions the queue
+      // (queued → delivered_to_runtime → applied_to_model_step).
+      case "guidance_lifecycle": {
+        const state = (
+          (envelope as unknown as { state?: string }).state ?? "queued"
+        ) as
+          | "queued"
+          | "delivered_to_runtime"
+          | "applied_to_model_step"
+          | "expired"
+          | "superseded"
+          | "undelivered";
+        const rec = envelope as unknown as {
+          guidance_id?: string;
+          applied_message_id?: string;
+          superseded_by_id?: string;
+          delivered_at_step?: number;
+          actor_id?: string;
+        };
+        return [{
+          type: "data-guidance-lifecycle",
+          id: `guidance-lifecycle-${rec.guidance_id ?? envelope.run_id ?? runId}-${envelope.sequence ?? Date.now()}`,
+          data: {
+            state,
+            guidanceId: rec.guidance_id ?? "",
+            appliedMessageId: rec.applied_message_id,
+            supersededById: rec.superseded_by_id,
+            deliveredAtStep: rec.delivered_at_step,
+            actorId: rec.actor_id,
+            runId: envelope.run_id ?? runId,
+          },
+        }];
+      }
 
       // Fase 3 (autonomous modes): durable plan / goal / timer visibility.
       case "plan":

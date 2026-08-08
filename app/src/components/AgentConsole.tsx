@@ -1,13 +1,16 @@
-// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon]
+// tags: [ui-component, console-surface, ai-sdk, vercel-ai, lucide-icons, client-component, use-conversations, use-ref, use-chat, use-memo, use-stream-insight, use-effect, use-elapsed-seconds, use-munin-chat, use-state, status-badge, agent-console, console-header, part-renderer, message-part-list, live-console, message-bubble, s-t-i-c-k--t-h-r-e-s-h-o-l-d, no-conversation-state, icon, detach-cancel-ui, cancel-run, PR-2C, cancel-fence-ui, typed-renderer-registry, RendererFor, guidance-lifecycle, PR-2D, PR-2G, stable-keys, PR-4D, react-memo, PR-4A, error-boundary, PR-4B, virtualization, PR-4F, tanstack-virtual]
 "use client";
 
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import type { FormEvent } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Archive,
   Bot,
@@ -18,9 +21,10 @@ import {
   Pencil,
   Send,
   Sparkles,
-  Square,
   TerminalSquare,
+  Unplug,
   WifiOff,
+  XCircle,
   Zap,
 } from "lucide-react";
 import type {
@@ -76,8 +80,16 @@ import {
   useMuninChat,
 } from "@/lib/aiChat";
 import { useConversations } from "@/lib/queries";
-import { productionApi, type ProviderProfile } from "@/lib/production-api";
+import { cancelRun, productionApi, type ProviderProfile } from "@/lib/production-api";
+import { logError } from "@/lib/logError";
 import { cn, formatDuration, isTerminalRun } from "@/lib/utils";
+// PR-2G — typed renderer registry delegates the eight munin-ui/v1 renderer
+// keys (PR-2F) through ``<RendererFor>`` so an unknown payload degrades to an
+// annotated fallback card instead of crashing the whole console tree. The
+// legacy direct renderers remain for parts outside the v1 allow-list.
+import { RendererFor } from "@/lib/rendererRegistry";
+// PR-4B — per-part render isolation around ``<PartRenderer>`` call sites.
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 // ---------------------------------------------------------------------------
 // Custom data part shapes emitted by the Munin BFF translator
@@ -163,6 +175,7 @@ interface CommandOutputData {
   toolName: string;
   stream: "stdout" | "stderr" | "meta";
   text: string;
+  sequence?: number;
   elapsedMs?: number;
   final?: boolean;
 }
@@ -184,6 +197,14 @@ type AnyUIPart =
   | DynamicToolUIPart
   | StepStartUIPart
   | DataUIPart<Record<string, unknown>>;
+
+// PR-4D — stable part keys. Array indexes are replaced by the AI SDK part id
+// when present; otherwise a deterministic ``kind``/``sequence`` fallback so a
+// streamed chunk update never re-mounts an unchanged part's DOM node.
+function stablePartKey(part: AnyUIPart, messageId: string, idx: number): string {
+  const p = part as AnyUIPart & { id?: string; kind?: string; sequence?: number };
+  return p.id ?? `${messageId}-kind-${p.kind ?? part.type}-seq-${p.sequence ?? idx}`;
+}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -245,7 +266,10 @@ function StatusBadge({ status }: { status: ChatStatus }) {
 // Message bubble shell
 // ---------------------------------------------------------------------------
 
-function MessageBubble({
+// PR-4A — memoized shell so an unchanged message (same role + children) is
+// never re-rendered when a sibling message receives a stream chunk. The part
+// tree inside is additionally protected by the memoized MessagePartList.
+const MessageBubble = memo(function MessageBubble({
   role,
   children,
 }: {
@@ -287,28 +311,45 @@ function MessageBubble({
       </div>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Per-part renderer
 // ---------------------------------------------------------------------------
 
-function PartRenderer({
-  part,
-  messageId,
-  idx,
-  role,
-  hitlApprove,
-  hitlReject,
-}: {
+interface PartRendererProps {
   part: AnyUIPart;
   messageId: string;
   idx: number;
   role: string;
   hitlApprove: HitlRequestPartProps["onApprove"];
   hitlReject: HitlRequestPartProps["onReject"];
-}) {
-  const key = `${messageId}-part-${idx}`;
+}
+
+// PR-4A — the parent (MessagePartList) recreates the hitlApprove/hitlReject
+// closures on every message update, so the comparator deliberately ignores
+// callback identity: an unchanged part (same immutable part object) must not
+// re-render when a sibling chunk lands. The captured callbacks stay correct
+// because they close over the stable message id and the stable
+// ``onHitlResolved`` wrapper.
+function partRendererPropsEqual(prev: PartRendererProps, next: PartRendererProps): boolean {
+  return (
+    prev.part === next.part &&
+    prev.messageId === next.messageId &&
+    prev.idx === next.idx &&
+    prev.role === next.role
+  );
+}
+
+const PartRenderer = memo(function PartRenderer({
+  part,
+  messageId,
+  idx,
+  role,
+  hitlApprove,
+  hitlReject,
+}: PartRendererProps) {
+  const key = stablePartKey(part, messageId, idx);
 
   // Text part
   if (part.type === "text") {
@@ -336,10 +377,14 @@ function PartRenderer({
   // Dynamic tool part — emitted when translator writes tool-input-start /
   // tool-input-available / tool-output-available / tool-output-error chunks.
   if (part.type === "dynamic-tool") {
+    // PR-2G — typed registry delegation. Map the AI SDK normalized tool
+    // invocation onto the v1 ``tool-invocation`` schema shape; the registry's
+    // adapter translates ``input`` → ``args`` and ``errorText`` → ``error``
+    // for the trusted :component:`ToolInvocationPart`.
     const dp = part as DynamicToolUIPart;
-    let invState: ToolInvocationState = "call";
+    let invState: "partial-call" | "call" | "result" = "call";
     let result: unknown = undefined;
-    let error: string | undefined = undefined;
+    let errorText: string | undefined = undefined;
     if (dp.state === "input-streaming" || dp.state === "input-available") {
       invState = dp.state === "input-streaming" ? "partial-call" : "call";
     } else if (dp.state === "output-available") {
@@ -347,17 +392,21 @@ function PartRenderer({
       result = dp.output;
     } else if (dp.state === "output-error") {
       invState = "result";
-      error = dp.errorText;
+      errorText = dp.errorText;
     }
     return (
-      <ToolInvocationPart
+      <RendererFor
         key={key}
-        toolCallId={dp.toolCallId}
-        toolName={dp.toolName}
-        args={dp.state !== "input-streaming" ? (dp.input as Record<string, unknown> | undefined) : undefined}
-        state={invState}
-        result={result}
-        error={error}
+        rendererKey="tool-invocation"
+        dataPart={{
+          type: "tool-invocation",
+          toolCallId: dp.toolCallId,
+          toolName: dp.toolName,
+          state: invState,
+          input: dp.state !== "input-streaming" ? (dp.input as Record<string, unknown> | undefined) : undefined,
+          result,
+          errorText,
+        }}
       />
     );
   }
@@ -382,30 +431,44 @@ function PartRenderer({
   }
 
   if (part.type === "data-hitl-request") {
+    // PR-2G — delegate to the typed registry so an unknown payload degrades
+    // to a fallback card. We pass the AI-SDK data-part under ``dataPart``
+    // with its ``.data`` payload hoisted to the top-level discriminator
+    // field set so the v1 ``hitl-request`` schema validates, and forward the
+    // approve/reject callbacks via ``extraProps``.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as HitlData;
     return (
-      <HitlRequestPart
+      <RendererFor
         key={key}
-        requestId={d.requestId}
-        toolName={d.toolName}
-        args={d.args ?? {}}
-        nonce={d.nonce}
-        choices={d.choices}
-        resolution={d.resolution}
-        onApprove={hitlApprove}
-        onReject={hitlReject}
+        rendererKey="hitl-request"
+        dataPart={{
+          type: "hitl-request",
+          requestId: d.requestId,
+          toolName: d.toolName,
+          args: d.args ?? {},
+          nonce: d.nonce,
+          choices: d.choices,
+          resolved: d.resolution != null,
+          ...(d.resolution != null ? { resolution: d.resolution } : {}),
+        }}
+        extraProps={{ onApprove: hitlApprove, onReject: hitlReject }}
       />
     );
   }
 
   if (part.type === "data-artifact") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ArtifactData;
     return (
-      <ArtifactPart
+      <RendererFor
         key={key}
-        artifactId={d.artifactId}
-        mimeType={d.mimeType}
-        uri={d.uri}
+        rendererKey="artifact"
+        dataPart={{
+          type: "artifact",
+          artifactId: d.artifactId,
+          mimeType: d.mimeType,
+          uri: d.uri,
+        }}
       />
     );
   }
@@ -416,15 +479,23 @@ function PartRenderer({
   }
 
   if (part.type === "data-command-output") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as CommandOutputData;
     return (
-      <CommandOutputPart
+      <RendererFor
         key={key}
-        toolName={d.toolName ?? "command"}
-        stream={d.stream ?? "stdout"}
-        text={d.text ?? ""}
-        elapsedMs={d.elapsedMs}
-        final={d.final}
+        rendererKey="command-output"
+        dataPart={{
+          type: "command-output",
+          toolName: d.toolName ?? "command",
+          toolCallId: d.toolCallId,
+          jobId: d.jobId,
+          stream: d.stream,
+          text: d.text ?? "",
+          sequence: d.sequence,
+          elapsedMs: d.elapsedMs,
+          final: d.final,
+        }}
       />
     );
   }
@@ -443,13 +514,31 @@ function PartRenderer({
   }
 
   if (part.type === "reasoning") {
+    // PR-2G — typed registry delegation. The AI SDK ``ReasoningUIPart`` is a
+    // top-level part (no ``.data``), so we wrap its ``text`` into a v1
+    // ``reasoning`` schema payload before handing it to the registry. The id
+    // is preserved on the rendered component's ``id`` prop via ``extraProps``.
     const reasoning = part as ReasoningUIPart;
-    return reasoning.text ? <ReasoningPart key={key} id={key} text={reasoning.text} /> : null;
+    if (!reasoning.text) return null;
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="reasoning"
+        dataPart={{ type: "reasoning", text: reasoning.text, id: key }}
+      />
+    );
   }
 
   if (part.type === "data-activity") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as ActivityData;
-    return <OperationalTracePart key={key} stage={d.stage ?? "working"} text={d.text ?? "Working"} />;
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="operational-trace"
+        dataPart={{ type: "operational-trace", stage: d.stage ?? "working", text: d.text ?? "Working" }}
+      />
+    );
   }
 
   if (part.type === "data-note") {
@@ -462,15 +551,51 @@ function PartRenderer({
     return <GuidancePart key={key} text={d.text} />;
   }
 
+  // PR-2D/2G — durable ``guidance.<state>`` lifecycle tick. Delegated through
+  // the typed registry so a future schema mismatch degrades to a fallback
+  // card instead of crashing the live console tree.
+  if (part.type === "data-guidance-lifecycle") {
+    const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as {
+      state?: string;
+      guidanceId?: string;
+      appliedMessageId?: string;
+      supersededById?: string;
+      deliveredAtStep?: number;
+      actorId?: string;
+      runId?: string;
+    };
+    return (
+      <RendererFor
+        key={key}
+        rendererKey="guidance-lifecycle"
+        dataPart={{
+          type: "guidance-lifecycle",
+          state: d.state ?? "queued",
+          guidanceId: d.guidanceId ?? "",
+          appliedMessageId: d.appliedMessageId,
+          supersededById: d.supersededById,
+          deliveredAtStep: d.deliveredAtStep,
+          actorId: d.actorId,
+          runId: d.runId,
+        }}
+      />
+    );
+  }
+
   // Fase 3 (autonomous modes): durable plan / goal / timer visibility.
   if (part.type === "data-plan") {
+    // PR-2G — typed registry delegation.
     const d = (part as DataUIPart<Record<string, unknown>>).data as unknown as PlanData;
     return (
-      <PlanSnapshotPart
+      <RendererFor
         key={key}
-        goal={d.goal ?? null}
-        items={d.items ?? []}
-        updatedAtMs={d.updatedAtMs}
+        rendererKey="plan"
+        dataPart={{
+          type: "plan",
+          goal: d.goal ?? null,
+          items: d.items ?? [],
+          updatedAtMs: d.updatedAtMs,
+        }}
       />
     );
   }
@@ -534,13 +659,17 @@ function PartRenderer({
 
   // Unknown part — ignore silently.
   return null;
-}
+}, partRendererPropsEqual);
 
 // ---------------------------------------------------------------------------
 // Message part list
 // ---------------------------------------------------------------------------
 
-function MessagePartList({
+// PR-4A — memoized part list: the `message` prop keeps its identity for
+// unchanged messages (the AI SDK updates messages immutably), so a stream
+// chunk that touches a sibling message never re-renders this subtree. The
+// `onHitlResolved` prop is referentially stable (see LiveConsole).
+const MessagePartList = memo(function MessagePartList({
   message,
   onHitlResolved,
 }: {
@@ -572,20 +701,27 @@ function MessagePartList({
 
   return (
     <>
-      {(message.parts as AnyUIPart[]).map((part, idx) => (
-        <PartRenderer
-          key={`${message.id}-part-${idx}`}
-          part={part}
-          messageId={message.id}
-          idx={idx}
-          role={message.role}
-          hitlApprove={hitlApprove}
-          hitlReject={hitlReject}
-        />
-      ))}
+      {(message.parts as AnyUIPart[]).map((part, idx) => {
+        // PR-4D — the key is the same stable string the part renderer
+        // computes internally, so the per-part ErrorBoundary (PR-4B) and the
+        // memoized PartRenderer share one identity across stream updates.
+        const partKey = stablePartKey(part, message.id, idx);
+        return (
+          <ErrorBoundary key={partKey} messageId={message.id} partId={partKey}>
+            <PartRenderer
+              part={part}
+              messageId={message.id}
+              idx={idx}
+              role={message.role}
+              hitlApprove={hitlApprove}
+              hitlReject={hitlReject}
+            />
+          </ErrorBoundary>
+        );
+      })}
     </>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Extract active run metadata + last tool call from the message stream
@@ -654,6 +790,68 @@ function useElapsedSeconds(active: boolean): number {
 }
 
 // ---------------------------------------------------------------------------
+// Cancel durable run button (distinct from Detach)
+// ---------------------------------------------------------------------------
+//
+// PR-2C contract:
+//   * Shown whenever a run is active (queued/running/waiting_for_human/
+//     cancelling).  A terminal run hides it.
+//   * ``idle`` → "Cancel", enabled.  Posts ``/api/chat/{run_id}/cancel``;
+//     on 202 ACK the parent flips ``cancelState`` to ``canceling``.
+//   * ``canceling`` → "Canceling…" with a spinner, disabled.  This is the
+//     truthful "we asked the server to cancel; the executor is observing
+//     the fence" state.  We do NOT pretend the run is cancelled until the
+//     durable SSE emits ``state: 'cancelled'``.
+//   * ``canceled`` → "Canceled" with a check, disabled.  Reached only when
+//     the SSE ``run.cancelled`` event arrives.
+//   * ``error`` → "Cancel" re-enabled so the operator can retry after a
+//     4xx/5xx (logged via ``logError`` upstream).
+function CancelButton({
+  state,
+  runActive,
+  onClick,
+}: {
+  state: "idle" | "requested" | "canceling" | "canceled" | "error";
+  runActive: boolean;
+  onClick: () => void;
+}) {
+  if (!runActive && state === "idle") return null;
+
+  const canceling = state === "canceling" || state === "requested";
+  const canceled = state === "canceled";
+
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={onClick}
+      disabled={canceling || canceled}
+      title={
+        canceled
+          ? "Run cancelled"
+          : canceling
+            ? "Canceling the durable run; waiting for the executor to observe the fence"
+            : "Cancel the durable run (the operator reader detaches, the server stops the run)"
+      }
+      className={cn(
+        "shrink-0",
+        canceled ? "border-success/40 text-success" : "border-danger/50 text-danger hover:bg-danger/10",
+      )}
+    >
+      {canceling ? (
+        <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+      ) : canceled ? (
+        <CheckCircle className="h-3.5 w-3.5" />
+      ) : (
+        <XCircle className="h-3.5 w-3.5" />
+      )}
+      {canceling ? "Canceling…" : canceled ? "Canceled" : "Cancel"}
+    </Button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Console header (title + status + archive + inline run insight)
 // ---------------------------------------------------------------------------
 
@@ -667,6 +865,8 @@ function ConsoleHeader({
   lastToolName,
   isStreaming,
   onStop,
+  onCancel,
+  cancelState,
   providerProfiles,
   providerBusy,
   onActivateProvider,
@@ -684,6 +884,9 @@ function ConsoleHeader({
   lastToolName: string | null;
   isStreaming: boolean;
   onStop: () => void;
+  onCancel: () => void;
+  /** idle | requested | canceling | canceled | error */
+  cancelState: "idle" | "requested" | "canceling" | "canceled" | "error";
   providerProfiles: ProviderProfile[];
   providerBusy: boolean;
   onActivateProvider: (profileId: string) => Promise<void>;
@@ -793,11 +996,16 @@ function ConsoleHeader({
             variant="outline"
             size="sm"
             onClick={onStop}
-            title="Stop streaming and leave the durable run recoverable"
+            title="Detach the local reader; the durable run keeps running in the background"
           >
-            <Square className="h-3.5 w-3.5" /> Stop
+            <Unplug className="h-3.5 w-3.5" /> Detach
           </Button>
         )}
+        <CancelButton
+          state={cancelState}
+          runActive={isStreaming && runState !== null && !isTerminalRun(runState ?? "")}
+          onClick={onCancel}
+        />
         <ProviderSwitcher
           profiles={providerProfiles}
           busy={providerBusy}
@@ -828,6 +1036,15 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
   const { messages, sendMessage, resumeStream, stop, status, error } = useMuninChat({
     conversationId,
   });
+
+  // PR-4A — useChat re-creates `resumeStream` on every render. The memoized
+  // part tree must not re-render just because the callback identity changed,
+  // so the part list receives a referentially stable wrapper whose ref always
+  // points at the latest closure (function declarations hoist, so referencing
+  // `resumeAfterHitl` here is safe).
+  const resumeAfterHitlRef = useRef<() => Promise<void>>(async () => {});
+  resumeAfterHitlRef.current = resumeAfterHitl;
+  const onHitlResolved = useCallback(() => resumeAfterHitlRef.current(), []);
 
   // Conversation metadata is read from the cached list (staleTime 30s, no
   // polling). Fetching a single conversation would require the legacy
@@ -944,24 +1161,117 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
       el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD;
   }
 
+  // PR-4F — virtualized message list. Only the rows in the viewport plus
+  // overscan are mounted; `measureElement` captures the real (variable)
+  // bubble heights after paint. While streaming, the "Munin is working…"
+  // indicator counts as the final row so the pin-to-bottom target is stable.
+  const isStreaming = status === "streaming" || status === "submitted";
+  const virtualRowCount = messages.length + (isStreaming ? 1 : 0);
+  const rowVirtualizer = useVirtualizer({
+    count: virtualRowCount,
+    getScrollElement: () => viewportRef.current,
+    estimateSize: () => 128,
+    overscan: 8,
+    getItemKey: (index) =>
+      index >= messages.length ? "stream-indicator" : messages[index].id,
+  });
+
+  // Auto-scroll: only follow the stream while the operator is reading near
+  // the bottom (within STICK_THRESHOLD px). If they scrolled up to inspect
+  // earlier content, an in-progress stream must not drag the view down.
+  // `pendingJump` forces a jump to the bottom right after sending a turn so
+  // the new response is visible even if the operator was scrolled up. With
+  // virtualization this maps to scrollToIndex(…, {align: "end"}) so the
+  // newest row pins to the viewport bottom without jitter.
   useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
+    if (messages.length === 0) return;
     if (pendingJumpRef.current) {
       pendingJumpRef.current = false;
       stickToBottomRef.current = true;
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    } else if (stickToBottomRef.current) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
     }
-  }, [messages]);
+    if (!stickToBottomRef.current) return;
+    rowVirtualizer.scrollToIndex(virtualRowCount - 1, { align: "end" });
+  }, [messages, rowVirtualizer, virtualRowCount]);
 
-  const isStreaming = status === "streaming" || status === "submitted";
+  // Correct measurement drift while pinned to the bottom: rows are measured
+  // after paint, so the first scrollToIndex can land short; re-pin whenever
+  // the virtual total height changes while we are still near the bottom.
+  const virtualTotalSize = rowVirtualizer.getTotalSize();
+  useEffect(() => {
+    if (!stickToBottomRef.current || messages.length === 0) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > STICK_THRESHOLD + 16) {
+      rowVirtualizer.scrollToIndex(virtualRowCount - 1, { align: "end" });
+    }
+  }, [messages.length, rowVirtualizer, virtualRowCount, virtualTotalSize]);
   const insight = useStreamInsight(messages);
   const runIsActive = Boolean(
     insight.activeRunId && !isTerminalRun(insight.runState ?? ""),
   );
   const elapsedSeconds = useElapsedSeconds(isStreaming);
+
+  // PR-2C durable cancel UI state.  The SSE ``data-run-state`` part is the
+  // source of truth for the terminal transition; we only render "Canceled"
+  // once the server has actually finalised the run (not on the 202 ACK).
+  const [cancelState, setCancelState] = useState<
+    "idle" | "requested" | "canceling" | "canceled" | "error"
+  >("idle");
+
+  // Reset cancel UI when the active run id changes (new turn → fresh button).
+  useEffect(() => {
+    setCancelState("idle");
+  }, [insight.activeRunId]);
+
+  // Flip to ``canceled`` ONLY when the durable SSE emits state: cancelled.
+  // ``cancelling`` (the fence marker ACK) is shown through ``canceling``.
+  useEffect(() => {
+    if (insight.runState === "cancelled") {
+      setCancelState("canceled");
+    } else if (insight.runState === "cancelling" && cancelState === "idle") {
+      // A reconnect arrived mid-cancel (server replayed run.cancelling).
+      setCancelState("canceling");
+    }
+    // Reset the button back to idle if the run terminates a different way
+    // (completed/failed/interrupted) — we never showed "Canceled" anyway.
+    if (
+      insight.runState &&
+      insight.runState !== "cancelled" &&
+      insight.runState !== "cancelling" &&
+      isTerminalRun(insight.runState) &&
+      cancelState !== "idle" &&
+      cancelState !== "canceled"
+    ) {
+      setCancelState("idle");
+    }
+  }, [insight.runState, cancelState]);
+
+  async function handleCancelRun() {
+    const runId = insight.activeRunId;
+    if (!runId) return;
+    setCancelState("requested");
+    try {
+      const result = await cancelRun(runId);
+      if (result.status === "cancelling") {
+        // 202 ACK — the executor is observing the fence; switch to the
+        // truthful ``canceling`` state until the SSE ``cancelled`` lands.
+        setCancelState("canceling");
+        toast.success("Cancel requested; the durable run will stop at the next step");
+      } else {
+        // 200 — the run was already terminal. The SSE already rendered the
+        // terminal state; keep the button truthful.
+        setCancelState(result.status === "cancelled" ? "canceled" : "idle");
+      }
+    } catch (error) {
+      logError({
+        context: "cancel",
+        error,
+        meta: { runId },
+      });
+      setCancelState("error");
+      toast.error(error instanceof Error ? error.message : "Could not cancel the durable run");
+    }
+  }
 
   // Once the stream reveals the durable goal id, keep it so later turns
   // attach to the same goal instead of creating a duplicate.
@@ -1105,6 +1415,8 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         lastToolName={insight.lastToolName}
         isStreaming={isStreaming}
         onStop={stop}
+        onCancel={handleCancelRun}
+        cancelState={cancelState}
         providerProfiles={providerProfiles}
         providerBusy={providerBusy}
         onActivateProvider={activateProvider}
@@ -1137,13 +1449,13 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
         </div>
       )}
 
-      {/* Message stream */}
+      {/* Message stream — PR-4F: virtualized rows (viewport + overscan only) */}
       <ScrollArea
         className="min-h-0 flex-1"
         viewportRef={viewportRef}
         onViewportScroll={handleViewportScroll}
       >
-        <div className="mx-auto max-w-4xl space-y-4 px-4 py-6 md:px-8">
+        <div className="mx-auto max-w-4xl px-4 py-6 md:px-8">
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent/10 text-accent">
@@ -1163,19 +1475,37 @@ function LiveConsole({ conversationId }: { conversationId: string }) {
             </div>
           )}
 
-          {messages.map((message) => (
-            <MessageBubble key={message.id} role={message.role}>
-              <MessagePartList message={message} onHitlResolved={resumeAfterHitl} />
-            </MessageBubble>
-          ))}
-
-          {/* Streaming indicator */}
-          {isStreaming && (
-            <div className="flex items-center gap-2 pl-10 text-xs text-muted">
-              <LoaderCircle className="h-3 w-3 animate-spin text-accent" />
-              <span>Munin is working…</span>
-            </div>
-          )}
+          <div
+            className="relative"
+            style={{ height: rowVirtualizer.getTotalSize() }}
+          >
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const isIndicator = virtualRow.index >= messages.length;
+              return (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full pb-4"
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  {isIndicator ? (
+                    <div className="flex items-center gap-2 pl-10 text-xs text-muted">
+                      <LoaderCircle className="h-3 w-3 animate-spin text-accent" />
+                      <span>Munin is working…</span>
+                    </div>
+                  ) : (
+                    <MessageBubble role={messages[virtualRow.index].role}>
+                      <MessagePartList
+                        message={messages[virtualRow.index]}
+                        onHitlResolved={onHitlResolved}
+                      />
+                    </MessageBubble>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </ScrollArea>
 
@@ -1312,5 +1642,5 @@ export default function AgentConsole({ conversationId }: AgentConsoleProps) {
   if (!conversationId) {
     return <NoConversationState />;
   }
-  return <LiveConsole conversationId={conversationId} />;
+  return <LiveConsole key={conversationId} conversationId={conversationId} />;
 }

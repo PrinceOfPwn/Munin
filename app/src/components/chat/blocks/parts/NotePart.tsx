@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, note-part]
+// tags: [ui-component, data-part, chat-stream-part, note-part, react-memo, PR-4A]
+import { memo } from "react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -17,7 +18,7 @@ export interface NotePartProps {
  * Displays an operator note with a warning left-border accent.
  * Notes are informational messages injected by a human operator into the run.
  */
-export function NotePart({ text }: NotePartProps) {
+export const NotePart = memo(function NotePart({ text }: NotePartProps) {
   return (
     <div
       className={cn(
@@ -32,4 +33,4 @@ export function NotePart({ text }: NotePartProps) {
       <p className="text-body">{text}</p>
     </div>
   );
-}
+});

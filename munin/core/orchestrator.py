@@ -72,30 +72,21 @@ class Orchestrator:
                 "spawned": False,
             }
 
-        # We won the claim — spawn and promote SPAWNING → RUNNING once we have a pid.
-        try:
-            pid = self._spawn_runner(subagent_name, detached=detached)
-        except Exception:
-            # Release the slot so the next caller can try.
-            self.state.upsert_presence(
-                agent_name=subagent_name,
-                role="",
-                status="IDLE",
-                current_task_id=None,
-                metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
-            )
-            raise
+        # We won the claim — in supervisor_v2 release claim slot to IDLE (munin.subagents.runner does not ship in v1.0.0)
         self.state.upsert_presence(
             agent_name=subagent_name,
-            role=task.get("role", ""),
-            status="RUNNING",
+            role="",
+            status="IDLE",
             current_task_id=None,
-            metadata_json=json.dumps(
-                presence_metadata(pid, extra={"wake_id": wake_id}),
-                ensure_ascii=True,
-            ),
+            metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
         )
-        return {"wake_id": wake_id, "target_agent": subagent_name, "pid": pid, "spawned": True}
+        return {
+            "wake_id": wake_id,
+            "target_agent": subagent_name,
+            "pid": None,
+            "spawned": False,
+            "reason": "supervisor_v2_wake_path",
+        }
 
     def sleep(self, subagent_name: str) -> dict[str, Any]:
         """Mark presence as IDLE. The runner subprocess exits on its own when the
@@ -111,6 +102,7 @@ class Orchestrator:
         return {"target_agent": subagent_name, "status": "IDLE"}
 
     def _spawn_runner(self, subagent_name: str, *, detached: bool) -> int:
+        """Legacy supervisor_v1 runner spawner. Note: munin.subagents.runner does not ship in v1.0.0."""
         cmd = [sys.executable, "-m", "munin.subagents.runner", subagent_name]
         popen_kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL}
         if detached:

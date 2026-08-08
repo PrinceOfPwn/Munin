@@ -1,4 +1,4 @@
-// tags: [utility-library, indexeddb, browser-cache, persistence, client-component, use-browser-cache, use-memo, use-effect, use-callback, use-context, use-state, t-e-r-m-i-n-a-l--m-a-r-k-e-r--s-t-a-t-e-s, browser-cache-provider, browser-cache-context]
+// tags: [utility-library, indexeddb, browser-cache, persistence, client-component, use-browser-cache, use-memo, use-effect, use-callback, use-context, use-state, t-e-r-m-i-n-a-l--m-a-r-k-e-r--s-t-a-t-e-s, atomic-replace, browser-cache-provider, browser-cache-context]
 "use client";
 
 // -----------------------------------------------------------------------------
@@ -44,7 +44,7 @@ import {
   putConversation,
   putConversations,
   putKv,
-  putMessages,
+  replaceMessagesByConversation,
   type CacheMessage,
   type RunMarker,
 } from "./db";
@@ -195,8 +195,16 @@ export function BrowserCacheProvider({ children }: { children: ReactNode }) {
         created_at: Date.now(),
         order: index,
       }));
-      void putMessages(rows).catch(() => {
-        // Cache is optional.
+      // Atomic clear+put inside one IDB readwrite transaction — avoids the
+      // empty-cache window the old clear→then(put) chain exposed when `put`
+      // threw after `clear` had already committed.
+      void replaceMessagesByConversation(conversationId, rows).catch((error) => {
+        console.error({
+          context: "cache.setMessages",
+          error,
+          meta: { conversationId, count: messages.length },
+          ts: Date.now(),
+        });
       });
     },
     [],

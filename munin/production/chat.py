@@ -1,4 +1,4 @@
-# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, memory-scoping, actor_id]
+# tags: [orchestrator, runtime, core, web-ui, coordination, subagent, hitl-approval, ProgressEmitMiddleware, register_chat_routes, _stream_idempotent_replay, sse-streaming, ai-sdk-v5, guidance-api, supervisor-runner, idempotency-key, cancel-fence, run.cancelling, observe_cancel_fence, guidance-lifecycle, guidance.queued, guidance.delivered_to_runtime, guidance.applied_to_model_step, _envelope_from_event, PR-2A, PR-2B, PR-2D]
 """Deep Agents supervisor → SSE bridge (Fase 1a of issue #9 migration).
 
 This module owns ``POST /api/chat``, ``GET /api/chat/{conversation_id}/stream``
@@ -53,6 +53,8 @@ from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
+
+from .runs import observe_cancel_fence
 
 log = logging.getLogger("munin.production.chat")
 
@@ -465,6 +467,15 @@ def _envelope_from_event(
         state = kind.split(".", 1)[1]
         if state == "claimed":
             return {"kind": "run_state", "run_id": run_id, "state": "running"}
+        if state == "cancelling":
+            # Non-terminal fence marker (PR-2B).  The durable event is
+            # emitted by ``request_cancel_fence`` immediately on cancel
+            # ACK; replay surfaces it so a reconnecting client renders the
+            # truthful ``cancelling`` state instead of a stale ``running``.
+            envelope = {"kind": "run_state", "run_id": run_id, "state": "cancelling"}
+            if isinstance(payload, dict) and payload.get("requested_at_ms"):
+                envelope["requested_at_ms"] = payload["requested_at_ms"]
+            return envelope
         if state in TERMINAL_STATES:
             envelope: dict[str, Any] = {"kind": "run_state", "run_id": run_id, "state": state}
             if isinstance(payload, dict) and payload.get("assistant_message_id"):
@@ -558,12 +569,76 @@ def _envelope_from_event(
         # ``_pending_human_request_envelopes`` below.
         return None
 
+    if kind.startswith("subagent."):
+        # PR-6D — workflow event vocabulary.  The durable runtime emits the
+        # dotted ``subagent.*`` family (``subagent.queued`` today via
+        # ``create_subagent_run``; ``subagent.started`` / ``subagent.state``
+        # are the reserved transitions).  The frontend contract (BFF
+        # DOTTED_KIND_MAP + translator) expects the normalized
+        # ``subagent_started`` / ``subagent_state`` envelope with the stable
+        # ``subagent_id`` / ``name`` fields, while the durable payload
+        # carries ``subagent_run_id`` / ``profile_id``.  We normalize here so
+        # live and replay streams agree without inventing producers.
+        subagent_state = str(kind.split(".", 1)[1])
+        if not isinstance(payload, dict):
+            return None
+        subagent_id = str(payload.get("subagent_id") or payload.get("subagent_run_id") or "")
+        name = str(payload.get("name") or payload.get("profile_id") or "")
+        if not subagent_id:
+            return None
+        if subagent_state in {"queued", "started", "spawn"}:
+            envelope = {
+                "kind": "subagent_started",
+                "run_id": run_id,
+                "subagent_id": subagent_id,
+                "name": name,
+                "state": "started",
+            }
+        else:
+            # state / completed / failed / cancelled — surface the truthful
+            # transition; the client renders the raw state verbatim.
+            envelope = {
+                "kind": "subagent_state",
+                "run_id": run_id,
+                "subagent_id": subagent_id,
+                "name": name,
+                "state": str(payload.get("state") or subagent_state),
+            }
+        if payload.get("objective"):
+            envelope["objective"] = str(payload["objective"])
+        return envelope
+
     if kind.startswith("human_request.") or kind.startswith("subagent."):
         # Pass through — the BFF normalizer folds ``payload`` into the
         # top-level envelope and the client translator understands both.
         envelope = {"kind": kind, "run_id": run_id}
         if isinstance(payload, dict):
             envelope.update(payload)
+        return envelope
+
+    if kind.startswith("guidance."):
+        # PR-2D — guidance lifecycle events (queued / delivered_to_runtime /
+        # applied_to_model_step / expired / superseded / undelivered).  The
+        # durable ``state`` column on ``run_guidance_queue`` is the source of
+        # truth; these envelopes carry the same data so a connected client can
+        # surface a hyperprecise "operator guidance reached the model" tick
+        # without polling the queue table.  Mirrors the ``run.cancelling``
+        # family introduced by PR-2B.
+        envelope = {"kind": "guidance_lifecycle", "run_id": run_id}
+        if isinstance(payload, dict):
+            envelope["state"] = str(payload.get("state") or kind.split(".", 1)[1])
+            envelope["guidance_id"] = str(payload.get("guidance_id") or "")
+            if payload.get("applied_message_id"):
+                envelope["applied_message_id"] = str(payload["applied_message_id"])
+            if payload.get("superseded_by_id"):
+                envelope["superseded_by_id"] = str(payload["superseded_by_id"])
+            if payload.get("delivered_at_step") is not None:
+                envelope["delivered_at_step"] = int(payload["delivered_at_step"])
+            if payload.get("actor_id"):
+                envelope["actor_id"] = str(payload["actor_id"])
+        else:
+            envelope["state"] = kind.split(".", 1)[1]
+            envelope["guidance_id"] = ""
         return envelope
 
     return None
@@ -982,7 +1057,6 @@ async def _stream_chat(
         resume_from_checkpoint=resume_from_checkpoint,
         mode=mode,
         goal=goal,
-        actor_id=str(actor_info.get("id") or ""),
     )
     try:
         async for envelope in runner_stream:
@@ -1024,18 +1098,34 @@ async def _stream_chat(
                     finalized = True
                     break
 
+            # PR-2B cancel fence: between supervisor steps, observe the durable
+            # ``cancel_requested_at_ms`` marker set by ``POST /api/chat/{run_id}
+            # /cancel``.  When the operator (or a recovery probe) requested
+            # cancellation, stop iterating the graph and finalise the run as
+            # ``cancelled``.  A pending HITL request for this run was already
+            # atomically rejected by ``request_cancel_fence``, so a
+            # ``waiting_for_human`` run that gets cancelled here will not be
+            # resumed by a later approval.
+            if observe_cancel_fence(store, run_id=run_id):
+                log.info("chat: cancel fence observed run_id=%s", run_id)
+                final_state = "cancelled"
+                break
+
             if await request.is_disconnected():
                 log.info("chat: client disconnected, aborting run_id=%s", run_id)
                 break
 
         if not finalized and not paused_for_human and not lease_lost.is_set():
+            cancelled_by_fence = final_state == "cancelled"
             final_content = "".join(assistant_buffer) or "(no response)"
+            outcome = "cancelled" if cancelled_by_fence else "completed"
+            terminal_state = "cancelled" if cancelled_by_fence else "completed"
             _finalize(
                 store,
                 run_id=run_id,
                 lease_token=lease_token,
                 content=final_content,
-                outcome="completed",
+                outcome=outcome,
                 conversation_id=conversation_id,
             )
             sequence += 1
@@ -1043,13 +1133,14 @@ async def _stream_chat(
                 {
                     "kind": "run_state",
                     "run_id": run_id,
-                    "state": "completed",
+                    "state": terminal_state,
                     "content": final_content,
+                    "reason": "cancel_fence" if cancelled_by_fence else None,
                 },
                 sequence=sequence,
             )
             finalized = True
-            final_state = "completed"
+            final_state = terminal_state
     except Exception as exc:  # noqa: BLE001 - durable failure boundary
         log.exception("chat: supervisor run failed run_id=%s", run_id)
         final_error = str(exc)
@@ -1188,36 +1279,6 @@ async def recover_persisted_chat_runs(*, store: Any, shared_state: Any) -> list[
         goal_id = execution.get("goal_id")
         if recovery_goal and goal_id and str(recovery_goal.get("id")) != str(goal_id):
             recovery_goal = None
-
-        # When recovering a HITL-approved run after a process restart, inject
-        # a continuation directive via the durable guidance queue so the
-        # OperatorGuidanceMiddleware drains it at the next ``before_model``
-        # hook (AFTER the approved tools execute). This is the opencode-style
-        # "projected history reload" but done inside the graph at the correct
-        # point — NOT via Command(update=...) which would corrupt the
-        # checkpoint's channel versions (see runtime_adapter.py comment).
-        if resume_decisions is not None:
-            recovery_prompt = str(execution.get("message") or "")
-            guidance_body = (
-                "Operator approved the pending tool execution. "
-                "Resume the approved action, incorporate its result, "
-                "and continue the workflow toward the original objective."
-            )
-            if recovery_prompt:
-                guidance_body = (
-                    f"Operator approved the pending tool execution. "
-                    f"Your original objective was: \"{recovery_prompt[:500]}\". "
-                    f"Resume the approved action, incorporate its result, "
-                    f"and continue the workflow toward that objective. "
-                    f"Do NOT ask the operator to repeat the objective — proceed now."
-                )
-            with suppress(Exception):
-                store.enqueue_guidance(
-                    run_id=run_id,
-                    actor_id=str(candidate.get("actor_id") or ""),
-                    actor_username="recovery",
-                    body=guidance_body,
-                )
 
         _launch_chat_run(
             store=store,
@@ -1620,47 +1681,14 @@ def register_chat_routes(
                 lease_token, assistant_message_id = _claim_direct(
                     store, run_id=str(result["run_id"])
                 )
-                # Fetch the original prompt + history so the guidance
-                # message can remind the model WHAT it was doing before
-                # the interrupt. Without this the model has amnesia.
-                original_prompt = ""
-                resume_history: list = []
-                with suppress(Exception):
-                    exec_ctx = store.run_execution_context(run_id=str(result["run_id"]))
-                    original_prompt = str(exec_ctx.get("message") or "")
-                    resume_history = list(exec_ctx.get("history") or [])
-                guidance_body = (
-                    "Operator approved the pending tool execution. "
-                    "Resume the approved action, incorporate its result, "
-                    "and continue the workflow toward the original objective."
-                )
-                if original_prompt:
-                    guidance_body = (
-                        f"Operator approved the pending tool execution. "
-                        f"Your original objective was: \"{original_prompt[:500]}\". "
-                        f"Resume the approved action, incorporate its result, "
-                        f"and continue the workflow toward that objective. "
-                        f"Do NOT ask the operator to repeat the objective — proceed now."
-                    )
-                # Inject the continuation directive so the model proceeds
-                # with the approved tool work instead of hallucinating
-                # "standing by" — OperatorGuidanceMiddleware drains this
-                # before the first post-resume model call.
-                with suppress(Exception):
-                    store.enqueue_guidance(
-                        run_id=str(result["run_id"]),
-                        actor_id=str(current["id"]),
-                        actor_username=str(current.get("username") or "operator"),
-                        body=guidance_body,
-                    )
                 _launch_chat_run(
                     store=store,
                     shared_state=shared_state,
                     actor_info=current,
                     run_id=str(result["run_id"]),
                     conversation_id=str(run["conversation_id"]),
-                    prompt=original_prompt,
-                    conversation_history=resume_history,
+                    prompt="",
+                    conversation_history=[],
                     assistant_message_id=assistant_message_id,
                     lease_token=lease_token,
                     resume_decisions=[{"type": "approve"}]

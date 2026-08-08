@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, subagent-presence-part]
+// tags: [ui-component, data-part, chat-stream-part, subagent-presence-part, react-memo, PR-4A]
+import { memo } from "react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ function stateDotColour(state: string): string {
  * Renders a subagent presence card with the agent name, current state, and an
  * optional button that opens the forge floating chat window for that subagent.
  */
-export function SubagentPresencePart({
+export const SubagentPresencePart = memo(function SubagentPresencePart({
   subagentId,
   name,
   state,
@@ -96,4 +97,4 @@ export function SubagentPresencePart({
       )}
     </div>
   );
-}
+});

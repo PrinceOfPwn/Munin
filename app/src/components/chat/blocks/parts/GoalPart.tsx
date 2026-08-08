@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, lucide-icons, goal-part]
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, goal-part, react-memo, PR-4A]
+import { memo } from "react";
 import { Target } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +27,7 @@ export interface GoalPartProps {
  * GOAL / BEAST modes operate against this goal; the panel surfaces its state
  * transitions (active / paused / done / cancelled).
  */
-export function GoalPart({ goal, state }: GoalPartProps) {
+export const GoalPart = memo(function GoalPart({ goal, state }: GoalPartProps) {
   const goalState = state ?? goal?.state ?? "unknown";
   if (!goal?.objective && goalState === "unknown") return null;
 
@@ -71,4 +72,4 @@ export function GoalPart({ goal, state }: GoalPartProps) {
       )}
     </div>
   );
-}
+});

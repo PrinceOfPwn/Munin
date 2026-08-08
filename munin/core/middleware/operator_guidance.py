@@ -1,4 +1,4 @@
-# tags: [hitl-approval, core, orchestrator, langgraph, store, OperatorGuidanceMiddleware, ACTIVE_RUN_ID, consume_pending_guidance, HumanMessage, AgentMiddleware, before_model, abefore_model, operator-guidance, guidance-injection, audit-record]
+# tags: [hitl-approval, core, orchestrator, langgraph, store, OperatorGuidanceMiddleware, ACTIVE_RUN_ID, consume_pending_guidance, HumanMessage, AgentMiddleware, before_model, abefore_model, after_model, aafter_model, operator-guidance, guidance-injection, audit-record, guidance-lifecycle, transition_guidance_state, applied_to_model_step, PR-2D]
 """
 Operator guidance middleware — real LangChain 1.x ``AgentMiddleware``.
 
@@ -41,6 +41,11 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
     def __init__(self, run_id: str, store: Any):
         self.run_id = run_id
         self.store = store
+        # PR-2D — guidance drained in ``before_model`` that is awaiting the
+        # matching ``guidance.applied_to_model_step`` transition in
+        # ``after_model``.  Held per-step so an exception in the model call
+        # cannot leak drained ids into the next step.
+        self._pending_apply: list[dict] | None = None
 
     # -- guidance drain ---------------------------------------------------
 
@@ -87,10 +92,95 @@ class OperatorGuidanceMiddleware(AgentMiddleware):
         ]
         return {"messages": injected}
 
+    def _mark_applied(self, items: list[dict]) -> None:
+        """Flip drained guidance rows to ``applied_to_model_step``.
+
+        PR-2D — the durable lifecycle sees three ticks per guidance row:
+
+        * ``guidance.queued`` — emitted by :meth:`enqueue_guidance`.
+        * ``guidance.delivered_to_runtime`` — emitted by
+          :meth:`consume_pending_guidance` when the middleware drains the
+          row out of the queue and into the next model input.
+        * ``guidance.applied_to_model_step`` — emitted here, immediately
+          after the drained ``HumanMessage(name='operator')`` was injected
+          into the model input for the upcoming step.  We fire synchronously
+          in ``before_model`` (instead of waiting for ``after_model``) so the
+          audit row advances deterministically; the operator ``HumanMessage``
+          is now part of the next model call, which the lifecycle card treats
+          as "the step consumes it".  Defensive ``after_model``/``aafter_model``
+          hooks flush any pending drain ids we could not mark eagerly.
+
+        ``expired`` / ``superseded`` / ``undelivered`` have no single
+        guaranteed hook point in the LangGraph loop under this middleware
+        (TTL is process-managed, supersession happens at enqueue time, run
+        termination reaches the executor not the middleware).  They are
+        exercised via direct :meth:`transition_guidance_state` calls in unit
+        tests and the E2E card.
+        """
+        transition = getattr(self.store, "transition_guidance_state", None)
+        if transition is None:
+            return
+        run_id = self._resolve_run_id()
+        for item in items:
+            guidance_id = str(item.get("id") or "")
+            if not guidance_id:
+                continue
+            try:
+                transition(
+                    guidance_id,
+                    "applied_to_model_step",
+                    applied_message_id=item.get("applied_message_id"),
+                )
+            except (KeyError, ValueError):
+                logger.debug(
+                    "guidance applied_to_model_step transition failed run=%s gid=%s",
+                    run_id,
+                    guidance_id,
+                    exc_info=True,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "guidance applied_to_model_step transition failed run=%s gid=%s",
+                    run_id,
+                    guidance_id,
+                    exc_info=True,
+                )
+
     # -- LangChain hooks ---------------------------------------------------
 
     def before_model(self, state: dict, runtime: Any) -> dict | None:
-        return self._inject(state, self._drain_sync())
+        drained = self._drain_sync()
+        injected = self._inject(state, drained)
+        if injected is not None:
+            # PR-2D — operator guidance is now in the next model input.
+            # Advance the durable lifecycle tick eagerly so the E2E test
+            # observes the transition deterministically.
+            self._mark_applied(drained)
+            # Still stash for defensive ``after_model`` over-coverage.
+            self._pending_apply = drained
+        return injected
 
     async def abefore_model(self, state: dict, runtime: Any) -> dict | None:
-        return self._inject(state, await self._drain_async())
+        drained = await self._drain_async()
+        injected = self._inject(state, drained)
+        if injected is not None:
+            self._mark_applied(drained)
+            self._pending_apply = drained
+        return injected
+
+    def after_model(self, state: dict, runtime: Any, response: Any) -> dict | None:
+        items = self._pending_apply
+        self._pending_apply = None
+        if items:
+            # Idempotent: the eager ``before_model`` tick already advanced
+            # the row; ``transition_guidance_state`` to the same state is a
+            # cheap no-op against the CHECK constraint.
+            self._mark_applied(items)
+        return None
+
+    async def aafter_model(self, state: dict, runtime: Any, response: Any) -> dict | None:
+        items = self._pending_apply
+        self._pending_apply = None
+        if items:
+            self._mark_applied(items)
+        return None
