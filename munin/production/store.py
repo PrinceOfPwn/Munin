@@ -1,4 +1,4 @@
-# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance]
+# tags: [database, sqlite, persistence, store, checkpointer, core, runtime, ProductionStore, MuninStore, ARGON2, AESGCM, MIGRATION_ID, REDACTION_POLICY_VERSION, idempotency-fencing, event-provenance, plan18-indexes, cancel-fence, request_cancel_fence, reject_human_requests_for_run, run.cancelling, guidance-lifecycle, GUIDANCE_STATES, transition_guidance_state, guidance.queued, guidance.delivered_to_runtime, PR-2D]
 """Durable production aggregate for conversations, operations, and identity.
 
 The existing ``SharedStateStore`` remains compatible with legacy MCP tools.
@@ -30,7 +30,7 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from argon2.low_level import Type
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .redaction import redact_payload, redact_text
+from .redaction import redact_payload, redact_text, sanitize_artifact_content
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +256,42 @@ _FASE2_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("reasoning_events", "metadata_json", "TEXT"),
 )
 
+# PR-2D — guidance lifecycle columns added to ``run_guidance_queue``.  Most
+# columns are plain ``TEXT``/``INTEGER`` and fit the simple
+# ``_FASE2_OPTIONAL_COLUMNS`` (table, column, coltype) pattern.  The ``state``
+# column carries a ``CHECK`` constraint that SQLite ``ALTER TABLE ADD COLUMN``
+# accepts, so it is expressed as a full column-DDL fragment instead.  The
+# ``DEFAULT`` values keep existing rows (state='queued', ts=0) valid under the
+# CHECK constraint.  All four additions are idempotent (PRAGMA-guarded).
+_FASE2_OPTIONAL_CONSTRAINED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, full_column_ddl) — full DDL so CHECK / DEFAULT survive.
+    (
+        "run_guidance_queue",
+        "state",
+        "TEXT NOT NULL DEFAULT 'queued' "
+        "CHECK(state IN ('queued','delivered_to_runtime','applied_to_model_step',"
+        "'expired','superseded','undelivered'))",
+    ),
+    ("run_guidance_queue", "state_updated_at_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ("run_guidance_queue", "applied_message_id", "TEXT"),
+    ("run_guidance_queue", "superseded_by_id", "TEXT"),
+)
+
+# The set of guidance lifecycle states tracked by the durable ``state`` column
+# above.  Mirrors the CHECK constraint so callers (``transition_guidance_state``)
+# can validate before writing instead of relying on a sqlite ``IntegrityError``
+# for control flow — keeps the audit record clean and the error message useful.
+GUIDANCE_STATES: frozenset[str] = frozenset(
+    {
+        "queued",
+        "delivered_to_runtime",
+        "applied_to_model_step",
+        "expired",
+        "superseded",
+        "undelivered",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Fase 3 (autonomous modes, issue #14) idempotent additions
 # ---------------------------------------------------------------------------
@@ -322,12 +358,39 @@ _FASE3_DDL: tuple[str, ...] = (
     )""",
     """CREATE INDEX IF NOT EXISTS idx_timers_due
         ON timers(state, due_at_ms, lease_expires_at_ms)""",
+    # PR-6 (Issue #32) — artifacts read-model: listing by conversation must be
+    # served off a composite (conversation_id, created_at_ms) index instead of
+    # scanning every artifact row.  Idempotent like the rest of this block.
+    """CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_conv_created
+        ON conversation_artifacts(conversation_id, created_at_ms)""",
 )
 
 # Optional column adds for Fase 3; guarded via PRAGMA at boot.
 _FASE3_OPTIONAL_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("agent_runs", "mode", "TEXT"),
     ("agent_runs", "goal_id", "TEXT"),
+    # PR-6 (Issue #32) — rich artifact metadata.  ``conversation_artifacts``
+    # already carries ``language`` and ``run_id`` (Fase 1 / Plan 18), so only
+    # the renderer contract fields are added.  ``version`` defaults to 1 so
+    # pre-PR-6 rows (extracted by ``complete_run``) stay valid under the
+    # deterministic read-model without a backfill.  Idempotent PRAGMA-guarded
+    # ADD COLUMN like the rest of this tuple.
+    ("conversation_artifacts", "renderer", "TEXT"),
+    ("conversation_artifacts", "version", "INTEGER NOT NULL DEFAULT 1"),
+    ("conversation_artifacts", "provenance", "TEXT"),
+    ("conversation_artifacts", "preview_url", "TEXT"),
+    ("conversation_artifacts", "download_url", "TEXT"),
+)
+
+_PLAN18_DDL: tuple[str, ...] = (
+    """CREATE INDEX IF NOT EXISTS idx_conversation_participants_user ON conversation_participants(user_id, removed_at_ms)""",
+    """CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation ON agent_runs(conversation_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_reasoning_events_run ON reasoning_events(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_human_requests_run ON human_requests(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs(parent_run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_run ON conversation_artifacts(run_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_conversation_summaries_conv ON conversation_summaries(conversation_id)""",
 )
 
 # ---------------------------------------------------------------------------
@@ -675,6 +738,13 @@ class ProductionStore:
         # so they can evolve without breaking every existing deployment.
         self._install_fase2_essentials()
         self._install_fase3_essentials()
+        self._install_plan18_indexes()
+
+    def _install_plan18_indexes(self) -> None:
+        """Idempotently install Plan 18 query optimization indexes."""
+        with self._transaction() as conn:
+            for ddl in _PLAN18_DDL:
+                conn.execute(ddl)
 
     def _install_fase3_essentials(self) -> None:
         """Idempotently install the Fase 3 (autonomous modes) schema."""
@@ -697,6 +767,14 @@ class ProductionStore:
                 names = {str(r["name"] if hasattr(r, "keys") else r[1]) for r in rows}
                 if column not in names:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+            # PR-2D — guidance lifecycle columns.  Same PRAGMA-guarded ADD
+            # COLUMN pattern as ``_FASE2_OPTIONAL_COLUMNS``, but the column
+            # DDL carries CHECK/DEFAULT so it is stored as a full fragment.
+            for table, column, column_ddl in _FASE2_OPTIONAL_CONSTRAINED_COLUMNS:
+                rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+                names = {str(r["name"] if hasattr(r, "keys") else r[1]) for r in rows}
+                if column not in names:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_ddl}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS tool_calls_by_parallel_group "
                 "ON tool_calls(parallel_group_id)"
@@ -990,71 +1068,6 @@ class ProductionStore:
         if not row:
             raise PermissionError("actor is not authorized for this conversation")
 
-    def add_conversation_participant(self, *, conversation_id: str, user_id: str, role: str = "member") -> dict[str, Any]:
-        """Add a participant to an existing conversation (community channel graph).
-
-        Used by the Discord adapter so every member of a shared guild channel
-        can talk into the same per-channel graph without mixing session
-        state.  Idempotent: re-adding an active participant is a no-op.
-        """
-        if role not in {"owner", "member"}:
-            raise ValueError("participant role must be owner or member")
-        now = _now_ms()
-        with self._transaction() as conn:
-            self._require_user(conn, user_id)
-            if not conn.execute("SELECT 1 FROM conversations WHERE id=? AND deleted_at_ms IS NULL", (conversation_id,)).fetchone():
-                raise KeyError(conversation_id)
-            conn.execute(
-                "INSERT INTO conversation_participants (conversation_id,user_id,role,added_at_ms,removed_at_ms) VALUES (?,?,?,?,NULL)"
-                " ON CONFLICT(conversation_id,user_id) DO UPDATE SET role=excluded.role,removed_at_ms=NULL",
-                (conversation_id, user_id, role, now),
-            )
-            self._audit(conn, actor_id=user_id, action="conversation.participant_added", resource_type="conversation", resource_id=conversation_id, outcome="success")
-        return {"conversation_id": conversation_id, "user_id": user_id, "role": role}
-
-    def list_pending_human_requests(self, *, actor_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        """Return unresolved human requests visible to ``actor_id``.
-
-        Participants see requests for conversations they belong to; admins
-        see every pending request (parity with the resolution bypass).
-        Used by the Discord surface to render ``/approvals``.
-        """
-        now = _now_ms()
-        cap = max(1, min(int(limit), 100))
-        with self._read_only() as conn:
-            if self._is_admin(conn, actor_id):
-                rows = conn.execute(
-                    """SELECT h.id,h.run_id,h.action,h.risk,h.choices_json,h.expires_at_ms,h.created_at_ms,
-                              r.conversation_id
-                       FROM human_requests h JOIN agent_runs r ON r.id=h.run_id
-                       WHERE h.state='waiting' AND h.expires_at_ms>?
-                       ORDER BY h.created_at_ms DESC LIMIT ?""",
-                    (now, cap),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT h.id,h.run_id,h.action,h.risk,h.choices_json,h.expires_at_ms,h.created_at_ms,
-                              r.conversation_id
-                       FROM human_requests h JOIN agent_runs r ON r.id=h.run_id
-                       JOIN conversation_participants p ON p.conversation_id=r.conversation_id
-                       WHERE h.state='waiting' AND h.expires_at_ms>? AND p.user_id=? AND p.removed_at_ms IS NULL
-                       ORDER BY h.created_at_ms DESC LIMIT ?""",
-                    (now, actor_id, cap),
-                ).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "run_id": row["run_id"],
-                "action": row["action"],
-                "risk": row["risk"],
-                "choices": json.loads(row["choices_json"]),
-                "expires_at_ms": int(row["expires_at_ms"]),
-                "created_at_ms": int(row["created_at_ms"]),
-                "conversation_id": row["conversation_id"],
-            }
-            for row in rows
-        ]
-
     def _append_event(self, conn: Any, *, run_id: str, kind: str, payload: Any, actor_id: str | None = None, causation_id: str | None = None) -> dict[str, Any]:
         sequence = self._next_sequence(conn, table="run_events", key="run_id", key_value=run_id)
         event = {"id": _id("evt"), "run_id": run_id, "sequence": sequence, "kind": kind, "payload": redact_payload(payload), "created_at_ms": _now_ms()}
@@ -1109,6 +1122,7 @@ class ProductionStore:
         return {
             "id": row["id"], "conversation_id": row["conversation_id"], "state": row["state"], "attempt": int(row["attempt"]),
             "fencing_epoch": int(row["fencing_epoch"]), "assistant_message_id": row["assistant_message_id"], "updated_at_ms": int(row["updated_at_ms"]),
+            "cancel_requested_at_ms": row["cancel_requested_at_ms"],
         }
 
     # ``claim_next_run`` was removed in Fase 2 (issue #9). The lease-based
@@ -1153,21 +1167,27 @@ class ProductionStore:
             return True
 
     @staticmethod
-    def _insert_artifact(conn: Any, *, conversation_id: str, message_id: str | None, run_id: str | None, filename: str, media_type: str, language: str, content: str, now: int | None = None) -> dict[str, Any]:
+    def _insert_artifact(conn: Any, *, conversation_id: str, message_id: str | None, run_id: str | None, filename: str, media_type: str, language: str, content: str, now: int | None = None, renderer: str | None = None, version: int = 1, provenance: str | None = None, preview_url: str | None = None, download_url: str | None = None) -> dict[str, Any]:
+        # PR-5B — media-type-aware artifact guard (sandboxed-html pre-check
+        # lives in the redaction module; see ``sanitize_artifact_content``).
+        # Runs BEFORE credential redaction so an external script import is
+        # rejected on the real payload, and is never bypassable by
+        # ``MUNIN_REDACTION_MODE=off``.
+        content = sanitize_artifact_content(media_type, content)
         safe_content = redact_text(content)
         if not safe_content or len(safe_content.encode()) > 1_000_000:
             raise ValueError("artifact content is empty or exceeds maximum size")
-        artifact = {"id": _id("artifact"), "conversation_id": conversation_id, "message_id": message_id, "run_id": run_id, "filename": re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:180] or "artifact.txt", "media_type": media_type[:120] or "text/plain", "language": language[:48] or "text", "content": safe_content, "content_hash": hashlib.sha256(safe_content.encode()).hexdigest(), "size_bytes": len(safe_content.encode()), "created_at_ms": now or _now_ms()}
+        artifact = {"id": _id("artifact"), "conversation_id": conversation_id, "message_id": message_id, "run_id": run_id, "filename": re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:180] or "artifact.txt", "media_type": media_type[:120] or "text/plain", "language": language[:48] or "text", "content": safe_content, "content_hash": hashlib.sha256(safe_content.encode()).hexdigest(), "size_bytes": len(safe_content.encode()), "created_at_ms": now or _now_ms(), "renderer": renderer[:80] if renderer else None, "version": max(1, int(version)), "provenance": provenance[:500] if provenance else None, "preview_url": preview_url[:2_000] if preview_url else None, "download_url": download_url[:2_000] if download_url else None}
         conn.execute(
-            "INSERT INTO conversation_artifacts (id,conversation_id,message_id,run_id,filename,media_type,language,content,content_hash,size_bytes,created_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (artifact["id"], artifact["conversation_id"], artifact["message_id"], artifact["run_id"], artifact["filename"], artifact["media_type"], artifact["language"], artifact["content"], artifact["content_hash"], artifact["size_bytes"], artifact["created_at_ms"]),
+            "INSERT INTO conversation_artifacts (id,conversation_id,message_id,run_id,filename,media_type,language,content,content_hash,size_bytes,created_at_ms,renderer,version,provenance,preview_url,download_url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (artifact["id"], artifact["conversation_id"], artifact["message_id"], artifact["run_id"], artifact["filename"], artifact["media_type"], artifact["language"], artifact["content"], artifact["content_hash"], artifact["size_bytes"], artifact["created_at_ms"], artifact["renderer"], artifact["version"], artifact["provenance"], artifact["preview_url"], artifact["download_url"]),
         )
         return artifact
 
-    def add_artifact(self, *, actor_id: str, conversation_id: str, filename: str, media_type: str, language: str, content: str, message_id: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+    def add_artifact(self, *, actor_id: str, conversation_id: str, filename: str, media_type: str, language: str, content: str, message_id: str | None = None, run_id: str | None = None, renderer: str | None = None, version: int = 1, provenance: str | None = None, preview_url: str | None = None, download_url: str | None = None) -> dict[str, Any]:
         with self._transaction() as conn:
             self._require_participant(conn, actor_id=actor_id, conversation_id=conversation_id)
-            artifact = self._insert_artifact(conn, conversation_id=conversation_id, message_id=message_id, run_id=run_id, filename=filename, media_type=media_type, language=language, content=content)
+            artifact = self._insert_artifact(conn, conversation_id=conversation_id, message_id=message_id, run_id=run_id, filename=filename, media_type=media_type, language=language, content=content, renderer=renderer, version=version, provenance=provenance, preview_url=preview_url, download_url=download_url)
             self._audit(conn, actor_id=actor_id, action="artifact.created", resource_type="artifact", resource_id=artifact["id"], outcome="success", metadata={"content_hash": artifact["content_hash"]})
             return {key: value for key, value in artifact.items() if key != "content"}
 
@@ -1178,6 +1198,209 @@ class ProductionStore:
                 raise KeyError(artifact_id)
             self._require_participant(conn, actor_id=actor_id, conversation_id=artifact["conversation_id"])
             return _row(artifact)
+
+    def list_artifacts_for_conversation(self, *, actor_id: str, conversation_id: str) -> list[dict[str, Any]]:
+        """PR-6 — rich artifact metadata for one conversation, chronological.
+
+        Deterministic (``created_at_ms, id`` ascending, per the PR-6B card),
+        read-only, no provider calls.  ``content`` is intentionally omitted —
+        the body is served only by ``GET /api/artifacts/{artifact_id}``.
+        """
+        with self._read_only() as conn:
+            conversation = conn.execute(
+                "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+            ).fetchone()
+            if not conversation:
+                raise KeyError(conversation_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=conversation_id)
+            rows = conn.execute(
+                "SELECT id,message_id,run_id,filename,media_type,language,renderer,version,"
+                "provenance,preview_url,download_url,content_hash,size_bytes,created_at_ms "
+                "FROM conversation_artifacts WHERE conversation_id=? "
+                "ORDER BY created_at_ms ASC,id ASC",
+                (conversation_id,),
+            ).fetchall()
+            return [_row(row) for row in rows]
+
+    def list_artifacts_for_run(self, *, actor_id: str, run_id: str) -> list[dict[str, Any]]:
+        """PR-6 — rich artifact metadata for one run, oldest first.
+
+        Run-level participant check, deterministic ordering, no content body.
+        """
+        with self._read_only() as conn:
+            run = conn.execute("SELECT conversation_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+            rows = conn.execute(
+                "SELECT id,message_id,filename,media_type,language,renderer,version,"
+                "provenance,preview_url,download_url,content_hash,size_bytes,created_at_ms "
+                "FROM conversation_artifacts WHERE run_id=? "
+                "ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            return [_row(row) for row in rows]
+
+    def get_run_detail_readmodel(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        """PR-6C — deterministic composite read-model for ``GET /api/runs/{run_id}/detail``.
+
+        Returns EXACTLY the ten contract keys: ``run_id``, ``state``,
+        ``aggregated_tools``, ``activities``, ``commands``, ``agents``,
+        ``approvals``, ``guidance``, ``artifacts``, ``summaries``.
+
+        Pure SQL over the durable read-model tables — never calls the
+        provider, never regenerates history, and every list is deterministically
+        ordered so repeated GETs produce byte-identical JSON.
+        """
+        with self._read_only() as conn:
+            run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+
+            tool_rows = conn.execute(
+                "SELECT tool_name,state FROM tool_calls WHERE run_id=? ORDER BY started_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            by_tool: dict[str, dict[str, Any]] = {}
+            for row in tool_rows:
+                tool_name = str(row["tool_name"] or "unknown")
+                entry = by_tool.setdefault(tool_name, {"tool_name": tool_name, "call_count": 0, "by_state": {}})
+                entry["call_count"] += 1
+                state = str(row["state"] or "unknown")
+                entry["by_state"][state] = int(entry["by_state"].get(state, 0)) + 1
+            aggregated_tools = sorted(by_tool.values(), key=lambda entry: entry["tool_name"])
+
+            activity_rows = conn.execute(
+                "SELECT id,content,agent_name,created_at_ms FROM reasoning_events "
+                "WHERE run_id=? AND kind='operational_summary' ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            activities = [
+                {"id": row["id"], "content": row["content"], "agent_name": row["agent_name"], "created_at_ms": int(row["created_at_ms"])}
+                for row in activity_rows
+            ]
+
+            output_rows = conn.execute(
+                "SELECT id,payload_json FROM run_events WHERE run_id=? AND kind='tool.output' ORDER BY sequence",
+                (run_id,),
+            ).fetchall()
+            output_by_call: dict[str, dict[str, Any]] = {}
+            for row in output_rows:
+                payload = json.loads(row["payload_json"]) if isinstance(row["payload_json"], str) else {}
+                call_id = str(payload.get("tool_call_id") or "")
+                if not call_id:
+                    continue
+                entry = output_by_call.setdefault(call_id, {"tool_call_id": call_id, "tool_name": str(payload.get("tool_name") or "unknown"), "chunk_count": 0, "streams": []})
+                entry["chunk_count"] += 1
+                stream = str(payload.get("stream") or "")
+                if stream and stream not in entry["streams"]:
+                    entry["streams"].append(stream)
+            command_call_ids = sorted(output_by_call)
+            commands: list[dict[str, Any]] = []
+            if command_call_ids:
+                placeholders = ",".join("?" for _ in command_call_ids)
+                command_tool_rows = conn.execute(
+                    f"SELECT id,tool_name,agent_name,state,started_at_ms,finished_at_ms "
+                    f"FROM tool_calls WHERE run_id=? AND id IN ({placeholders}) ORDER BY started_at_ms,id",
+                    [run_id, *command_call_ids],
+                ).fetchall()
+                for row in command_tool_rows:
+                    output = output_by_call[str(row["id"])]
+                    commands.append(
+                        {
+                            "tool_call_id": row["id"],
+                            "tool_name": row["tool_name"],
+                            "agent_name": row["agent_name"],
+                            "state": row["state"],
+                            "started_at_ms": int(row["started_at_ms"]),
+                            "finished_at_ms": row["finished_at_ms"],
+                            "chunk_count": int(output["chunk_count"]),
+                            "streams": output["streams"],
+                        }
+                    )
+
+            subagent_rows = conn.execute(
+                "SELECT id,profile_id,state,objective,started_at_ms,finished_at_ms "
+                "FROM subagent_runs WHERE parent_run_id=? ORDER BY started_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            agents = [
+                {"id": row["id"], "profile_id": row["profile_id"], "state": row["state"], "objective": row["objective"], "started_at_ms": row["started_at_ms"], "finished_at_ms": row["finished_at_ms"]}
+                for row in subagent_rows
+            ]
+
+            request_rows = conn.execute(
+                "SELECT id,action,risk,state,choices_json,response_json,created_at_ms,expires_at_ms,resolved_at_ms "
+                "FROM human_requests WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            approvals: list[dict[str, Any]] = []
+            for row in request_rows:
+                choice = ""
+                try:
+                    response = json.loads(row["response_json"]) if isinstance(row["response_json"], str) else {}
+                except json.JSONDecodeError:
+                    response = {}
+                if isinstance(response, dict):
+                    choice = str(response.get("choice") or "")
+                lowered = choice.strip().lower()
+                resolution = None
+                if row["state"] == "resolved" and lowered:
+                    resolution = "rejected" if lowered.startswith(("reject", "deny", "cancel")) else "approved"
+                approvals.append(
+                    {
+                        "id": row["id"],
+                        "action": row["action"],
+                        "risk": row["risk"],
+                        "state": row["state"],
+                        "choices": json.loads(row["choices_json"]) if isinstance(row["choices_json"], str) else [],
+                        "resolution": resolution,
+                        "created_at_ms": int(row["created_at_ms"]),
+                        "expires_at_ms": int(row["expires_at_ms"]),
+                        "resolved_at_ms": row["resolved_at_ms"],
+                    }
+                )
+
+            guidance_rows = conn.execute(
+                "SELECT id,actor_username,body,state,delivered_at_step,applied_message_id,superseded_by_id,created_at_ms,state_updated_at_ms "
+                "FROM run_guidance_queue WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            guidance = [
+                {"id": row["id"], "actor_username": row["actor_username"], "body": row["body"], "state": row["state"], "delivered_at_step": row["delivered_at_step"], "applied_message_id": row["applied_message_id"], "superseded_by_id": row["superseded_by_id"], "created_at_ms": int(row["created_at_ms"]), "state_updated_at_ms": int(row["state_updated_at_ms"])}
+                for row in guidance_rows
+            ]
+
+            artifact_rows = conn.execute(
+                "SELECT id,message_id,filename,media_type,language,renderer,version,provenance,preview_url,download_url,content_hash,size_bytes,created_at_ms "
+                "FROM conversation_artifacts WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            artifacts = [_row(row) for row in artifact_rows]
+
+            summary_rows = conn.execute(
+                "SELECT id,model,confidence,source_start_sequence,source_end_sequence,content,supersedes_id,created_at_ms "
+                "FROM conversation_summaries WHERE run_id=? ORDER BY created_at_ms,id",
+                (run_id,),
+            ).fetchall()
+            summaries = [
+                {"id": row["id"], "model": row["model"], "confidence": float(row["confidence"]), "source_start_sequence": int(row["source_start_sequence"]), "source_end_sequence": int(row["source_end_sequence"]), "content": row["content"], "supersedes_id": row["supersedes_id"], "created_at_ms": int(row["created_at_ms"])}
+                for row in summary_rows
+            ]
+
+            return {
+                "run_id": run_id,
+                "state": str(run["state"]),
+                "aggregated_tools": aggregated_tools,
+                "activities": activities,
+                "commands": commands,
+                "agents": agents,
+                "approvals": approvals,
+                "guidance": guidance,
+                "artifacts": artifacts,
+                "summaries": summaries,
+            }
 
     def renew_run_lease(
         self, *, run_id: str, lease_token: str, lease_seconds: int | None = None
@@ -1732,13 +1955,7 @@ class ProductionStore:
             request = conn.execute("SELECT h.*,r.conversation_id,r.assistant_message_id FROM human_requests h JOIN agent_runs r ON r.id=h.run_id WHERE h.id=?", (request_id,)).fetchone()
             if not request:
                 raise KeyError(request_id)
-            try:
-                self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
-            except PermissionError:
-                # Admin bypass: an administrator may resolve a decision for
-                # any conversation (mirrors ``soft_delete_conversation``).
-                if not self._is_admin(conn, actor_id):
-                    raise
+            self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
             allowed = json.loads(request["choices_json"])
             if request["state"] != "waiting" or int(request["expires_at_ms"]) < now or choice not in allowed or not hmac.compare_digest(request["nonce_hash"], self._token_hash(nonce)):
                 raise PermissionError("human request is invalid, expired, or already resolved")
@@ -1798,12 +2015,7 @@ class ProductionStore:
             ).fetchone()
             if not request:
                 raise KeyError(request_id)
-            try:
-                self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
-            except PermissionError:
-                # Admin bypass for HITL nonce reissue (parity with resolve).
-                if not self._is_admin(conn, actor_id):
-                    raise
+            self._require_participant(conn, actor_id=actor_id, conversation_id=request["conversation_id"])
             if request["state"] != "waiting" or int(request["expires_at_ms"]) < now:
                 raise PermissionError("human request is not awaiting a decision")
             conn.execute(
@@ -1859,6 +2071,110 @@ class ProductionStore:
             self._append_event(conn, run_id=run_id, kind="run.cancelled", payload={"reason": "operator_request"}, actor_id=actor_id)
             self._audit(conn, actor_id=actor_id, action="run.cancelled", resource_type="run", resource_id=run_id, outcome="success")
             return {**self._run_dict(run), "state": "cancelled", "updated_at_ms": now}
+
+    def reject_human_requests_for_run(self, conn: Any, *, run_id: str, reason: str = "run_cancelling") -> int:
+        """Atomically reject every pending HITL request for one run.
+
+        Used by :meth:`request_cancel_fence` to close out standing
+        ``waiting_for_human`` requests when an operator requests durable
+        cancellation.  HITL rows are transitioned ``waiting`` → ``rejected``
+        with a durable ``human_request.resolved`` event so reconnecting
+        viewers see the rejection in replay.  Intended to be called inside
+        the caller's transaction; never opens its own.
+
+        Returns the number of requests that were rejected.
+        """
+        now = _now_ms()
+        pending = conn.execute(
+            "SELECT * FROM human_requests WHERE run_id=? AND state='waiting'",
+            (run_id,),
+        ).fetchall()
+        rejected = 0
+        for row in pending:
+            request_id = str(row["id"])
+            response = {"choice": "cancel", "guidance": reason, "actor_id": None}
+            conn.execute(
+                "UPDATE human_requests SET state='rejected',response_json=?,resolved_at_ms=? "
+                "WHERE id=? AND state='waiting'",
+                (_json(response), now, request_id),
+            )
+            scope = json.loads(row["scope_json"] or "{}") if isinstance(row["scope_json"], (str, bytes)) else {}
+            actions = scope.get("actions") if isinstance(scope, dict) else []
+            if not isinstance(actions, list):
+                actions = []
+            action_rows = [action for action in actions if isinstance(action, dict)]
+            action_names = [str(action.get("name") or "unknown") for action in action_rows]
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="human_request.resolved",
+                payload={
+                    "human_request_id": request_id,
+                    "request_id": request_id,
+                    "choice": "cancel",
+                    "resolution": "rejected",
+                    "tool_name": action_names[0] if len(action_names) == 1 else "multiple_tools",
+                    "args": {"actions": action_rows},
+                    "guidance": reason,
+                },
+            )
+            rejected += 1
+        return rejected
+
+    def request_cancel_fence(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        """Set the ``cancel_requested_at_ms`` fence marker without a terminal transition.
+
+        Plan PR-2A durable cancellation contract: the operator-or-API request
+        records a fence timestamp on the ``agent_runs`` row and atomically
+        rejects any pending HITL requests for the run, but the run STAYS in its
+        current non-terminal state.  The detached executor observes the fence
+        at its next step boundary and performs the terminal ``run.cancelled``
+        transition itself (PR-2B), which keeps the durable event log as the
+        single source of truth and avoids racing the live supervisor loop.
+
+        Returns the run row with ``cancel_requested_at_ms`` populated.  For a
+        run already in a terminal state the row is returned unchanged and no
+        fence marker is written (``POST /api/chat/{run_id}/cancel`` maps that
+        case to a 200 response).
+        """
+        with self._transaction() as conn:
+            run = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not run:
+                raise KeyError(run_id)
+            self._require_participant(conn, actor_id=actor_id, conversation_id=run["conversation_id"])
+            if str(run["state"]) in FINAL_RUN_STATES:
+                # Already terminal — return the snapshot WITHOUT touching the
+                # fence marker so a reconnecting client sees the real state.
+                return {**self._run_dict(run), "cancel_requested_at_ms": run["cancel_requested_at_ms"]}
+            now = _now_ms()
+            conn.execute(
+                "UPDATE agent_runs SET cancel_requested_at_ms=?,state_version=state_version+1,updated_at_ms=? "
+                "WHERE id=? AND state NOT IN ('completed','failed','interrupted','cancelled')",
+                (now, now, run_id),
+            )
+            self.reject_human_requests_for_run(conn, run_id=run_id, reason="run_cancelling")
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="run.cancelling",
+                payload={"reason": "operator_request", "requested_at_ms": now},
+                actor_id=actor_id,
+            )
+            self._audit(
+                conn,
+                actor_id=actor_id,
+                action="run.cancel_requested",
+                resource_type="run",
+                resource_id=run_id,
+                outcome="success",
+                metadata={"cancel_requested_at_ms": now},
+            )
+            return {
+                **self._run_dict(run),
+                "state": "cancelling",
+                "cancel_requested_at_ms": now,
+                "updated_at_ms": now,
+            }
 
     def retry_run(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         """Create a new attempt without mutating the original run or its events."""
@@ -2108,13 +2424,20 @@ class ProductionStore:
             "consumed_at_ms": None,
             "delivered_at_step": None,
             "budget_extension_seconds": int(budget_extension_seconds or 0),
+            # PR-2D — lifecycle fields mirror the durable ``state`` column.
+            "state": "queued",
+            "state_updated_at_ms": 0,
+            "applied_message_id": None,
+            "superseded_by_id": None,
         }
+        entry["state_updated_at_ms"] = entry["created_at_ms"]
         with self._transaction() as conn:
             conn.execute(
                 """INSERT INTO run_guidance_queue
                     (id, run_id, actor_id, actor_username, body, target_agent_id,
-                     created_at_ms, budget_extension_seconds)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                     created_at_ms, budget_extension_seconds,
+                     state, state_updated_at_ms, applied_message_id, superseded_by_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL, NULL)""",
                 (
                     entry["id"],
                     run_id,
@@ -2124,9 +2447,101 @@ class ProductionStore:
                     target_agent_id,
                     entry["created_at_ms"],
                     entry["budget_extension_seconds"],
+                    entry["state_updated_at_ms"],
                 ),
             )
+            # PR-2D — durable ``guidance.queued`` lifecycle event so the SSE
+            # replay path surfaces a "operator guidance accepted" marker to
+            # every connected client (mirrors the ``run.cancelling`` fence
+            # event from PR-2B that introduced this family).
+            self._append_event(
+                conn,
+                run_id=run_id,
+                kind="guidance.queued",
+                payload={
+                    "guidance_id": entry["id"],
+                    "actor_id": actor_id,
+                    "target_agent_id": target_agent_id,
+                },
+                actor_id=actor_id,
+            )
         return entry
+
+    def transition_guidance_state(
+        self,
+        guidance_id: str,
+        new_state: str,
+        *,
+        applied_message_id: str | None = None,
+        superseded_by_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Move a ``run_guidance_queue`` row to ``new_state`` and emit a durable
+        ``guidance.<new_state>`` event.
+
+        PR-2D guidance lifecycle contract:
+
+        * ``queued``            — set on ``enqueue_guidance`` (no transition call).
+        * ``delivered_to_runtime`` — middleware drained the row into the model
+          input (replaces a bare ``consumed_at_ms`` write).
+        * ``applied_to_model_step`` — the model step consumed the
+          ``HumanMessage(name='operator')`` call (``applied_message_id``).
+        * ``expired``           — TTL elapsed before delivery.
+        * ``superseded``        — a newer guidance replaced it (``superseded_by_id``).
+        * ``undelivered``       — the run terminated before the row was drained.
+
+        The transition is validated against :data:`GUIDANCE_STATES` BEFORE the
+        write so an invalid state raises ``ValueError`` with a useful message
+        instead of an opaque sqlite ``IntegrityError``.  ``state_updated_at_ms``
+        is refreshed on every transition and read-model callers must update
+        the column atomically through this method (no direct UPDATE).
+        """
+        if new_state not in GUIDANCE_STATES:
+            raise ValueError(f"invalid guidance state: {new_state}")
+        now = _now_ms()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_guidance_queue WHERE id=?",
+                (guidance_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(guidance_id)
+            run_id = str(row["run_id"])
+            actor_id = str(row["actor_id"]) if row["actor_id"] else None
+            update_pieces = ["state=?", "state_updated_at_ms=?"]
+            update_values: list[Any] = [new_state, now]
+            if applied_message_id is not None:
+                update_pieces.append("applied_message_id=?")
+                update_values.append(str(applied_message_id))
+            if superseded_by_id is not None:
+                update_pieces.append("superseded_by_id=?")
+                update_values.append(str(superseded_by_id))
+            update_values.append(guidance_id)
+            conn.execute(
+                f"UPDATE run_guidance_queue SET {', '.join(update_pieces)} "
+                f"WHERE id=?",
+                tuple(update_values),
+            )
+            payload: dict[str, Any] = {"guidance_id": guidance_id, "state": new_state}
+            if applied_message_id is not None:
+                payload["applied_message_id"] = str(applied_message_id)
+            if superseded_by_id is not None:
+                payload["superseded_by_id"] = str(superseded_by_id)
+            event = self._append_event(
+                conn,
+                run_id=run_id,
+                kind=f"guidance.{new_state}",
+                payload=payload,
+                actor_id=actor_id,
+            )
+            return {
+                "id": guidance_id,
+                "run_id": run_id,
+                "state": new_state,
+                "state_updated_at_ms": now,
+                "applied_message_id": applied_message_id,
+                "superseded_by_id": superseded_by_id,
+                "event_id": event["id"],
+            }
 
     def consume_pending_guidance(
         self,
@@ -2157,11 +2572,26 @@ class ProductionStore:
             for row in rows:
                 entry = _row(row)
                 conn.execute(
-                    "UPDATE run_guidance_queue SET consumed_at_ms=?, delivered_at_step=? WHERE id=?",
-                    (now, delivered_at_step, entry["id"]),
+                    "UPDATE run_guidance_queue SET consumed_at_ms=?, delivered_at_step=?, "
+                    "state='delivered_to_runtime', state_updated_at_ms=? WHERE id=?",
+                    (now, delivered_at_step, now, entry["id"]),
                 )
                 entry["consumed_at_ms"] = now
                 entry["delivered_at_step"] = delivered_at_step
+                entry["state"] = "delivered_to_runtime"
+                entry["state_updated_at_ms"] = now
+                # PR-2D — durable ``guidance.delivered_to_runtime`` event so
+                # the SSE replay path surfaces the exact moment the middleware
+                # drained the operator hint into a ``HumanMessage(name=
+                # 'operator')``.  ``guidance.queued`` was already emitted by
+                # :meth:`enqueue_guidance`; this is the second lifecycle tick.
+                self._append_event(
+                    conn,
+                    run_id=str(entry["run_id"]),
+                    kind="guidance.delivered_to_runtime",
+                    payload={"guidance_id": entry["id"], "delivered_at_step": delivered_at_step},
+                    actor_id=str(entry.get("actor_id") or "") or None,
+                )
                 results.append(entry)
             return results
 
@@ -3079,6 +3509,13 @@ class MuninStore:
     def list_run_guidance(self, **kwargs: Any) -> list[dict[str, Any]]:
         return self._hot.list_run_guidance(**kwargs)
 
+    # PR-2D — guidance lifecycle pass-through.  The hot SQLite store owns the
+    # ``run_guidance_queue`` row and the ``guidance.<state>`` durable events;
+    # ``MuninStore`` only forwards so the supervisor / middleware keeps a
+    # single store handle.
+    def transition_guidance_state(self, guidance_id: str, new_state: str, **kwargs: Any) -> dict[str, Any]:
+        return self._hot.transition_guidance_state(guidance_id, new_state, **kwargs)
+
     # ------------------------------------------------------------------
     # Fase 3 (autonomous modes) — goals / plan / timers (durable)
     # ------------------------------------------------------------------
@@ -3135,16 +3572,6 @@ class MuninStore:
         result = self._durable.create_conversation(owner_id=owner_id, title=title, tags=tags, scope=scope)
         self._hydrate_hot_conversation(conversation_id=result["id"])
         return result
-
-    def add_conversation_participant(self, *, conversation_id: str, user_id: str, role: str = "member") -> dict[str, Any]:
-        result = self._durable.add_conversation_participant(
-            conversation_id=conversation_id, user_id=user_id, role=role
-        )
-        self._mirror_participant(conversation_id=conversation_id, user_id=user_id, role=role)
-        return result
-
-    def list_pending_human_requests(self, *, actor_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        return self._durable.list_pending_human_requests(actor_id=actor_id, limit=limit)
 
     # ------------------------------------------------------------------
     # Turns / runs (durable stub message + hot run)
@@ -3283,35 +3710,6 @@ class MuninStore:
             "mode": str(run_row["mode"]) if "mode" in run_row.keys() and run_row["mode"] else None,
             "goal_id": str(run_row["goal_id"]) if "goal_id" in run_row.keys() and run_row["goal_id"] else None,
         }
-
-    def active_run_for_conversation(self, *, conversation_id: str) -> dict[str, Any] | None:
-        """Return the most recent non-terminal run bound to a conversation.
-
-        Used by the Discord adapter to decide whether a new message inside a
-        live INV thread is *guidance for the running operation* rather than a
-        brand-new run: if the thread's conversation still owns a run in
-        ``queued`` / ``running`` / ``waiting_for_human`` we must NOT mint a
-        second turn (that is the "every message restarts" bug seen in live
-        session 31194804677).  Reads HOT first (the authoritative agent_runs
-        while active), falling back to the durable backend after migration.
-        """
-        backends = (
-            (self._hot, self._durable) if self._durable is not self._hot else (self._hot,)
-        )
-        for backend in backends:
-            try:
-                with backend._read_only() as conn:  # noqa: SLF001
-                    row = conn.execute(
-                        "SELECT * FROM agent_runs WHERE conversation_id=? AND state IN "
-                        "('queued','running','waiting_for_human')"
-                        " ORDER BY created_at_ms DESC LIMIT 1",
-                        (conversation_id,),
-                    ).fetchone()
-                    if row is not None:
-                        return ProductionStore._run_dict(row)
-            except Exception:  # noqa: BLE001
-                continue
-        return None
 
     def claim_run_direct(self, *, run_id: str) -> tuple[str, str]:
         """Promote a queued run to ``running`` (chat.py's ``_claim_direct``).
@@ -3472,6 +3870,25 @@ class MuninStore:
         # Already migrated — return the durable snapshot.
         return self._durable.request_run_cancellation(**kwargs)
 
+    def request_cancel_fence(self, **kwargs: Any) -> dict[str, Any]:
+        """Fence-route a durable cancel request to the backend that owns the run.
+
+        Active (non-terminal) runs live in the hot backend; runs already
+        migrated to durable are returned unchanged (PR-2A returns 200 for an
+        already-terminal run without writing the fence marker).  Participant
+        hydration mirrors the legacy :meth:`request_run_cancellation` path so
+        the underlying auth check succeeds against the hot mirror.
+        """
+        actor_id = kwargs.get("actor_id")
+        run_id = kwargs.get("run_id")
+        with self._hot._read_only() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT conversation_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if row and actor_id:
+                self._hydrate_hot_participant(actor_id=actor_id, conversation_id=str(row["conversation_id"]))
+        if row:
+            return self._hot.request_cancel_fence(**kwargs)
+        return self._durable.request_cancel_fence(**kwargs)
+
     def retry_run(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
         # Look up the source run in either backend; migrated runs live in
         # durable.  We defer to ProductionStore for the actual work,
@@ -3596,20 +4013,17 @@ class MuninStore:
             raise KeyError(run_id)
         return self._durable.get_run_detail_for_actor(actor_id=actor_id, run_id=run_id)
 
-    def get_artifact(self, *, actor_id: str, artifact_id: str) -> dict[str, Any]:
-        # Artifacts live only in the durable archive; mirror the actor's
-        # participant row into the hot store first so reads behave identically
-        # across deployments.
-        with self._durable._read_only() as conn:  # noqa: SLF001
-            artifact = conn.execute(
-                "SELECT conversation_id FROM conversation_artifacts WHERE id=?",
-                (artifact_id,),
-            ).fetchone()
-        if artifact:
-            self._hydrate_hot_participant(
-                actor_id=actor_id, conversation_id=str(artifact["conversation_id"])
-            )
-        return self._durable.get_artifact(actor_id=actor_id, artifact_id=artifact_id)
+    def get_run_detail_readmodel(self, *, actor_id: str, run_id: str) -> dict[str, Any]:
+        # PR-6C — same hot-first routing as ``get_run_detail_for_actor`` so an
+        # in-flight (not yet migrated) run still serves the composite read-model.
+        with self._hot._read_only() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT * FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+        if row:
+            self._hydrate_hot_participant(actor_id=actor_id, conversation_id=str(row["conversation_id"]))
+            return self._hot.get_run_detail_readmodel(actor_id=actor_id, run_id=run_id)
+        if self._durable is self._hot:
+            raise KeyError(run_id)
+        return self._durable.get_run_detail_readmodel(actor_id=actor_id, run_id=run_id)
 
     def list_run_events(self, run_id: str) -> list[dict[str, Any]]:
         with self._hot._read_only() as conn:  # noqa: SLF001

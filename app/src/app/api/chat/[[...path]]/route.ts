@@ -1,9 +1,11 @@
-// tags: [api-route, bff-proxy, server-side, ai-sdk, vercel-ai, use-chat, b-a-c-k-e-n-d, g-e-t, d-o-t-t-e-d--k-i-n-d--m-a-p, p-o-s-t]
+// tags: [api-route, bff-proxy, server-side, ai-sdk, vercel-ai, use-chat, b-a-c-k-e-n-d, g-e-t, d-o-t-t-e-d--k-i-n-d--m-a-p, p-o-s-t, cancel-proxy, schema-validation, munin-ui-v1, guidance-lifecycle, PR-2C, PR-2F]
 import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { UIMessageChunk } from "ai";
 import { NextRequest, NextResponse } from "next/server";
 
 import { createTranslator, type BackendEnvelope } from "@/lib/chat/translator";
+import { logError } from "@/lib/logError";
+import { schemaForV1PartType } from "@/types/muninUiSchemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -103,6 +105,182 @@ function normalizeRunEvent(raw: unknown): BackendEnvelope | null {
 }
 
 // ---------------------------------------------------------------------------
+// PR-2F — munin-ui/v1 schema validation at the BFF boundary.
+// ---------------------------------------------------------------------------
+// The Python backend emits a durable ``BackendEnvelope`` per SSE frame; the
+// route normalizes the dotted ``run_events`` shape before handing it to the
+// translator. Around that boundary we run the matching ``munin-ui/v1`` Zod
+// schema so a malformed or unknown payload degrades to a logged validation
+// error instead of crashing the live console tree.
+//
+// The mapping below is intentionally narrow: it covers the eight renderer
+// keys defined in ``muninUiSchemas.ts`` and ignores every other envelope
+// kind (text streaming, heartbeat, run-state, finish, etc.) that is not
+// part of the munin-ui/v1 data-part contract. A failed ``safeParse`` is
+// logged via ``logError`` (never swallowed) and the envelope is still
+// forwarded so the user keeps seeing the live stream — the renderer
+// registry falls back to an annotated ErrorBoundary card for unknown
+// payloads (PR-2G).
+
+const ENVELOPE_KIND_TO_V1_RENDERER: Record<BackendEnvelope["kind"], string | null> = {
+  assistant_text: null,            // text streaming — not a data part.
+  provider_reasoning: "reasoning",
+  reasoning: "reasoning",
+  activity: "operational-trace",
+  tool_intent: "tool-invocation",
+  tool_started: null,              // streaming input — same component below.
+  tool_result: "tool-invocation",
+  tool_completed: "tool-invocation",
+  tool_failed: "tool-invocation",
+  tool_output: "command-output",
+  tool_heartbeat: null,            // metadata only — no renderer data part.
+  subagent_started: null,          // subagents are not in v1 yet.
+  subagent_state: null,
+  human_request: "hitl-request",
+  human_resolved: "hitl-request",
+  artifact: "artifact",
+  run_state: null,                  // metadata — handled inline.
+  heartbeat: null,
+  note: null,                       // note has no v1 renderer — skip.
+  guidance: null,                   // legacy reasoning.operator_guidance text.
+  guidance_lifecycle: "guidance-lifecycle",
+  plan: "plan",
+  todo: null,                        // todo mutation not in v1 (separate card).
+  replan: null,
+  hypothesis: null,
+  goal: null,
+  timer_tick: null,
+};
+
+/**
+ * Map a normalized backend envelope to the munin-ui/v1 data-part shape the
+ * renderer registry consumes. Returns ``null`` when the envelope maps to no
+ * v1 renderer (those flow through with no validation against the schemas).
+ */
+function envelopeToV1Part(envelope: BackendEnvelope): Record<string, unknown> | null {
+  const rendererKey = ENVELOPE_KIND_TO_V1_RENDERER[envelope.kind];
+  if (!rendererKey) return null;
+  // The renderer component shapes for the v1 schemas use the camelCase
+  // fields the translator emits (toolCallId, toolName, requestId, ...).
+  // The envelope already carries these as top-level fields after
+  // ``normalizeRunEvent`` merged ``payload`` in. The real validation below
+  // reuses these fields verbatim and adds the canonical ``type`` so the
+  // Zod discriminator fires.
+  const rec = envelope as unknown as Record<string, unknown>;
+  const part: Record<string, unknown> = { type: rendererKey };
+  switch (rendererKey) {
+    case "tool-invocation": {
+      part.toolCallId = rec.tool_call_id ?? "";
+      part.toolName = rec.tool_name ?? "unknown";
+      const stateStr = typeof rec.state === "string" ? rec.state : "";
+      if (stateStr === "input-streaming") part.state = "partial-call";
+      else if (stateStr === "input-available") part.state = "call";
+      else if (stateStr === "output-available") part.state = "result";
+      else if (stateStr === "output-error") part.state = "result";
+      else part.state = "call";
+      part.input = rec.input;
+      part.result = rec.output;
+      part.errorText = rec.error;
+      break;
+    }
+    case "command-output": {
+      part.toolName = rec.tool_name ?? "command";
+      part.toolCallId = rec.tool_call_id;
+      part.jobId = rec.job_id;
+      part.stream = rec.stream;
+      part.text = rec.text ?? "";
+      part.sequence = rec.sequence;
+      part.elapsedMs = rec.elapsed_ms;
+      part.final = rec.final;
+      break;
+    }
+    case "operational-trace": {
+      part.stage = rec.stage ?? "working";
+      part.text = rec.text ?? "";
+      break;
+    }
+    case "hitl-request": {
+      part.requestId = rec.request_id ?? "";
+      part.toolName = rec.tool_name;
+      part.args = rec.args;
+      part.nonce = rec.nonce;
+      part.choices = rec.choices;
+      part.resolved = rec.resolution != null;
+      if (rec.resolution != null) part.resolution = rec.resolution;
+      break;
+    }
+    case "artifact": {
+      part.artifactId = rec.artifact_id ?? "";
+      part.mimeType = rec.mime_type;
+      part.uri = rec.uri;
+      break;
+    }
+    case "reasoning": {
+      part.text = rec.text;
+      part.delta = rec.text && typeof rec.text === "string" ? undefined : rec.text;
+      part.step = rec.step;
+      part.provider = rec.provider;
+      break;
+    }
+    case "plan": {
+      part.goal = rec.goal;
+      part.items = rec.items;
+      part.updatedAtMs = rec.updated_at_ms;
+      break;
+    }
+    case "guidance-lifecycle": {
+      part.state = rec.state;
+      part.guidanceId = rec.guidance_id;
+      part.appliedMessageId = rec.applied_message_id;
+      part.supersededById = rec.superseded_by_id;
+      part.deliveredAtStep = rec.delivered_at_step;
+      part.actorId = rec.actor_id;
+      part.runId = rec.run_id;
+      break;
+    }
+    default:
+      return null;
+  }
+  return part;
+}
+
+/**
+ * Validate a normalized backend envelope against its munin-ui/v1 schema. On
+ * failure logs via ``logError`` (per the frontend error contract — never a
+ * silent catch) and attaches a versioned ``__muninSchemaError`` attribute so
+ * the renderer registry can surface an annotated fallback (PR-2G) instead of
+ * silently rendering a broken card. Never throws.
+ */
+function validateV1Envelope(envelope: BackendEnvelope): BackendEnvelope {
+  const part = envelopeToV1Part(envelope);
+  if (!part) return envelope; // not a v1-renderable envelope — pass through.
+  const schema = schemaForV1PartType(part.type);
+  if (!schema) return envelope;
+  const result = schema.safeParse(part);
+  if (result.success) return envelope;
+  // Attach the versioned error attribute so the renderer layer falls back.
+  // The envelope is a typed interface without an index signature; cast via
+  // ``unknown`` and augment defensively (same idiom used in normalizeRunEvent).
+  const annotated = envelope as unknown as Record<string, unknown>;
+  annotated.__muninSchemaError = {
+    version: "munin-ui/v1",
+    rendererKey: part.type,
+    issues: result.error.issues.map((issue) => ({
+      path: issue.path,
+      message: issue.message,
+      code: issue.code,
+    })),
+  };
+  logError({
+    context: "schema_validation",
+    error: result.error,
+    meta: { dataPart: part, envelopeKind: envelope.kind, version: "munin-ui/v1" },
+    ts: new Date().toISOString(),
+  });
+  return envelope;
+}
+
+// ---------------------------------------------------------------------------
 // Auth header forwarding — the Python backend's CSRF guard requires `origin`
 // in MUNIN_ALLOWED_ORIGINS and `sec-fetch-site` in {same-origin, same-site}.
 // When the Next.js BFF makes a server-to-server fetch those headers are
@@ -165,6 +343,11 @@ async function pumpChatStream(
       return false;
     }
     if (!envelope) return false;
+    // PR-2F — BFF boundary schema validation. ``validateV1Envelope`` only
+    // touches the eight munin-ui/v1 renderer parts; everything else flows
+    // through unchanged. Failures annotate the envelope + log via logError
+    // and the envelope keeps flowing so the live console tree never breaks.
+    envelope = validateV1Envelope(envelope);
     for (const chunk of translator.translate(envelope)) {
       writer.write(chunk);
     }
@@ -286,6 +469,71 @@ async function forwardOperatorGuidance(
  */
 export async function POST(request: NextRequest) {
   const pathname = new URL(request.url).pathname;
+
+  // PR-2C: durable run cancellation.  Forwarded to the Python
+  // ``/api/chat/{run_id}/cancel`` endpoint; the response is a small JSON
+  // object (202 cancelling / 200 terminal / 404 / 403), never an SSE stream,
+  // so it bypasses the translator path.  Always forwards auth + CSRF so the
+  // server-side participant/CSRF check stays authoritative.
+  const cancelMatch = pathname.match(/\/api\/chat\/([^/]+)\/cancel$/);
+  if (cancelMatch) {
+    let cancelBody: Record<string, unknown> = {};
+    // The client sends an empty body; tolerate non-JSON / parse failure.
+    try {
+      cancelBody = (await request.json()) as Record<string, unknown>;
+    } catch {
+      // Empty body is valid — Python handler reads no JSON.  Log the
+      // malformed-but-acceptable case so a regression is never silent.
+      console.error({
+        context: "cancel.body",
+        error: new Error("malformed cancel JSON body (ignored)"),
+        meta: { runId: decodeURIComponent(cancelMatch[1]) },
+        ts: new Date().toISOString(),
+      });
+    }
+    try {
+      const res = await fetch(
+        `${BACKEND}/api/chat/${encodeURIComponent(decodeURIComponent(cancelMatch[1]))}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...Object.fromEntries(forwardAuthHeaders(request)),
+          },
+          body: JSON.stringify(cancelBody),
+          cache: "no-store",
+        },
+      );
+      let parsed: Record<string, unknown> = {};
+      const raw = await res.text();
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        // Non-JSON 5xx body — surface the raw text so the operator sees it.
+        parsed = { error: { message: raw || `cancel failed (${res.status})` } };
+      }
+      if (!res.ok) {
+        const message =
+          (typeof parsed?.error === "object" && parsed?.error && "message" in (parsed.error as Record<string, unknown>)
+            ? String((parsed.error as { message?: unknown }).message ?? "")
+            : "") || `cancel failed (${res.status})`;
+        return NextResponse.json({ error: message }, { status: res.status });
+      }
+      return NextResponse.json(parsed, { status: res.status });
+    } catch (err) {
+      console.error({
+        context: "cancel.proxy",
+        error: err,
+        meta: { runId: decodeURIComponent(cancelMatch[1]) },
+        ts: new Date().toISOString(),
+      });
+      return NextResponse.json(
+        { error: `backend unreachable: ${String(err)}` },
+        { status: 502 },
+      );
+    }
+  }
+
   const guidanceMatch = pathname.match(/\/api\/chat\/([^/]+)\/guidance$/);
   if (guidanceMatch) {
     let guidanceBody: { body?: unknown; guidance?: unknown; target_agent_id?: unknown };

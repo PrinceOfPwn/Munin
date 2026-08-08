@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, reasoning-part]
+// tags: [ui-component, data-part, chat-stream-part, reasoning-part, react-memo, PR-4A]
+import { memo } from "react";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -19,7 +20,7 @@ export interface ReasoningPartProps {
  * Displayed in an italicised, muted style with a small "thinking" icon to
  * distinguish it from final assistant messages.
  */
-export function ReasoningPart({ text }: ReasoningPartProps) {
+export const ReasoningPart = memo(function ReasoningPart({ text }: ReasoningPartProps) {
   return (
     <div
       className={cn(
@@ -39,4 +40,4 @@ export function ReasoningPart({ text }: ReasoningPartProps) {
       </p>
     </div>
   );
-}
+});

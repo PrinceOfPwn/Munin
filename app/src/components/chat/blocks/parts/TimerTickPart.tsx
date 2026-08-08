@@ -1,4 +1,5 @@
-// tags: [ui-component, data-part, chat-stream-part, lucide-icons, timer-tick-part]
+// tags: [ui-component, data-part, chat-stream-part, lucide-icons, timer-tick-part, react-memo, PR-4A]
+import { memo } from "react";
 import { Timer } from "lucide-react";
 
 import { cn, formatDuration } from "@/lib/utils";
@@ -25,7 +26,7 @@ export interface TimerTickPartProps {
  * wake a GOAL run for re-evaluation; the widget stays monospace and compact
  * so the stream reads as an audit trail.
  */
-export function TimerTickPart({
+export const TimerTickPart = memo(function TimerTickPart({
   timerId,
   timerKind,
   goalId,
@@ -50,4 +51,4 @@ export function TimerTickPart({
       )}
     </div>
   );
-}
+});

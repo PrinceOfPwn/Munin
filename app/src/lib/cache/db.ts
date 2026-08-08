@@ -1,4 +1,4 @@
-// tags: [utility-library, indexeddb, browser-cache, persistence, c-a-c-h-e--d-b--n-a-m-e, c-a-c-h-e--d-b--v-e-r-s-i-o-n, c-a-c-h-e--s-c-h-e-m-a--v-e-r-s-i-o-n, k-v--a-c-t-o-r--k-e-y, k-v--s-c-h-e-m-a--k-e-y, s-t-o-r-e-s]
+// tags: [utility-library, indexeddb, browser-cache, persistence, atomic-replace, c-a-c-h-e--d-b--n-a-m-e, c-a-c-h-e--d-b--v-e-r-s-i-o-n, c-a-c-h-e--s-c-h-e-m-a--v-e-r-s-i-o-n, k-v--a-c-t-o-r--k-e-y, k-v--s-c-h-e-m-a--k-e-y, s-t-o-r-e-s]
 ﻿// -----------------------------------------------------------------------------
 // db.ts â€” minimal hand-rolled IndexedDB wrapper for the Munin browser cache.
 //
@@ -172,6 +172,54 @@ export async function putMessages(rows: CacheMessage[]): Promise<void> {
   await writeStore(STORES.messages, (store) => {
     for (const row of rows) store.put(row);
   });
+}
+
+export async function clearMessagesByConversation(
+  conversationId: string,
+): Promise<void> {
+  await writeStore(STORES.messages, (store) => {
+    const request = store
+      .index("by-conversation")
+      .openCursor(IDBKeyRange.only(conversationId));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
+  });
+}
+
+// Atomic clear+put for one conversation. The delete cursor and every `put`
+// run inside ONE readwrite transaction so either the whole replacement
+// commits or the whole thing rolls back — there is no window where the store
+// is empty for this conversation (which the old clear→then(put) two-transaction
+// chain exposed when `put` threw after `clear` committed).
+export async function replaceMessagesByConversation(
+  conversationId: string,
+  rows: CacheMessage[],
+): Promise<void> {
+  const db = await openDatabase();
+  const transaction = db.transaction(STORES.messages, "readwrite");
+  const store = transaction.objectStore(STORES.messages);
+
+  const cursorRequest = store
+    .index("by-conversation")
+    .openCursor(IDBKeyRange.only(conversationId));
+  cursorRequest.onsuccess = () => {
+    const cursor = cursorRequest.result;
+    if (cursor) {
+      cursor.delete();
+      cursor.continue();
+    }
+  };
+
+  for (const row of rows) {
+    store.put(row);
+  }
+
+  await transactionDone(transaction);
 }
 
 // â”€â”€ kv (schema guard / actor / run markers) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

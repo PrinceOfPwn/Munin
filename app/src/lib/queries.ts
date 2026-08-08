@@ -78,20 +78,21 @@ export function useConversations(query = "") {
     staleTime: 30_000,
     // Cache-first: the unfiltered cached list paints instantly while the
     // server list refetches in the background. Search queries stay on
-    // `keepPreviousData` â€” the server-side filter does not match the cache.
+    // `keepPreviousData` — the server-side filter does not match the cache.
     placeholderData: (previous) => {
       if (previous) return previous;
       return query === "" ? cachedConversations : undefined;
     },
   });
 
-  // Write-through: persist every successful server list into IndexedDB.
-  // (v5 removed onSuccess from useQuery â€” an effect on data is the pattern.)
+  // Write-through: persist every successful unfiltered server list into IndexedDB.
+  // Filtered subsets must never replace the persistent full list in IndexedDB.
+  // (v5 removed onSuccess from useQuery — an effect on data is the pattern.)
   useEffect(() => {
-    if (result.data && result.data.length > 0) {
+    if (query === "" && result.data && result.data.length > 0) {
       writeConversations(result.data);
     }
-  }, [result.data, writeConversations]);
+  }, [query, result.data, writeConversations]);
 
   return result;
 }
