@@ -787,6 +787,115 @@ class CorvusBlackboard:
         return tuple(posts)
 
     # ------------------------------------------------------------------
+    # Public — subscriber discovery (non-atomic candidate + GET pipelines).
+    # ------------------------------------------------------------------
+
+    def discover_subscribers(
+        self,
+        *,
+        topics: Iterable[str] | None = (),
+        scopes: Iterable[str] | None = (),
+        limit: int = 100,
+    ) -> tuple[ActorIdentity, ...]:
+        """Return subscribers to any of the given topics or scopes, newest-first.
+
+        Validates ``limit`` (``_validate_query_limit``) as a non-``bool`` ``int``
+        in ``1..500`` *before* any normalization or transport call. Normalizes
+        and dedupes ``topics`` with the shared ``_normalize_topics`` helper
+        (slug + first-seen dedupe) and ``scopes`` with ``_normalize_scopes``
+        (``validate_scope`` per entry, first-seen dedupe); their contract
+        violations collapse to a stable ``CorvusError`` from ``None``. If both
+        normalized filters are empty the call returns ``()`` with no transport.
+
+        Otherwise one non-atomic candidate pipeline issues, in exact order,
+        ``ZREVRANGE {prefix}:actors:created 0 499`` (the newest-first base list),
+        then one ``SMEMBERS {prefix}:subscribers:topic:{topic}`` per normalized
+        topic, then one ``SMEMBERS {prefix}:subscribers:scope:{scope}`` per
+        normalized scope. The response must be a ``list`` with exact command
+        cardinality before any indexing; each entry decodes via
+        ``_decode_index_members``. The OR union of every normalized subscription
+        set is filtered through the ``actors:created`` base list preserving its
+        newest-first order, explicitly deduped in first-seen order, and capped
+        to ``limit``. An empty base or empty selection returns ``()`` with no
+        ``GET`` pipeline.
+
+        Otherwise one non-atomic ``GET`` pipeline resolves the selected ids via
+        ``GET {prefix}:actor:{id}`` in selected order; the response must match
+        exact cardinality. Each payload decodes through
+        ``_decode_actor_raw``/``_parse_actor_wire`` — a missing actor raises
+        ``CorvusNotFoundError``, a corrupt payload raises a stable
+        ``CorvusError`` from ``None`` with no payload echo. Transport failures
+        collapse to a sanitized ``CorvusError``. No mutation commands, temp
+        keys, ``ZUNIONSTORE``, atomic pipelines, or direct candidate ``command``
+        calls are used — the candidate fan-out and the resolution are both
+        ordered non-atomic pipelines.
+        """
+        _validate_query_limit(limit)
+        normalized_topics = _normalize_topics(topics)
+        normalized_scopes = _normalize_scopes(scopes)
+        if not normalized_topics and not normalized_scopes:
+            return ()
+
+        prefix = self._key_prefix
+        candidate_commands: list[list[Any]] = [
+            ["ZREVRANGE", f"{prefix}:actors:created", 0, 499]
+        ]
+        for topic in normalized_topics:
+            candidate_commands.append(
+                ["SMEMBERS", f"{prefix}:subscribers:topic:{topic}"]
+            )
+        for scope in normalized_scopes:
+            candidate_commands.append(
+                ["SMEMBERS", f"{prefix}:subscribers:scope:{scope}"]
+            )
+
+        try:
+            candidate_results = self._transport.pipeline(
+                candidate_commands, atomic=False
+            )
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(candidate_results, list) or len(candidate_results) != len(
+            candidate_commands
+        ):
+            raise CorvusError("candidate pipeline response cardinality mismatch")
+
+        decoded_sets: list[tuple[str, ...]] = []
+        for raw in candidate_results:
+            decoded_sets.append(self._decode_index_members(raw))
+        base_ids = decoded_sets[0]
+        if not base_ids:
+            return ()
+        matched: set[str] = set()
+        for extra in decoded_sets[1:]:
+            matched.update(extra)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for actor_id in base_ids:
+            if actor_id in matched and actor_id not in seen:
+                seen.add(actor_id)
+                deduped.append(actor_id)
+        selected_ids = deduped[:limit]
+        if not selected_ids:
+            return ()
+
+        get_commands = [
+            ["GET", self._actor_key(actor_id)] for actor_id in selected_ids
+        ]
+        try:
+            results = self._transport.pipeline(get_commands, atomic=False)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(results, list) or len(results) != len(selected_ids):
+            raise CorvusError("subscriber discovery pipeline response cardinality mismatch")
+        actors: list[ActorIdentity] = []
+        for raw in results:
+            stored = self._decode_actor_raw(raw)
+            actors.append(self._parse_actor_wire(stored))
+        return tuple(actors)
+
+    # ------------------------------------------------------------------
     # Public — multi-filter search (non-atomic candidate + GET pipelines).
     # ------------------------------------------------------------------
 
