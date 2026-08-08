@@ -689,6 +689,104 @@ class CorvusBlackboard:
         )
 
     # ------------------------------------------------------------------
+    # Public — capability-based open-question discovery.
+    # ------------------------------------------------------------------
+
+    def discover_open_questions(
+        self, actor_id: str, *, limit: int = 50
+    ) -> tuple[Post, ...]:
+        """Return open questions matching any of an actor's capabilities.
+
+        Validates ``limit`` (``_validate_query_limit``) and ``actor_id`` as a
+        non-blank string *before* any transport call, then reads the durable
+        actor record via ``get_actor`` (one exact ``GET``). The actor's
+        ``capabilities`` are normalized/deduped with the shared
+        ``_normalize_topics`` helper (slug + first-seen dedupe) — discovery fans
+        out over the canonical topic slugs, never raw graph state.
+
+        An actor with no normalized capabilities returns ``()`` with no
+        candidate pipeline. Otherwise one non-atomic candidate pipeline issues
+        ``ZREVRANGE {prefix}:questions:open 0 499`` followed by one
+        ``ZREVRANGE {prefix}:index:topic:{capability} 0 499`` per capability,
+        in normalized order. The response must be a list with exact command
+        cardinality before indexing; each entry decodes via
+        ``_decode_index_members``. The OR union of capability member sets is
+        filtered through the ``questions:open`` base list, preserving its
+        newest-first order and capped to ``limit``. An empty selection returns
+        ``()`` with no ``GET`` pipeline.
+
+        Otherwise one non-atomic ``GET`` pipeline resolves the selected post
+        ids; the response must match exact cardinality. Member payloads decode
+        through ``_decode_post_raw``/``_parse_post_wire`` — missing raises
+        ``CorvusNotFoundError``, corrupt raises a stable ``CorvusError`` from
+        ``None`` with no payload echo. Transport failures collapse to a
+        sanitized ``CorvusError``. No mutation commands, temp keys,
+        ``ZUNIONSTORE``, atomic pipelines, or direct candidate ``command``
+        calls are used — the candidate fan-out and the resolution are both
+        ordered non-atomic pipelines.
+        """
+        _validate_query_limit(limit)
+        if not isinstance(actor_id, str) or not actor_id.strip():
+            raise CorvusError(
+                f"actor_id must be a non-blank string, got {type(actor_id).__name__}"
+            )
+
+        actor = self.get_actor(actor_id)
+        capabilities = _normalize_topics(actor.capabilities)
+        if not capabilities:
+            return ()
+
+        prefix = self._key_prefix
+        candidate_commands: list[list[Any]] = [
+            ["ZREVRANGE", f"{prefix}:questions:open", 0, 499]
+        ]
+        for capability in capabilities:
+            candidate_commands.append(
+                ["ZREVRANGE", f"{prefix}:index:topic:{capability}", 0, 499]
+            )
+
+        try:
+            candidate_results = self._transport.pipeline(
+                candidate_commands, atomic=False
+            )
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(candidate_results, list) or len(candidate_results) != len(
+            candidate_commands
+        ):
+            raise CorvusError("candidate pipeline response cardinality mismatch")
+
+        decoded_sets: list[tuple[str, ...]] = []
+        for raw in candidate_results:
+            decoded_sets.append(self._decode_index_members(raw))
+        base_ids = decoded_sets[0]
+        if not base_ids:
+            return ()
+        matched: set[str] = set()
+        for extra in decoded_sets[1:]:
+            matched.update(extra)
+        selected_ids = [
+            post_id for post_id in base_ids if post_id in matched
+        ][:limit]
+        if not selected_ids:
+            return ()
+
+        get_commands = [
+            ["GET", self._post_key(post_id)] for post_id in selected_ids
+        ]
+        try:
+            results = self._transport.pipeline(get_commands, atomic=False)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(results, list) or len(results) != len(selected_ids):
+            raise CorvusError("discovery pipeline response cardinality mismatch")
+        posts: list[Post] = []
+        for raw in results:
+            stored = self._decode_post_raw(raw)
+            posts.append(self._parse_post_wire(stored))
+        return tuple(posts)
+
+    # ------------------------------------------------------------------
     # Public — multi-filter search (non-atomic candidate + GET pipelines).
     # ------------------------------------------------------------------
 
