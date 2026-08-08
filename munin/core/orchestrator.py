@@ -1,16 +1,15 @@
-# tags: [orchestrator, core, subagent, presence, worker-fanout, Orchestrator, try_claim_spawn_slot, enqueue_wake, _spawn_runner, wake, sleep, agent_wake_queue, subagent-runner-process, SharedStateStore, presence_metadata]
+# tags: [orchestrator, core, subagent, presence, worker-fanout, Orchestrator, enqueue_wake, _spawn_runner, wake, sleep, agent_wake_queue, supervisor-v2, SharedStateStore, presence_metadata]
 """Orchestrator — Munin's wake/sleep and graph lifecycle controller.
 
 Design:
-- Wake a subagent by enqueueing a task in ``agent_wake_queue``.
-- Immediately spawn a subprocess `python -m munin.subagents.runner <name>`; the
-  subprocess claims the wake item and executes it, publishing progress via
-  `shared_intel` / `agent_messages` and finishing with `complete_shared_task`.
-- Sleep is implicit: the subprocess ends when the wake queue is empty for that agent
-  and after `sleep_after_idle_seconds` of inactivity.
-- Forged graphs (built by `graph_forge`) are stored in ``generated_graphs`` and
-  woken the same way — the runner reads that table and builds a `create_react_agent`
-  from the stored spec on the fly.
+- Wake a subagent by enqueueing a durable task in ``agent_wake_queue``.
+- ``supervisor_v2`` owns execution; it does not spawn ``munin.subagents.runner``.
+  Presence is best-effort observability and must never invalidate a successful
+  queue insert.
+- Sleep marks presence IDLE; queued work remains durable until a supervisor
+  claims it.
+- Forged graphs (built by ``graph_forge``) are stored in ``generated_graphs``
+  and consumed by the same supervisor path.
 """
 
 from __future__ import annotations
@@ -42,56 +41,56 @@ class Orchestrator:
         priority: int = 0,
         detached: bool = True,
     ) -> dict[str, Any]:
-        """Enqueue a task and ensure exactly one runner is live to claim it.
+        """Queue one supervisor_v2 wake without claiming a legacy spawn slot.
 
-        Idempotent under concurrency. Historical race: two near-simultaneous
-        wakes for the same agent both checked "no live runner", both spawned,
-        producing duplicate subprocesses that raced for the queue. Now the
-        decision is made inside a SQLite BEGIN IMMEDIATE transaction on the
-        presence row (agent_name is PK) — see
-        :meth:`SharedStateStore.try_claim_spawn_slot`. Only one caller wins the
-        claim; every other caller sees the winner's pid and returns
-        ``spawned=False`` without touching subprocess.
-
-        We enqueue the task FIRST so the winner (whether it's us or another
-        thread) has something to claim on its next poll.
+        ``enqueue_wake`` is the authoritative operation. Once it returns a
+        ``wake_id`` the task exists, so a later presence refresh failure must
+        not bubble up as ``wake_enqueue_failed`` and tempt callers to enqueue a
+        duplicate. ``detached`` remains accepted for API compatibility with
+        the supervisor_v1 caller but has no effect in supervisor_v2.
         """
-        wake_id = self.state.enqueue_wake(target_agent=subagent_name.strip(), task=task, priority=priority)
-
-        claim = self.state.try_claim_spawn_slot(agent_name=subagent_name, spawner_pid=os.getpid())
-        if not claim["claimed"]:
-            existing_pid = claim.get("existing_pid")
-            logger.info(
-                "wake %s: runner already alive (pid=%s reason=%s) — skipping spawn",
-                subagent_name, existing_pid, claim.get("reason"),
-            )
-            return {
-                "wake_id": wake_id,
-                "target_agent": subagent_name,
-                "pid": existing_pid,
-                "spawned": False,
-            }
-
-        # We won the claim — in supervisor_v2 release claim slot to IDLE (munin.subagents.runner does not ship in v1.0.0)
-        self.state.upsert_presence(
-            agent_name=subagent_name,
-            role="",
-            status="IDLE",
-            current_task_id=None,
-            metadata_json=json.dumps(presence_metadata(os.getpid(), lease_seconds=0)),
+        del detached
+        normalized_name = subagent_name.strip()
+        wake_id = self.state.enqueue_wake(
+            target_agent=normalized_name,
+            task=task,
+            priority=priority,
         )
-        return {
+        result: dict[str, Any] = {
             "wake_id": wake_id,
-            "target_agent": subagent_name,
+            "target_agent": normalized_name,
             "pid": None,
             "spawned": False,
+            "queued": True,
+            "presence_updated": True,
             "reason": "supervisor_v2_wake_path",
         }
+        try:
+            self.state.upsert_presence(
+                agent_name=normalized_name,
+                role="",
+                status="IDLE",
+                current_task_id=None,
+                metadata_json=json.dumps(
+                    presence_metadata(os.getpid(), lease_seconds=0)
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - queue success is authoritative
+            logger.warning(
+                "wake %s queued as %s but presence refresh failed: %s",
+                normalized_name,
+                wake_id,
+                exc,
+            )
+            result["presence_updated"] = False
+            result["warning"] = {
+                "code": "presence_update_failed",
+                "message": str(exc),
+            }
+        return result
 
     def sleep(self, subagent_name: str) -> dict[str, Any]:
-        """Mark presence as IDLE. The runner subprocess exits on its own when the
-        wake queue empties; we don't kill it here (that would race against in-flight
-        work)."""
+        """Mark presence IDLE without affecting durable queued work."""
         self.state.upsert_presence(
             agent_name=subagent_name,
             role="",
@@ -102,7 +101,7 @@ class Orchestrator:
         return {"target_agent": subagent_name, "status": "IDLE"}
 
     def _spawn_runner(self, subagent_name: str, *, detached: bool) -> int:
-        """Legacy supervisor_v1 runner spawner. Note: munin.subagents.runner does not ship in v1.0.0."""
+        """Legacy supervisor_v1 runner spawner retained for compatibility."""
         cmd = [sys.executable, "-m", "munin.subagents.runner", subagent_name]
         popen_kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL}
         if detached:
@@ -123,8 +122,12 @@ class Orchestrator:
     def presence(self) -> list[dict[str, Any]]:
         return self.state.list_presence(stale_after_seconds=1800)
 
-    def queue(self, *, subagent_name: str = "", include_claimed: bool = False) -> list[dict[str, Any]]:
-        return self.state.list_wake_queue(target_agent=subagent_name, include_claimed=include_claimed)
+    def queue(
+        self, *, subagent_name: str = "", include_claimed: bool = False
+    ) -> list[dict[str, Any]]:
+        return self.state.list_wake_queue(
+            target_agent=subagent_name, include_claimed=include_claimed
+        )
 
     # ------------------------------------------------------------------
     # Graph lifecycle (delegates to state, kept here for API symmetry)
