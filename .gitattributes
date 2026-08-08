@@ -1,6 +1,1 @@
-changes.md merge=union
-munin/mcp/main.py merge=union
-munin/mcp/tools/munin_tools.py merge=union
-munin/production/chat.py merge=union
-munin/production/store.py merge=union
-munin/subagents/base.py merge=union
+* merge=union
