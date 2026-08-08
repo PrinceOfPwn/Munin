@@ -311,6 +311,16 @@ def _validate_scope(scope: Any) -> str:
     return scope
 
 
+def validate_scope(scope: Any) -> str:
+    """Public thin wrapper over the existing ``_validate_scope`` check.
+
+    Delegates entirely to ``_validate_scope`` so there is exactly one set of
+    validation rules; no rules are duplicated here and ``create_post`` keeps
+    calling ``_validate_scope`` directly, so its behavior is unchanged.
+    """
+    return _validate_scope(scope)
+
+
 def _normalize_aware_utc(value: datetime) -> datetime:
     """Normalize a datetime to aware UTC.
 

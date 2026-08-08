@@ -44,6 +44,7 @@ from munin.corvus.contracts import (
     Reaction,
     create_post,
     create_reaction,
+    validate_scope,
 )
 from munin.corvus.transport import CorvusTransportError, RedisTransport
 
@@ -122,6 +123,20 @@ def _sanitized(exc: Exception) -> CorvusError:
     if len(message) > 200:
         message = message[:200] + "...[truncated]"
     return CorvusError(message)
+
+
+def _validate_query_limit(limit: Any) -> None:
+    """Reject a non-``int``, ``bool``, or out-of-window query ``limit``.
+
+    ``bool`` is an ``int`` subclass and is rejected explicitly so a truthy
+    ``True``/``False`` limit is a caller error, not ``1``/``0``. The ``1..500``
+    window runs *before* any transport call so a bad limit can never touch
+    Redis.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise CorvusError("limit must be an int")
+    if limit < 1 or limit > 500:
+        raise CorvusError("limit must be between 1 and 500")
 
 
 class CorvusBlackboard:
@@ -229,6 +244,45 @@ class CorvusBlackboard:
                 self._release_reservation(fp_key, post.id)
             raise _sanitized(exc) from None
         return post
+
+    # ------------------------------------------------------------------
+    # Public — ask a question.
+    # ------------------------------------------------------------------
+
+    def ask(
+        self,
+        *,
+        actor_id: str,
+        content: str,
+        topics: Iterable[str] | None = None,
+        scope: Any = "global",
+        confidence: float | None = None,
+        evidence_refs: Iterable[str] | None = None,
+        investigation_refs: Iterable[str] | None = None,
+        observed_at: datetime | None = None,
+        expires_at: datetime | None = None,
+        fingerprint: str | None = None,
+    ) -> Post:
+        """Publish an open question atomically; returns the stored ``Post``.
+
+        Thin keyword wrapper over ``publish`` with ``PostType.QUESTION`` fixed
+        and every other argument forwarded unchanged, so a ``status`` defaults
+        to ``PostState.OPEN`` and the question lands in the ``questions:open``
+        index via the same atomic pipeline as any other publish.
+        """
+        return self.publish(
+            post_type=PostType.QUESTION,
+            scope=scope,
+            actor_id=actor_id,
+            content=content,
+            topics=topics,
+            confidence=confidence,
+            evidence_refs=evidence_refs,
+            investigation_refs=investigation_refs,
+            observed_at=observed_at,
+            expires_at=expires_at,
+            fingerprint=fingerprint,
+        )
 
     # ------------------------------------------------------------------
     # Public — post retrieval.
@@ -348,6 +402,44 @@ class CorvusBlackboard:
         return tuple(posts)
 
     # ------------------------------------------------------------------
+    # Public — feed and open-question queries.
+    # ------------------------------------------------------------------
+
+    def get_open_questions(self, *, limit: int = 50) -> tuple[Post, ...]:
+        """Return open questions from the ``questions:open`` index newest-first.
+
+        Validates ``limit`` as a non-``bool`` ``int`` in ``1..500`` *before* any
+        transport call, then reads the ``questions:open`` sorted-set with
+        ``ZREVRANGE 0 limit-1``. An empty index returns ``()``. A missing
+        member raises ``CorvusNotFoundError``; a corrupt payload raises a
+        stable ``CorvusError`` from ``None``. No payload or error echo ever
+        surfaces.
+        """
+        _validate_query_limit(limit)
+        return self._query_index(f"{self._key_prefix}:questions:open", limit)
+
+    def feed(self, *, scope: Any = "global", limit: int = 50) -> tuple[Post, ...]:
+        """Return the newest posts for a validated scope from its index.
+
+        Validates ``limit`` as a non-``bool`` ``int`` in ``1..500`` *before* any
+        transport call. ``validate_scope`` is applied to ``scope``; a
+        ``CorvusContractError`` collapses to a stable ``CorvusError`` from
+        ``None``. Reads the ``index:scope:{validated}`` sorted-set with
+        ``ZREVRANGE 0 limit-1``; an empty index returns ``()``. A missing
+        member raises ``CorvusNotFoundError``; a corrupt payload raises a
+        stable ``CorvusError`` from ``None``. No payload or error echo ever
+        surfaces.
+        """
+        _validate_query_limit(limit)
+        try:
+            validated = validate_scope(scope)
+        except CorvusContractError as exc:
+            raise CorvusError(str(exc)) from None
+        return self._query_index(
+            f"{self._key_prefix}:index:scope:{validated}", limit
+        )
+
+    # ------------------------------------------------------------------
     # Public — reaction.
     # ------------------------------------------------------------------
 
@@ -458,6 +550,13 @@ class CorvusBlackboard:
                 actor_id,
             ],
         ]
+        if post.type is PostType.QUESTION:
+            commands.append(
+                ["ZREM", f"{prefix}:questions:{post.status.value}", post.id]
+            )
+            commands.append(
+                ["ZADD", f"{prefix}:questions:resolved", score, post.id]
+            )
         try:
             self._transport.pipeline(commands, atomic=True)
         except CorvusTransportError as exc:
@@ -493,6 +592,10 @@ class CorvusBlackboard:
         for topic in post.topics:
             commands.append(
                 ["ZADD", f"{prefix}:index:topic:{topic}", score, post.id]
+            )
+        if post.type is PostType.QUESTION:
+            commands.append(
+                ["ZADD", f"{prefix}:questions:{post.status.value}", score, post.id]
             )
         commands.append(
             [
@@ -661,3 +764,62 @@ class CorvusBlackboard:
                 members.append(decoded)
             return members
         raise CorvusError("corrupt thread index") from None
+
+    def _query_index(self, index_key: str, limit: int) -> tuple[Post, ...]:
+        """Read an index sorted-set newest-first and resolve its member posts.
+
+        Issues ``ZREVRANGE index_key 0 limit-1``, decodes the member ids, and
+        returns ``()`` for an empty index. Otherwise issues one non-atomic
+        pipeline of ``GET`` commands — one per member — and parses the results
+        to a ``tuple[Post, ...]`` in index order. A missing member raises
+        ``CorvusNotFoundError``; a corrupt payload raises a stable
+        ``CorvusError`` from ``None``. No payload or error echo ever surfaces.
+        """
+        try:
+            members = self._transport.command("ZREVRANGE", index_key, 0, limit - 1)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        member_ids = self._decode_index_members(members)
+        if not member_ids:
+            return ()
+        get_commands = [
+            ["GET", self._post_key(member_id)] for member_id in member_ids
+        ]
+        try:
+            results = self._transport.pipeline(get_commands, atomic=False)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(results, list) or len(results) != len(member_ids):
+            raise CorvusError("index pipeline response cardinality mismatch")
+        posts: list[Post] = []
+        for raw in results:
+            stored = self._decode_post_raw(raw)
+            posts.append(self._parse_post_wire(stored))
+        return tuple(posts)
+
+    def _decode_index_members(self, raw: Any) -> tuple[str, ...]:
+        """Decode a ``ZREVRANGE`` member list to ordered UTF-8 id strings.
+
+        ``None`` decodes to ``()``. A blank, non-``str``/``bytes``, or non-UTF-8
+        member is corruption, not a silently skipped entry. Messages are stable
+        generic text — no Redis key is ever echoed.
+        """
+        if raw is None:
+            return ()
+        if isinstance(raw, (list, tuple)):
+            members: list[str] = []
+            for item in raw:
+                if isinstance(item, bytes):
+                    try:
+                        decoded = item.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise CorvusError("corrupt index") from None
+                elif isinstance(item, str):
+                    decoded = item
+                else:
+                    raise CorvusError("corrupt index") from None
+                if not decoded:
+                    raise CorvusError("corrupt index") from None
+                members.append(decoded)
+            return tuple(members)
+        raise CorvusError("corrupt index") from None
