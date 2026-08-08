@@ -321,6 +321,16 @@ def validate_scope(scope: Any) -> str:
     return _validate_scope(scope)
 
 
+def coerce_post_state(value: Any) -> PostState:
+    """Public thin wrapper over the existing ``_coerce_post_state`` check.
+
+    Delegates entirely to ``_coerce_post_state`` so there is exactly one set of
+    coercion rules; no rules are duplicated here and ``create_post`` keeps
+    calling ``_coerce_post_state`` directly, so its behavior is unchanged.
+    """
+    return _coerce_post_state(value)
+
+
 def _normalize_aware_utc(value: datetime) -> datetime:
     """Normalize a datetime to aware UTC.
 

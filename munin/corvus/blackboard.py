@@ -42,6 +42,7 @@ from munin.corvus.contracts import (
     PostState,
     PostType,
     Reaction,
+    coerce_post_state,
     create_post,
     create_reaction,
     validate_scope,
@@ -438,6 +439,134 @@ class CorvusBlackboard:
         return self._query_index(
             f"{self._key_prefix}:index:scope:{validated}", limit
         )
+
+    # ------------------------------------------------------------------
+    # Public — multi-filter search (non-atomic candidate + GET pipelines).
+    # ------------------------------------------------------------------
+
+    def search(
+        self,
+        *,
+        topics: Iterable[str] | None = (),
+        scope: Any = None,
+        actor_id: Any = None,
+        status: Any = None,
+        limit: int = 50,
+    ) -> tuple[Post, ...]:
+        """Search the blackboard across filters, newest-first.
+
+        Validates ``limit`` (``_validate_query_limit``), normalizes ``topics``
+        (``_normalize_topics``), validates ``scope`` (``validate_scope``),
+        requires ``actor_id`` to be a non-blank string, and coerces ``status``
+        via ``coerce_post_state`` — all *before* any transport call; a
+        ``CorvusContractError`` collapses to a stable ``CorvusError`` from
+        ``None``.
+
+        The first non-atomic candidate pipeline issues ``ZREVRANGE`` commands
+        with range ``0 499`` over ``index:all`` followed by one per selected
+        filter (normalized topics in source order, then optional scope, actor,
+        and state). Candidate member lists are decoded via
+        ``_decode_index_members`` and intersected in memory preserving the
+        ``index:all`` newest-first order, capped to ``limit``. An empty result
+        (either no ``index:all`` members or an empty intersection) returns
+        ``()`` with no GET pipeline. Otherwise the second non-atomic pipeline
+        issues one ``GET`` per matched id; results are parsed through
+        ``_decode_post_raw``/``_parse_post_wire``. A missing member raises
+        ``CorvusNotFoundError``; a corrupt payload or pipeline cardinality
+        mismatch raises a stable ``CorvusError`` from ``None``. Transport
+        failures collapse to a sanitized ``CorvusError``.
+
+        No single ``command`` calls, temp keys, ``ZINTERSTORE``, writes, or
+        atomic pipelines are used. The candidate fan-out and the GET
+        resolution are both ordered non-atomic pipelines.
+        """
+        _validate_query_limit(limit)
+        normalized_topics = _normalize_topics(topics)
+        validated_scope: str | None = None
+        if scope is not None:
+            try:
+                validated_scope = validate_scope(scope)
+            except CorvusContractError as exc:
+                raise CorvusError(str(exc)) from None
+        validated_actor: str | None = None
+        if actor_id is not None:
+            if not isinstance(actor_id, str) or not actor_id.strip():
+                raise CorvusError("actor_id must be a non-blank string")
+            validated_actor = actor_id.strip()
+        validated_state: PostState | None = None
+        if status is not None:
+            try:
+                validated_state = coerce_post_state(status)
+            except CorvusContractError as exc:
+                raise CorvusError(str(exc)) from None
+
+        prefix = self._key_prefix
+        candidate_commands: list[list[Any]] = [
+            ["ZREVRANGE", f"{prefix}:index:all", 0, 499]
+        ]
+        for topic in normalized_topics:
+            candidate_commands.append(
+                ["ZREVRANGE", f"{prefix}:index:topic:{topic}", 0, 499]
+            )
+        if validated_scope is not None:
+            candidate_commands.append(
+                ["ZREVRANGE", f"{prefix}:index:scope:{validated_scope}", 0, 499]
+            )
+        if validated_actor is not None:
+            candidate_commands.append(
+                ["ZREVRANGE", f"{prefix}:index:actor:{validated_actor}", 0, 499]
+            )
+        if validated_state is not None:
+            candidate_commands.append(
+                [
+                    "ZREVRANGE",
+                    f"{prefix}:index:state:{validated_state.value}",
+                    0,
+                    499,
+                ]
+            )
+
+        try:
+            candidate_results = self._transport.pipeline(
+                candidate_commands, atomic=False
+            )
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(candidate_results, list) or len(candidate_results) != len(
+            candidate_commands
+        ):
+            raise CorvusError("candidate pipeline response cardinality mismatch")
+
+        decoded_sets: list[tuple[str, ...]] = []
+        for raw in candidate_results:
+            decoded_sets.append(self._decode_index_members(raw))
+        base_ids = decoded_sets[0]
+        if not base_ids:
+            return ()
+        surviving = set(base_ids)
+        for extra in decoded_sets[1:]:
+            surviving &= set(extra)
+        ordered_ids = [
+            post_id for post_id in base_ids if post_id in surviving
+        ]
+        matched_ids = ordered_ids[:limit]
+        if not matched_ids:
+            return ()
+
+        get_commands = [
+            ["GET", self._post_key(post_id)] for post_id in matched_ids
+        ]
+        try:
+            results = self._transport.pipeline(get_commands, atomic=False)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(results, list) or len(results) != len(matched_ids):
+            raise CorvusError("search pipeline response cardinality mismatch")
+        posts: list[Post] = []
+        for raw in results:
+            stored = self._decode_post_raw(raw)
+            posts.append(self._parse_post_wire(stored))
+        return tuple(posts)
 
     # ------------------------------------------------------------------
     # Public — reaction.

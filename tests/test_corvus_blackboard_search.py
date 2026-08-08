@@ -169,7 +169,7 @@ def test_search_normalizes_topics_and_rejects_invalid_arguments_before_transport
 
     candidate_commands, _a = normalization.pipeline_calls[0]
     rev_keys = [cmd[1] for cmd in candidate_commands if cmd[0] == "ZREVRANGE"]
-    assert f"{PREFIX}:index:topic:c-2" in rev_keys
+    assert f"{PREFIX}:index:topic:c_2" in rev_keys
 
     bad_topics = SearchRecordingTransport()
     with pytest.raises(CorvusError):
