@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: one-shot-unify-prs
+  cancel-in-progress: true
+
 jobs:
   consolidate:
     runs-on: ubuntu-latest
@@ -21,7 +25,7 @@ jobs:
           ref: agent/unified-system-issue-18
           fetch-depth: 0
 
-      - name: Merge consolidated frontend/runtime chain and documentation-audit fix
+      - name: Merge all independent open-PR work and publish
         shell: bash
         run: |
           set -euo pipefail
@@ -29,22 +33,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin develop fix/register-documentation-audit agent/valravn-burp-ultimate
 
-          # The branch already starts at PR #72.  Resolve only genuinely overlapping
-          # hunks in favour of that newer/current-main side; all non-conflicting
-          # Issue #32 changes are still merged normally.
+          # This branch starts at PR #72 / current main. Keep that newer side only
+          # for overlapping conflict hunks while merging every non-conflicting hunk
+          # from the complete Issue #32 frontend/runtime chain.
           git merge --no-ff -X ours origin/develop \
             -m "merge(frontend): consolidate Issue #32 frontend/runtime chain"
-
-          # Independent CI/documentation-audit performance fix (#42).
           git merge --no-ff -X ours origin/fix/register-documentation-audit \
             -m "merge(ci): preserve documentation-audit cache and artifacts"
 
-          if git ls-files -u | grep -q .; then
-            echo "Unresolved merge entries remain" >&2
-            git ls-files -u
-            exit 1
-          fi
-          git diff --check HEAD~2..HEAD
+          test -z "$(git ls-files -u)"
+          git diff --check origin/agent/valravn-burp-ultimate...HEAD
+          git push origin HEAD:agent/unified-system-issue-18
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -93,11 +92,3 @@ jobs:
           npx tsc --noEmit
           npm run lint
           npm test -- --run
-
-      - name: Remove one-shot workflow and publish consolidated branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rm .github/workflows/one-shot-unify-prs.yml
-          git commit -m "chore: remove one-shot consolidation workflow"
-          git push origin HEAD:agent/unified-system-issue-18
