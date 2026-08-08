@@ -341,7 +341,7 @@ def test_supplied_topics_confidence_and_refs_round_trip_to_wire() -> None:
         "run:run-1",
         "investigation:inv-1",
         "capability:recon",
-        f"agent:raven-mind",
+        "agent:raven-mind",
     ],
 )
 def test_scope_validation_accepts_each_approved_scope(scope: str) -> None:
