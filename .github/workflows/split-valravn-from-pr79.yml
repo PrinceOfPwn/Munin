@@ -1,0 +1,34 @@
+name: Split Valravn from PR 79
+
+on:
+  push:
+    branches:
+      - agent/unified-system-final
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    if: github.event.head_commit.message == 'chore: split valravn from unified PR'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout unified branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/unified-system-final
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Rebase frontend/runtime commits onto main
+        shell: bash
+        env:
+          VALRAVN_HEAD: e956e314c30f9b48d1894885003a55fbd13bf3e6
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main agent/valravn-burp-ultimate agent/unified-system-final
+          test "$(git merge-base "$VALRAVN_HEAD" HEAD)" = "$VALRAVN_HEAD"
+          git rebase --onto origin/main "$VALRAVN_HEAD" HEAD
+          git push --force-with-lease origin HEAD:agent/unified-system-final
