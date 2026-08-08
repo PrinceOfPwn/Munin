@@ -400,10 +400,12 @@ class Post(BaseModel):
 
     Server-owned fields (``id``, ``published_at``, ``published_at_local``,
     ``timezone_name``, ``edited_at``, ``revision``) are set only by the
-    factories. Collection fields are immutable tuples internally;
-    ``to_wire()`` projects them to JSON lists. The canonical wire set is 17
-    keys; optional lifecycle keys (``observed_at``, ``expires_at``) are
-    emitted only when non-null.
+    factories. ``published_at_local`` is the canonical ISO-8601 string
+    (exactly milliseconds and a numeric offset) rendered server-side from the
+    timezone-aware instant; ``to_wire()`` emits it unchanged. Collection
+    fields are immutable tuples internally; ``to_wire()`` projects them to
+    JSON lists. The canonical wire set is 17 keys; optional lifecycle keys
+    (``observed_at``, ``expires_at``) are emitted only when non-null.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -415,7 +417,7 @@ class Post(BaseModel):
     scope: str
     topics: tuple[str, ...] = Field(default_factory=tuple)
     published_at: datetime
-    published_at_local: datetime
+    published_at_local: str
     timezone_name: str = "UTC"
     edited_at: datetime | None = None
     revision: int = 1
@@ -446,7 +448,7 @@ class Post(BaseModel):
             "scope": self.scope,
             "topics": list(self.topics),
             "published_at": _utc_ms_z(self.published_at),
-            "published_at_local": _local_ms_with_offset(self.published_at_local),
+            "published_at_local": self.published_at_local,
             "timezone_name": self.timezone_name,
             "edited_at": (
                 _utc_ms_z(self.edited_at) if self.edited_at is not None else None
@@ -525,8 +527,9 @@ def create_post(
     """Server-side factory for a Corvus post.
 
     Stamps server time from an injected ``clock(tz)`` callable, normalizes
-    ``published_at`` to aware UTC, computes ``published_at_local`` in the
-    configured timezone, and rejects any caller-supplied ``published_at``
+    ``published_at`` to aware UTC, renders ``published_at_local`` as the
+    canonical ISO-8601 string (exactly milliseconds and a numeric offset) in
+    the configured timezone, and rejects any caller-supplied ``published_at``
     (forge-resistance via a private sentinel — even an explicit ``None`` is
     rejected, not accepted-and-ignored). Unknown keyword arguments are
     rejected by name. Validates scope, post type, and post state with
@@ -563,6 +566,7 @@ def create_post(
         local_value = published_utc
     else:
         local_value = clock_value.astimezone(resolved_tz)
+    published_local_str = _local_ms_with_offset(local_value)
 
     topics_tuple = _coerce_string_tuple(topics, "topics")
     evidence_tuple = _coerce_string_tuple(evidence_refs, "evidence_refs")
@@ -590,7 +594,7 @@ def create_post(
             scope=resolved_scope,
             topics=topics_tuple,
             published_at=published_utc,
-            published_at_local=local_value,
+            published_at_local=published_local_str,
             timezone_name=tz_name,
             status=resolved_status,
             confidence=confidence,
