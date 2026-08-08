@@ -37,6 +37,16 @@ jobs:
             git commit -m "chore: remove temporary merge policy"
           fi
 
+          # Keep a file-scoped patch containing everything that landed on main
+          # after the Issue #32 stack forked.  store.py and chat.py need the
+          # complete Issue #18 contracts from develop, but they also received
+          # later Discord/guidance/compaction fixes on main.  Replaying these
+          # patches after taking develop gives us both histories instead of
+          # choosing one side wholesale.
+          merge_base="$(git merge-base origin/develop origin/main)"
+          git diff --binary "$merge_base"..origin/main -- munin/production/store.py > /tmp/main-store.patch
+          git diff --binary "$merge_base"..origin/main -- munin/production/chat.py > /tmp/main-chat.patch
+
           set +e
           git merge --no-ff --no-commit origin/develop
           merge_status=$?
@@ -61,16 +71,42 @@ jobs:
                 echo "Unexpected conflict: $path" >&2
                 exit 1
               fi
-              git checkout --ours -- "$path"
+
+              case "$path" in
+                munin/production/store.py|munin/production/chat.py)
+                  # These files carry most of the Issue #18 runtime contract.
+                  git checkout --theirs -- "$path"
+                  ;;
+                *)
+                  # Preserve newer main behavior for unrelated overlap.
+                  git checkout --ours -- "$path"
+                  ;;
+              esac
               git add "$path"
             done
           fi
           git commit -m "merge(frontend): consolidate Issue #18/#32 implementation"
 
+          # Replay only the post-fork changes for the two files where the
+          # Issue #18 side was chosen.  --3way uses the fork blob embedded in
+          # the patch and performs a semantic merge against the new file.
+          replayed=0
+          if [ -s /tmp/main-store.patch ]; then
+            git apply --3way --index /tmp/main-store.patch
+            replayed=1
+          fi
+          if [ -s /tmp/main-chat.patch ]; then
+            git apply --3way --index /tmp/main-chat.patch
+            replayed=1
+          fi
+          test -z "$(git ls-files -u)"
+          if [ "$replayed" -eq 1 ] && ! git diff --cached --quiet; then
+            git commit -m "merge(runtime): replay post-stack main fixes onto Issue #18 contracts"
+          fi
+
+          # Independent documentation-audit performance/artifact fix (#42).
           git merge --no-ff --no-edit origin/fix/register-documentation-audit
           test -z "$(git ls-files -u)"
-          # Check only work added after the #72 tip. Valravn contains historical
-          # Markdown trailing-space formatting that is outside this integration.
           git diff --check e956e314c30f9b48d1894885003a55fbd13bf3e6...HEAD -- . ':(exclude)app/.gitignore'
 
       - name: Set up Python
