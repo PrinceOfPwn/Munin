@@ -1,5 +1,5 @@
 # tags: [orchestrator, wake, supervisor-v2, regression, idempotency]
-"""Regression coverage for the supervisor_v2 wake contract."""
+"""Regression coverage for the supervisor_v2 wake contract from PR #40 review."""
 
 from __future__ import annotations
 
