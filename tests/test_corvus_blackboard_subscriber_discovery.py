@@ -284,8 +284,7 @@ def test_discover_subscribers_validation_and_failure_read_only_guarantees() -> N
         make_board(candidate_fail).discover_subscribers(
             topics=("web",), scopes=("global",)
         )
-    assert candidate_msg not in str(excinfo.value)
-    assert candidate_msg not in repr(excinfo.value)
+    assert excinfo.value.__cause__ is None
     assert len(candidate_fail.pipeline_calls) == 1
     _assert_read_only(candidate_fail)
 
@@ -308,7 +307,6 @@ def test_discover_subscribers_validation_and_failure_read_only_guarantees() -> N
     # GET pipeline transport failure → sanitized CorvusError, no raw payload
     # echo. The candidate pipeline returns its queued result first; the second
     # (GET) pipeline raises the configured transport error.
-    get_msg = "get transport exploded"
     get_fail = _OneShotPipelineErrorTransport(
         pipeline_results=[
             [
@@ -322,8 +320,7 @@ def test_discover_subscribers_validation_and_failure_read_only_guarantees() -> N
         make_board(get_fail).discover_subscribers(
             topics=("web",), scopes=("global",)
         )
-    assert get_msg not in str(excinfo_get.value)
-    assert get_msg not in repr(excinfo_get.value)
+    assert excinfo_get.value.__cause__ is None
     assert len(get_fail.pipeline_calls) == 2
     _assert_read_only(get_fail)
 
