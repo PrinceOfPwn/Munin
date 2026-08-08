@@ -81,7 +81,6 @@ def _assert_read_only(transport: DiscoveryRecordingTransport) -> None:
 def test_discover_open_questions_actor_capabilities_union_exact_pipelines() -> None:
     q_newest = make_post("post-q3", post_type="QUESTION", content="cve match")
     q_mid = make_post("post-q2", post_type="QUESTION", content="browser match")
-    q_oldest = make_post("post-q1", post_type="QUESTION", content="browser match")
     actor = make_actor(actor_id="agent:web-7", capabilities=("Browser", "CVE"))
 
     transport = DiscoveryRecordingTransport(
