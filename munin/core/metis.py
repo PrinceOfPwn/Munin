@@ -720,6 +720,29 @@ class MetisConfig:
                 stack.extend(routes[current]["fallbacks"])
 
 
+def load_metis_if_enabled(
+    *, path: Path | None, environ: Mapping[str, str]
+) -> MetisConfig | None:
+    """Opt-in Metis loader for runtime composition roots.
+
+    ``path`` is typically ``settings.metis_config_path`` (already ``None`` when
+    ``MUNIN_MODELS_JSON`` is blank/unset). A ``None`` path returns ``None``
+    without touching the environment or filesystem — Metis stays off and the
+    legacy env-driven model construction is unchanged. A non-``None`` path
+    delegates exactly to :meth:`MetisConfig.load`; a missing, malformed or
+    secret-requiring configuration still fails fast with
+    :class:`MetisConfigError`.
+
+    Deliberately stateless: no global cache, no singleton, no default model,
+    no env reads and no runtime wiring live here. The decision to load is the
+    caller's (composition root), driven purely by ``settings.metis_config_path``.
+    """
+
+    if path is None:
+        return None
+    return MetisConfig.load(path=path, environ=environ)
+
+
 def _is_int_like(value: Any) -> bool:
     """True if ``value`` is an int (and not a bool), or an int-coercible str.
 
