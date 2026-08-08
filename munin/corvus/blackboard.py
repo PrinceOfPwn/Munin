@@ -37,12 +37,17 @@ from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 from munin.corvus.contracts import (
+    ActorIdentity,
+    ActorPresence,
+    ActorSubscriptions,
     CorvusContractError,
     Post,
     PostState,
     PostType,
     Reaction,
     coerce_post_state,
+    create_actor_presence,
+    create_actor_subscriptions,
     create_post,
     create_reaction,
     validate_scope,
@@ -113,6 +118,38 @@ def _normalize_topics(topics: Iterable[str] | None) -> tuple[str, ...]:
         if slug not in seen:
             seen.add(slug)
             result.append(slug)
+    return tuple(result)
+
+
+def _normalize_scopes(scopes: Iterable[str] | None) -> tuple[str, ...]:
+    """Validate, then dedupe (first-seen order) an iterable of scopes.
+
+    ``None`` yields an empty tuple. A bare ``str`` or a non-iterable is a
+    caller error, and non-string entries are rejected. Every member is
+    validated through the shared ``validate_scope`` so approved scopes come out
+    unchanged (``global`` or ``prefix:remainder``). Validation happens before
+    any transport mutation so a bad scope can never touch Redis.
+    """
+    if scopes is None:
+        return ()
+    if isinstance(scopes, str):
+        raise CorvusError("scopes must be an iterable of strings")
+    try:
+        items = tuple(scopes)
+    except TypeError as exc:
+        raise CorvusError("scopes must be an iterable of strings") from exc
+    result: list[str] = []
+    seen: set[str] = set()
+    for scope in items:
+        if not isinstance(scope, str):
+            raise CorvusError("scopes entries must be strings")
+        try:
+            validated = validate_scope(scope)
+        except CorvusContractError as exc:
+            raise CorvusError(str(exc)) from None
+        if validated not in seen:
+            seen.add(validated)
+            result.append(validated)
     return tuple(result)
 
 
@@ -304,6 +341,217 @@ class CorvusBlackboard:
             raise _sanitized(exc) from None
         stored = self._decode_post_raw(raw)
         return self._parse_post_wire(stored)
+
+    # ------------------------------------------------------------------
+    # Public — actor registry.
+    # ------------------------------------------------------------------
+
+    def register_actor(self, *, identity: ActorIdentity) -> ActorIdentity:
+        """Register an actor identity in one atomic pipeline.
+
+        Rejects a non-``ActorIdentity`` or blank-id identity before any
+        transport. Normalizes ``identity.capabilities`` with the shared
+        ``_normalize_topics`` helper (slug, dedupe, first-seen order) so every
+        capability index uses the canonical form. Writes exactly one atomic
+        pipeline: ``SET prefix:actor:<id>`` with the compact canonical wire
+        JSON, ``ZADD prefix:actors:created`` at the actor's ``created_at``
+        epoch-milliseconds, and one ``ZADD prefix:index:capability:<normalized>``
+        per capability at the same score/id in capability order. Transport
+        failures collapse to a sanitized ``CorvusError``. Returns the original
+        (unchanged) identity.
+        """
+        if not isinstance(identity, ActorIdentity):
+            raise CorvusError(
+                f"identity must be an ActorIdentity, got {type(identity).__name__}"
+            )
+        if not isinstance(identity.id, str) or not identity.id.strip():
+            raise CorvusError("identity.id must be a non-blank string")
+
+        capabilities = _normalize_topics(identity.capabilities)
+        score = int(identity.created_at.timestamp() * 1000)
+        commands: list[list[Any]] = [
+            ["SET", self._actor_key(identity.id), self._actor_wire(identity)],
+            ["ZADD", f"{self._key_prefix}:actors:created", score, identity.id],
+        ]
+        commands.extend(
+            [
+                [
+                    "ZADD",
+                    f"{self._key_prefix}:index:capability:{capability}",
+                    score,
+                    identity.id,
+                ]
+                for capability in capabilities
+            ]
+        )
+        try:
+            self._transport.pipeline(commands, atomic=True)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        return identity
+
+    def get_actor(self, actor_id: str) -> ActorIdentity:
+        """Fetch one actor identity by exact key; never a payload or error echo.
+
+        Rejects a blank/whitespace/non-string ``actor_id`` before transport.
+        Reads exactly ``GET prefix:actor:<id>``. Missing or empty storage
+        raises ``CorvusNotFoundError``. A corrupt payload (non-UTF-8 bytes,
+        non-JSON, or an invalid ``ActorIdentity`` wire) raises a stable
+        ``CorvusError`` from ``None`` so no raw transport value, Redis key, or
+        actor id leaks. Transport failures collapse to a sanitized
+        ``CorvusError``.
+        """
+        if not isinstance(actor_id, str) or not actor_id.strip():
+            raise CorvusError(
+                f"actor_id must be a non-blank string, got {type(actor_id).__name__}"
+            )
+        try:
+            raw = self._transport.command("GET", self._actor_key(actor_id))
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        stored = self._decode_actor_raw(raw)
+        return self._parse_actor_wire(stored)
+
+    # ------------------------------------------------------------------
+    # Public — actor presence heartbeat.
+    # ------------------------------------------------------------------
+
+    def heartbeat(
+        self, *, actor_id: str, ttl_seconds: int = 60
+    ) -> ActorPresence:
+        """Record an actor presence heartbeat with a hard TTL.
+
+        Builds the presence through ``create_actor_presence`` first — all
+        validation (non-blank actor, intact ``ttl_seconds`` ``1..86400``,
+        callable clock, server UTC timestamping) happens before any transport.
+        Contract violations collapse to a stable ``CorvusError`` from ``None``.
+        The actor is verified via ``get_actor`` (missing raises
+        ``CorvusNotFoundError``), then exactly ``SET prefix:presence:<id>``
+        with the compact canonical wire JSON and ``EX ttl_seconds``. Transport
+        failures collapse to a sanitized ``CorvusError``. Returns the presence.
+        """
+        try:
+            presence = create_actor_presence(
+                actor_id=actor_id,
+                ttl_seconds=ttl_seconds,
+                clock=self._clock,
+                timezone=self._timezone,
+            )
+        except CorvusContractError as exc:
+            raise CorvusError(str(exc)) from None
+
+        actor_resolved = self.get_actor(actor_id)
+        if actor_resolved.id != actor_id:
+            raise CorvusNotFoundError("missing actor") from None
+
+        payload = json.dumps(
+            presence.to_wire(), sort_keys=True, separators=(",", ":")
+        )
+        try:
+            self._transport.command(
+                "SET",
+                f"{self._key_prefix}:presence:{actor_id}",
+                payload,
+                "EX",
+                ttl_seconds,
+            )
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        return presence
+
+    # ------------------------------------------------------------------
+    # Public — actor subscriptions.
+    # ------------------------------------------------------------------
+
+    def subscribe(
+        self,
+        *,
+        actor_id: str,
+        topics: Iterable[str] | None = (),
+        scopes: Iterable[str] | None = (),
+    ) -> ActorSubscriptions:
+        """Persist an actor's topic/scope subscriptions atomically.
+
+        Normalizes ``topics`` with the shared ``_normalize_topics`` helper and
+        validates/dedupes ``scopes`` through ``_normalize_scopes`` **before**
+        any transport. The actor/timestamp snapshot is built through
+        ``create_actor_subscriptions``, which returns the server-stamped
+        ``ActorSubscriptions`` (server ``updated_at``). The actor is
+        verified via ``get_actor`` (missing raises ``CorvusNotFoundError``).
+        One atomic pipeline writes, in exact order: ``SET
+        prefix:subscription:<id>`` with the compact canonical JSON; forward
+        ``SADD prefix:subscription:actor:<id>:topics`` (when topics are
+        nonempty); forward ``SADD ...:scopes`` (when scopes are nonempty); one
+        reverse ``SADD prefix:subscribers:topic:<topic>`` per topic; and one
+        reverse ``SADD prefix:subscribers:scope:<scope>`` per scope. Transport
+        failures collapse to a sanitized ``CorvusError``.
+        """
+        if not isinstance(actor_id, str) or not actor_id.strip():
+            raise CorvusError(
+                f"actor_id must be a non-blank string, got {type(actor_id).__name__}"
+            )
+
+        normalized_topics = _normalize_topics(topics)
+        normalized_scopes = _normalize_scopes(scopes)
+
+        try:
+            actor = create_actor_subscriptions(
+                actor_id=actor_id,
+                topics=normalized_topics,
+                scopes=normalized_scopes,
+                clock=self._clock,
+                timezone=self._timezone,
+            )
+        except CorvusContractError as exc:
+            raise CorvusError(str(exc)) from None
+
+        actor_resolved = self.get_actor(actor_id)
+        if actor_resolved.id != actor_id:
+            raise CorvusNotFoundError("missing actor") from None
+
+        payload = json.dumps(
+            actor.to_wire(), sort_keys=True, separators=(",", ":")
+        )
+        commands: list[list[Any]] = [
+            ["SET", f"{self._key_prefix}:subscription:{actor_id}", payload]
+        ]
+        if normalized_topics:
+            commands.append(
+                [
+                    "SADD",
+                    f"{self._key_prefix}:subscription:actor:{actor_id}:topics",
+                    *normalized_topics,
+                ]
+            )
+        if normalized_scopes:
+            commands.append(
+                [
+                    "SADD",
+                    f"{self._key_prefix}:subscription:actor:{actor_id}:scopes",
+                    *normalized_scopes,
+                ]
+            )
+        for topic in normalized_topics:
+            commands.append(
+                [
+                    "SADD",
+                    f"{self._key_prefix}:subscribers:topic:{topic}",
+                    actor_id,
+                ]
+            )
+        for scope in normalized_scopes:
+            commands.append(
+                [
+                    "SADD",
+                    f"{self._key_prefix}:subscribers:scope:{scope}",
+                    actor_id,
+                ]
+            )
+        try:
+            self._transport.pipeline(commands, atomic=True)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        return actor
 
     # ------------------------------------------------------------------
     # Public — threaded reply.
@@ -822,6 +1070,59 @@ class CorvusBlackboard:
 
     def _post_key(self, post_id: str) -> str:
         return f"{self._key_prefix}:post:{post_id}"
+
+    def _actor_key(self, actor_id: str) -> str:
+        return f"{self._key_prefix}:actor:{actor_id}"
+
+    def _actor_wire(self, actor: ActorIdentity) -> str:
+        """Compact canonical wire JSON for an actor identity."""
+        return json.dumps(
+            actor.to_wire(), sort_keys=True, separators=(",", ":")
+        )
+
+    # ------------------------------------------------------------------
+    # Actor payload decode + parse helpers — no payload or error echo.
+    # ------------------------------------------------------------------
+
+    def _decode_actor_raw(self, raw: Any) -> str:
+        """Decode a transport-read actor payload to a UTF-8 string.
+
+        ``None`` or an empty/whitespace value is a missing actor and raises
+        ``CorvusNotFoundError``. ``bytes`` are decoded as UTF-8. A non-UTF-8
+        ``bytes`` payload raises a stable ``CorvusError`` from ``None``. All
+        messages are stable generic text — no actor id or key is ever echoed.
+        """
+        if raw is None:
+            raise CorvusNotFoundError("missing actor") from None
+        if isinstance(raw, bytes):
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise CorvusError("corrupt actor payload") from None
+            if not decoded.strip():
+                raise CorvusNotFoundError("missing actor") from None
+            return decoded
+        if isinstance(raw, str):
+            if not raw.strip():
+                raise CorvusNotFoundError("missing actor") from None
+            return raw
+        raise CorvusError("corrupt actor payload") from None
+
+    def _parse_actor_wire(self, stored: str) -> ActorIdentity:
+        """Parse a stored JSON wire string into an ``ActorIdentity``.
+
+        Non-JSON or invalid ``ActorIdentity`` wire raises a stable
+        ``CorvusError`` from ``None`` — never a raw ``ValueError``/``TypeError``
+        and never an echo of the payload itself, Redis key, or actor id.
+        """
+        try:
+            wire = json.loads(stored)
+        except ValueError:
+            raise CorvusError("corrupt actor payload") from None
+        try:
+            return ActorIdentity.model_validate(wire)
+        except (ValueError, TypeError):
+            raise CorvusError("corrupt actor payload") from None
 
     # ------------------------------------------------------------------
     # Post/payload decode + parse helpers — no payload or error echo.

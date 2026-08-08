@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -411,6 +411,66 @@ class ActorIdentity(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# ActorPresence — frozen value object with the three public fields.
+# ---------------------------------------------------------------------------
+
+
+class ActorPresence(BaseModel):
+    """An immutable actor presence snapshot stamped by a server heartbeat.
+
+    ``heartbeat_at`` is the server-owned UTC instant; ``expires_at`` is the
+    hard TTL horizon (``heartbeat_at + ttl_seconds``). Both render as
+    ISO-8601 UTC with exactly milliseconds and ``Z`` on the wire.
+    ``extra="forbid"`` rejects unknown fields.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    actor_id: str
+    heartbeat_at: datetime
+    expires_at: datetime
+
+    def to_wire(self) -> dict[str, Any]:
+        """Emit exactly the three canonical keys with JSON-compatible values."""
+        return {
+            "actor_id": self.actor_id,
+            "heartbeat_at": _utc_ms_z(self.heartbeat_at),
+            "expires_at": _utc_ms_z(self.expires_at),
+        }
+
+
+# ---------------------------------------------------------------------------
+# ActorSubscriptions — frozen value object with the four public fields.
+# ---------------------------------------------------------------------------
+
+
+class ActorSubscriptions(BaseModel):
+    """An immutable actor subscription snapshot stamped by the server.
+
+    ``topics`` and ``scopes`` are immutable tuples on the model; ``to_wire()``
+    projects them to JSON lists. ``updated_at`` is the server-owned UTC instant
+    rendered as ISO-8601 UTC with exactly milliseconds and ``Z``.
+    ``extra="forbid"`` rejects unknown fields.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    actor_id: str
+    topics: tuple[str, ...] = Field(default_factory=tuple)
+    scopes: tuple[str, ...] = Field(default_factory=tuple)
+    updated_at: datetime
+
+    def to_wire(self) -> dict[str, Any]:
+        """Emit exactly the four canonical keys with JSON-compatible values."""
+        return {
+            "actor_id": self.actor_id,
+            "topics": list(self.topics),
+            "scopes": list(self.scopes),
+            "updated_at": _utc_ms_z(self.updated_at),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Post — frozen value object.
 # ---------------------------------------------------------------------------
 
@@ -741,6 +801,126 @@ def create_reaction(
             type=resolved_type,
             actor_id=actor_id,
             timestamp=timestamp_utc,
+        )
+    except ValidationError as exc:
+        raise CorvusContractError(_sanitize_validation_error(exc)) from exc
+    except TypeError as exc:
+        raise CorvusContractError("invalid contract value: internal type error") from exc
+
+
+def create_actor_presence(
+    *,
+    actor_id: str,
+    ttl_seconds: int,
+    clock: Callable[[Any], datetime],
+    timezone: Any = None,
+    **unexpected: Any,
+) -> ActorPresence:
+    """Server-side factory for an actor presence snapshot.
+
+    Validates that ``actor_id`` is a non-blank string, ``ttl_seconds`` is an
+    ``int`` in ``1..86400`` excluding ``bool``, and ``clock`` is a callable
+    returning a timezone-aware ``datetime``. Resolves the optional timezone,
+    stamps ``heartbeat_at`` from ``clock(tz)`` normalized to aware UTC, and
+    sets ``expires_at`` to ``heartbeat_at + timedelta(seconds=ttl_seconds)``.
+    Converts Pydantic ``ValidationError`` and raw ``TypeError`` into
+    ``CorvusContractError`` with sanitized messages.
+    """
+    if unexpected:
+        raise CorvusContractError(
+            "unexpected keyword arguments: " + ", ".join(sorted(unexpected))
+        )
+    if not isinstance(actor_id, str) or not actor_id.strip():
+        raise CorvusContractError(
+            f"actor_id must be a non-blank string, got {type(actor_id).__name__}"
+        )
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+        raise CorvusContractError(
+            f"ttl_seconds must be an int, got {type(ttl_seconds).__name__}"
+        )
+    if ttl_seconds < 1 or ttl_seconds > 86400:
+        raise CorvusContractError("ttl_seconds must be between 1 and 86400")
+    if not callable(clock):
+        raise CorvusContractError(
+            f"clock must be callable, got {type(clock).__name__}"
+        )
+
+    resolved_tz = _resolve_timezone(timezone)
+    clock_value = clock(resolved_tz)
+    if not isinstance(clock_value, datetime):
+        raise CorvusContractError(
+            f"clock must return a datetime, got {type(clock_value).__name__}"
+        )
+    heartbeat_utc = _normalize_aware_utc(clock_value)
+    expires_utc = heartbeat_utc + timedelta(seconds=ttl_seconds)
+
+    try:
+        return ActorPresence(
+            actor_id=actor_id,
+            heartbeat_at=heartbeat_utc,
+            expires_at=expires_utc,
+        )
+    except ValidationError as exc:
+        raise CorvusContractError(_sanitize_validation_error(exc)) from exc
+    except TypeError as exc:
+        raise CorvusContractError("invalid contract value: internal type error") from exc
+
+
+def create_actor_subscriptions(
+    *,
+    actor_id: str,
+    topics: Any = None,
+    scopes: Any = None,
+    clock: Callable[[Any], datetime],
+    timezone: Any = None,
+    **unexpected: Any,
+) -> ActorSubscriptions:
+    """Server-side factory for an actor subscription snapshot.
+
+    Validates that ``actor_id`` is a non-blank string and that ``topics`` and
+    ``scopes`` are iterables of non-blank strings (coerced to immutable tuples
+    via the shared helper; a bare string is rejected). The caller is expected
+    to have already normalized/deduped topic and scope values — this factory
+    only validates entries. Stamps ``updated_at`` from ``clock(tz)`` normalized
+    to aware UTC. Converts Pydantic ``ValidationError`` and raw ``TypeError``
+    into ``CorvusContractError`` with sanitized messages.
+    """
+    if unexpected:
+        raise CorvusContractError(
+            "unexpected keyword arguments: " + ", ".join(sorted(unexpected))
+        )
+    if not isinstance(actor_id, str) or not actor_id.strip():
+        raise CorvusContractError(
+            f"actor_id must be a non-blank string, got {type(actor_id).__name__}"
+        )
+    if not callable(clock):
+        raise CorvusContractError(
+            f"clock must be callable, got {type(clock).__name__}"
+        )
+
+    resolved_tz = _resolve_timezone(timezone)
+    clock_value = clock(resolved_tz)
+    if not isinstance(clock_value, datetime):
+        raise CorvusContractError(
+            f"clock must return a datetime, got {type(clock_value).__name__}"
+        )
+    updated_utc = _normalize_aware_utc(clock_value)
+
+    topics_tuple = _coerce_string_tuple(topics, "topics")
+    for topic in topics_tuple:
+        if not topic.strip():
+            raise CorvusContractError("topics entries must be non-blank")
+    scopes_tuple = _coerce_string_tuple(scopes, "scopes")
+    for scope in scopes_tuple:
+        if not scope.strip():
+            raise CorvusContractError("scopes entries must be non-blank")
+
+    try:
+        return ActorSubscriptions(
+            actor_id=actor_id,
+            topics=topics_tuple,
+            scopes=scopes_tuple,
+            updated_at=updated_utc,
         )
     except ValidationError as exc:
         raise CorvusContractError(_sanitize_validation_error(exc)) from exc
