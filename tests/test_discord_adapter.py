@@ -18,6 +18,7 @@ The full end-to-end path (real ``discord.Client`` → real
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -1189,3 +1190,79 @@ def test_handle_message_end_to_end() -> None:  # pragma: no cover
     mocked ``discord.Client`` to verify the full flow: mention →
     create_turn → supervisor_runner iteration → final message post."""
     raise NotImplementedError
+
+
+def test_run_session_heartbeat_tracks_recent_activity() -> None:
+    """add_reasoning/add_tool_event must refresh the heartbeat clock so the
+    "last activity" marker reports a recent event after any UI change."""
+    from types import SimpleNamespace
+
+    from munin.production.discord_adapter import _RunSession
+
+    async def _scenario() -> None:
+        session = _RunSession(
+            channel=SimpleNamespace(send=lambda *a, **k: None),
+            run_id="run_test",
+        )
+        session._flush_task = None  # don't run the live flush_loop coroutine
+
+        base = await session._last_activity_ago()
+        assert base >= 0.0
+        # No event yet: the counter reflects session age.
+        await asyncio.sleep(0.02)
+        session.add_reasoning("hello")
+        assert await session._last_activity_ago() < 0.05
+        await asyncio.sleep(0.02)
+        session.add_tool_event("→ `burp_version`")
+        assert await session._last_activity_ago() < 0.05
+
+    asyncio.run(_scenario())
+
+
+def test_flush_loop_beats_without_new_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flush loop must periodically re-edit the status embed even when no
+    new reasoning/tool event arrives (LLM think time), so the operator sees a
+    living run instead of a frozen one."""
+    from types import SimpleNamespace
+
+    import munin.production.discord_adapter as adapter
+
+    async def _scenario() -> None:
+        class _FakeStatus:
+            def __init__(self) -> None:
+                self.edits: list[str] = []
+
+            async def edit(self, *, content: str = "", embed: Any | None = None, **kw) -> None:  # noqa: ANN401
+                self.edits.append(content or "")
+
+        class _FakeChannel:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            async def send(self, content: str = "", **kw) -> Any:  # noqa: ANN401
+                self.sent.append(content)
+                return None
+
+        session = adapter._RunSession(channel=_FakeChannel(), run_id="run_beat")
+        session._poster = SimpleNamespace(  # type: ignore[assignment]
+            post=lambda *a, **k: _noop(), post_embed=lambda *a, **k: None,
+        )
+        session.status_message = _FakeStatus()
+        # Speed up both cadences for the test.
+        monkeypatch.setattr(adapter, "DISCORD_FLUSH_INTERVAL", 0.01)
+        monkeypatch.setattr(adapter, "DISCORD_HEARTBEAT_INTERVAL", 0.05)
+        session._flush_task = asyncio.create_task(session.flush_loop())
+        # No reasoning/tool events: only the heartbeat should drive edits.
+        await asyncio.sleep(0.22)
+        session._closed = True
+        if session._flush_task is not None:
+            session._flush_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await session._flush_task
+        # At least 3 heartbeats at 0.05s over ~0.22s.
+        assert len(session.status_message.edits) >= 3, session.status_message.edits
+
+    async def _noop() -> None:
+        return None
+
+    asyncio.run(_scenario())

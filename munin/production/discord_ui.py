@@ -67,6 +67,7 @@ def build_run_status_embed(
     tools: list[str] | None = None,
     prompt: str = "",
     conversation_id: str = "",
+    last_activity_ago: float | None = None,
 ) -> Any:
     """Build a ``discord.Embed`` for the live run status message.
 
@@ -76,6 +77,9 @@ def build_run_status_embed(
     - Description: the operator's original objective (truncated).
     - Fields: current reasoning, recent tool activity.
     - Footer: conversation_id + timestamp.
+    - Heartbeat field: how many seconds since the last reasoning/tool event,
+      so a long silent stretch (LLM think time, slow tool, approval pause) is
+      visibly "still alive" instead of looking frozen.
     """
     if not _DISCORD_AVAILABLE:
         return None
@@ -114,6 +118,19 @@ def build_run_status_embed(
             name="⚡ Activity",
             value="\n".join(tail) if tail else "_idle_",
             inline=False,
+        )
+
+    if last_activity_ago is not None:
+        ago = int(last_activity_ago)
+        beat = "🫀" if ago < 120 else "🩸"
+        embed.add_field(
+            name=f"{beat} Last activity",
+            value=(
+                f"**{ago}s** ago"
+                if ago < 60
+                else f"**{ago // 60}m {ago % 60}s** ago"
+            ),
+            inline=True,
         )
 
     return embed

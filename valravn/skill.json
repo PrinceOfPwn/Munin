@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json.schemastore.org/mcp-skill.json",
+  "name": "valravn",
+  "display_name": "Valravn",
+  "description": "Valravn is Munin's offensive web-testing knowledge and workflow layer. It preserves the imported skills, agents, knowledge base, payload assets, evidence discipline, and Security Hub mappings while delegating live Burp execution to burp-mcp-ultimate through the compact Valravn Talons gateway.",
+  "version": "1.1.0",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/PrinceOfPwn/Munin",
+  "repository": "https://github.com/PrinceOfPwn/Munin",
+  "issues": "https://github.com/PrinceOfPwn/Munin/issues",
+  "author": "PrinceOfPwn",
+  "category": "security",
+  "tags": [
+    "mcp",
+    "burp-suite",
+    "pentest",
+    "bug-bounty",
+    "red-team",
+    "vulnerability-testing",
+    "owasp",
+    "wstg",
+    "graphql",
+    "oauth",
+    "webauthn",
+    "ssrf",
+    "business-logic"
+  ],
+  "capabilities": {
+    "execution_model": "provider_mesh",
+    "primary_burp_provider": "3ntr0pyX/burp-mcp-ultimate",
+    "primary_transport": "streamable_http",
+    "primary_endpoint_default": "http://127.0.0.1:9444/mcp",
+    "burp_proxy_default": "127.0.0.1:8080",
+    "knowledge_base_files": 151,
+    "skills": 54,
+    "agents": 14,
+    "legacy_python_tool_sources": 285,
+    "legacy_python_tool_sources_active_backend": false,
+    "custom_java_rest_bridge": false,
+    "munin_gateway_tools": [
+      "valravn_talons_status",
+      "valravn_talons_tools",
+      "valravn_talons_read",
+      "valravn_talons_call"
+    ],
+    "arsenal_gateway_tools": [
+      "valravn_arsenal_status",
+      "valravn_arsenal_list",
+      "valravn_arsenal_tools",
+      "valravn_arsenal_call"
+    ]
+  },
+  "runtime": {
+    "burp_provider": {
+      "name": "valravn-ultimate",
+      "upstream": "3ntr0pyX/burp-mcp-ultimate",
+      "url_env": "VALRAVN_TALON_ULTIMATE_URL",
+      "token_env": "BURP_MCP_TOKEN",
+      "default_url": "http://127.0.0.1:9444/mcp"
+    },
+    "unattended_launcher": "valravn/scripts/start-burp-headless.sh",
+    "live_ci": ".github/workflows/valravn-mesh-e2e.yml",
+    "legacy_rest_api_retired": "127.0.0.1:8111"
+  },
+  "knowledge": {
+    "path": "valravn/mcp-server/src/burpsuite_mcp/knowledge",
+    "role": "reasoning and workflow corpus; independent of the retired MCP/REST runtime"
+  },
+  "payload_assets": {
+    "path": "valravn/mcp-server/src/burpsuite_mcp/payloads",
+    "role": "retained reference/payload corpus"
+  },
+  "skills": {
+    "path": "valravn/.claude/skills",
+    "migration_rule": "Treat legacy tool names as workflow intent. Resolve the current provider tool through Valravn Talons; do not restore /api/* REST calls."
+  },
+  "resources": [
+    {
+      "uri": "burp://proxy/history",
+      "provider": "burp-mcp-ultimate",
+      "description": "Recent Burp Proxy traffic."
+    },
+    {
+      "uri": "burp://sitemap",
+      "provider": "burp-mcp-ultimate",
+      "description": "Burp site map state."
+    },
+    {
+      "uri": "burp://scan/issues",
+      "provider": "burp-mcp-ultimate",
+      "description": "Burp scan issues when available."
+    },
+    {
+      "uri": "burp://target_summary",
+      "provider": "burp-mcp-ultimate",
+      "description": "Compact target state."
+    },
+    {
+      "uri": "burp://intercept/pending",
+      "provider": "burp-mcp-ultimate",
+      "description": "Pending intercept queue state."
+    }
+  ],
+  "workflow_principles": [
+    "Discover tools by task before requesting a schema.",
+    "Request only the schema for the tool about to be called.",
+    "Prefer MCP resources for passive Burp state.",
+    "Use Valravn Arsenal for external security tooling rather than rebuilding it inside Burp.",
+    "Preserve evidence and finding-validation semantics when migrating a legacy skill.",
+    "Never reinterpret an MCP/provider outage as target evidence.",
+    "Generic active execution requires explicit authorization in Munin."
+  ],
+  "safety_rules": [
+    "Use active tools only against explicitly authorized targets.",
+    "Provider reachability is not authorization.",
+    "Keep engagement scope and policy above the provider layer.",
+    "Preserve evidence before escalation.",
+    "Do not restore the retired 127.0.0.1:8111 REST bridge to satisfy a legacy workflow."
+  ],
+  "upstream_attribution": {
+    "license": "Apache-2.0",
+    "notice_required_by_section_4d": {
+      "product": "Valravn",
+      "upstream_source": "https://github.com/PrinceOfPwn/Valravn",
+      "retained_in": "valravn/NOTICE"
+    }
+  }
+}

@@ -176,3 +176,17 @@ def tavily_search(
 # Register Valravn after the FastMCP singleton and audit wrapper are ready.
 # The Deep Agents Tool Gateway discovers these registrations dynamically.
 from . import valravn_tool as _valravn_tool  # noqa: E402,F401
+
+# Register the Valravn Burp extension wrapper. Same resilience pattern as the
+# passive Valravn tools above — every burp_* tool returns a structured error
+# envelope when the Burp extension is unreachable, so Munin keeps running in
+# CI / dev environments without Burp.
+try:
+    from . import burp_tool as _burp_tool  # noqa: E402,F401
+except Exception as _burp_register_exc:  # pragma: no cover - import-time only
+    import logging
+
+    logging.getLogger("munin-mcp").warning(
+        "burp_tool register failed (Burp DAST wrapper unavailable): %s",
+        _burp_register_exc,
+    )

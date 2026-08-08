@@ -1,0 +1,221 @@
+"""Subdomain-takeover fingerprints. Source: can-i-take-over-xyz + current hosts.
+
+Entry schema
+------------
+Each value is a dict:
+
+    {
+      "cname":   "vendor-host.example.com",        # CNAME suffix to match
+      "body":    "vendor-specific 404 marker",     # HTTP response body marker
+      "dns_only": True | False                     # (W9+) optional
+    }
+
+`dns_only=True` signals **CNAME resolves but target has no A record** —
+the takeover marker is the DNS gap, not an HTTP body string. For these
+entries, `test_subdomain_takeover` runs a second `dig A` against the CNAME
+target instead of fetching the HTTP body; absent A record = VULNERABLE.
+
+Used by W9 ElasticBeanstalk regional (us-east-1, us-west-2, eu-west-1, ...)
+and Azure trafficmanager / azureedge / redis.cache.windows.net entries that
+expose dangling subdomain takeover via the DNS layer alone. The vendor never
+serves a 404 body — the resource just doesn't exist.
+
+Operator workflow (DNS-only):
+    1. test_subdomain_takeover(subdomains=[...]) matches the CNAME suffix.
+    2. Detector queries A record on cname target.
+    3. NXDOMAIN / no A → status "VULNERABLE (dns-only — CNAME target has no A record)".
+    4. Resolution → status "cname_match_but_resolves" (active resource — not vulnerable).
+"""
+
+
+TAKEOVER_FINGERPRINTS = {
+    "github.io": {"cname": "github.io", "body": "There isn't a GitHub Pages site here"},
+    "githubusercontent.com": {"cname": "githubusercontent.com", "body": "404: Not Found"},
+    "gitlab.io": {"cname": "gitlab.io", "body": "404 Not Found"},
+    "herokuapp.com": {"cname": "herokuapp.com", "body": "no-such-app"},
+    "herokudns.com": {"cname": "herokudns.com", "body": "no such app"},
+    "s3.amazonaws.com": {"cname": "s3.amazonaws.com", "body": "NoSuchBucket"},
+    "s3-website": {"cname": "s3-website", "body": "NoSuchBucket"},
+    "azurewebsites.net": {"cname": "azurewebsites.net", "body": "404 Web Site not found"},
+    "cloudapp.net": {"cname": "cloudapp.net", "body": "404 Web Site not found"},
+    "trafficmanager.net": {"cname": "trafficmanager.net", "body": "404 Web Site not found"},
+    "blob.core.windows.net": {"cname": "blob.core.windows.net", "body": "The specified blob does not exist"},
+    "azurestaticapps.net": {"cname": "azurestaticapps.net", "body": "404 Not Found"},
+    "cloudfront.net": {"cname": "cloudfront.net", "body": "Bad Request"},
+    "elasticbeanstalk.com": {"cname": "elasticbeanstalk.com", "body": "404 Not Found"},
+    "pantheon.io": {"cname": "pantheon.io", "body": "404 error unknown site"},
+    "shopify.com": {"cname": "shopify.com", "body": "Sorry, this shop is currently unavailable"},
+    "myshopify.com": {"cname": "myshopify.com", "body": "Sorry, this shop is currently unavailable"},
+    "surge.sh": {"cname": "surge.sh", "body": "project not found"},
+    "ghost.io": {"cname": "ghost.io", "body": "The thing you were looking for is no longer here"},
+    "bitbucket.io": {"cname": "bitbucket.io", "body": "Repository not found"},
+    "wordpress.com": {"cname": "wordpress.com", "body": "doesn't exist"},
+    "tumblr.com": {"cname": "tumblr.com", "body": "There's nothing here"},
+    "domains.tumblr.com": {"cname": "domains.tumblr.com", "body": "Whatever you were looking for doesn't currently exist at this address"},
+    "zendesk.com": {"cname": "zendesk.com", "body": "Help Center Closed"},
+    "readme.io": {"cname": "readme.io", "body": "Project doesnt exist"},
+    "cargo.site": {"cname": "cargo.site", "body": "404 Not Found"},
+    "fastly.net": {"cname": "fastly.net", "body": "Fastly error: unknown domain"},
+    "global.fastly.net": {"cname": "global.fastly.net", "body": "Fastly error: unknown domain"},
+    "feedpress.me": {"cname": "feedpress.me", "body": "The feed has not been found"},
+    "fly.io": {"cname": "fly.io", "body": "404 Not Found"},
+    "fly.dev": {"cname": "fly.dev", "body": "404 Not Found"},
+    "freshdesk.com": {"cname": "freshdesk.com", "body": "May be this is still fresh"},
+    "getresponse.com": {"cname": "getresponse.com", "body": "With GetResponse Landing Pages"},
+    "hatenablog.com": {"cname": "hatenablog.com", "body": "404 Blog is not found"},
+    "helpjuice.com": {"cname": "helpjuice.com", "body": "We could not find what you're looking for"},
+    "helpscoutdocs.com": {"cname": "helpscoutdocs.com", "body": "No settings were found for this company"},
+    "intercom.help": {"cname": "intercom.help", "body": "This page is reserved for artistic dogs"},
+    "kinsta.com": {"cname": "kinsta.com", "body": "No Site For Domain"},
+    "launchrock.com": {"cname": "launchrock.com", "body": "It looks like you may have taken a wrong turn somewhere"},
+    "mashery.com": {"cname": "mashery.com", "body": "Unrecognized domain"},
+    "ngrok.io": {"cname": "ngrok.io", "body": "Tunnel.*not found"},
+    "ngrok-free.app": {"cname": "ngrok-free.app", "body": "Tunnel.*not found"},
+    "pageserve.co": {"cname": "pageserve.co", "body": "404 Not Found"},
+    "smartling.com": {"cname": "smartling.com", "body": "Domain is not configured"},
+    "smugmug.com": {"cname": "smugmug.com", "body": "Page Not Found"},
+    "statuspage.io": {"cname": "statuspage.io", "body": "You are being redirected"},
+    "strikinglydns.com": {"cname": "strikinglydns.com", "body": "PAGE NOT FOUND"},
+    "tave.com": {"cname": "tave.com", "body": "Error 404: Page Not Found"},
+    "teamwork.com": {"cname": "teamwork.com", "body": "Oops - We didn't find your site"},
+    "thinkific.com": {"cname": "thinkific.com", "body": "You may have mistyped the address"},
+    "tilda.cc": {"cname": "tilda.cc", "body": "Please renew your subscription"},
+    "uberflip.com": {"cname": "uberflip.com", "body": "The URL you've accessed does not provide a hub"},
+    "unbouncepages.com": {"cname": "unbouncepages.com", "body": "The requested URL was not found on this server"},
+    "uservoice.com": {"cname": "uservoice.com", "body": "This UserVoice subdomain is currently available"},
+    "vend.com": {"cname": "vend.com", "body": "Looks like you've traveled too far into cyberspace"},
+    "webflow.io": {"cname": "webflow.io", "body": "The page you are looking for doesn't exist or has been moved"},
+    "wishpond.com": {"cname": "wishpond.com", "body": "wishpond.com/404"},
+    "wufoo.com": {"cname": "wufoo.com", "body": "Hmmm....something is not right"},
+    "agilecrm.com": {"cname": "agilecrm.com", "body": "Sorry, this page is no longer available"},
+    "aha.io": {"cname": "aha.io", "body": "There is no portal here"},
+    "anima.io": {"cname": "anima.io", "body": "If this is your website and you've just created it"},
+    "bigcartel.com": {"cname": "bigcartel.com", "body": "Oops! We couldn"},
+    "campaignmonitor.com": {"cname": "createsend.com", "body": "Double check the URL"},
+    "clickfunnels.com": {"cname": "clickfunnels.com", "body": "Not found"},
+    "desk.com": {"cname": "desk.com", "body": "Sorry, We Couldn't Find That Page"},
+    "vercel.app": {"cname": "vercel-dns.com", "body": "The deployment could not be found"},
+    "vercel-dns.com": {"cname": "vercel-dns.com", "body": "The deployment could not be found"},
+    "netlify.app": {"cname": "netlify.app", "body": "Not Found - Request ID:"},
+    "onrender.com": {"cname": "onrender.com", "body": "Not Found"},
+    "railway.app": {"cname": "railway.app", "body": "Application not found"},
+    "pages.dev": {"cname": "pages.dev", "body": "404 not found"},
+    "supabase.co": {"cname": "supabase.co", "body": "project is paused"},
+    "firebaseapp.com": {"cname": "firebaseapp.com", "body": "Site Not Found"},
+    "web.app": {"cname": "web.app", "body": "Site Not Found"},
+    "appspot.com": {"cname": "appspot.com", "body": "404 Not Found"},
+    "run.app": {"cname": "run.app", "body": "Service Unavailable"},
+    "cloudfunctions.net": {"cname": "cloudfunctions.net", "body": "404 Not Found"},
+    "dnsimple.com": {"cname": "dnsimple.com", "body": "Domain is not configured"},
+    "fastmail.com": {"cname": "fastmail.com", "body": "404 page not found"},
+    "frontify.com": {"cname": "frontify.com", "body": "Frontify"},
+    "happyfox.com": {"cname": "happyfox.com", "body": "No settings were found for this company"},
+    # W8 (2026-05-29) — nuclei-templates takeover/* survey: 34 services.
+    "framer.app": {"cname": "framer.app", "body": "Site Not Found | Framer"},
+    "framer.website": {"cname": "framer.website", "body": "Site Not Found | Framer"},
+    "cleverapps.io": {"cname": "cleverapps.io", "body": "The application you're trying to access doesn't seem to exist"},
+    "canny.io": {"cname": "canny.io", "body": "Company Not Found"},
+    "aftership.com": {"cname": "aftership.com", "body": "Oops.*The page you're looking for doesn't exist"},
+    "announcekit.app": {"cname": "announcekit.app", "body": "announcekit.app/static/404"},
+    "airee.ru": {"cname": "airee.ru", "body": "Ошибка 402"},
+    "cargocollective.com": {"cname": "cargocollective.com", "body": "404 Not Found.*cargocollective"},
+    "flexbe.com": {"cname": "flexbe.com", "body": "Sorry, this page is no longer available"},
+    "furyns.com": {"cname": "furyns.com", "body": "404: This page could not be found"},
+    "gitbook.io": {"cname": "gitbook.io", "body": "If you need immediate help, please contact support"},
+    "gohire.io": {"cname": "gohire.io", "body": "Company Not Found"},
+    "greatpages.com.br": {"cname": "greatpages.com.br", "body": "Página não encontrada"},
+    "helpdocs.io": {"cname": "helpdocs.io", "body": "We couldn't find what you're looking for"},
+    "helprace.com": {"cname": "helprace.com", "body": "Sorry, this community is no longer available"},
+    "helpscout.net": {"cname": "helpscout.net", "body": "No settings were found for this company"},
+    "hubspot.net": {"cname": "hubspot.net", "body": "Domain not found in HubSpot"},
+    "applytojob.com": {"cname": "applytojob.com", "body": "This account no longer active"},
+    "jetbrains.space": {"cname": "jetbrains.space", "body": "This page is no longer available"},
+    "leadpages.co": {"cname": "leadpages.co", "body": "domain not configured"},
+    "meteorapp.com": {"cname": "meteorapp.com", "body": "If you're the owner of this app"},
+    "pagewiz.net": {"cname": "pagewiz.net", "body": "Page not found"},
+    "pingdom.com": {"cname": "pingdom.com", "body": "public report not found"},
+    "proposify.biz": {"cname": "proposify.biz", "body": "If you need immediate assistance"},
+    "readthedocs.io": {"cname": "readthedocs.io", "body": "Unknown to readthedocs.io"},
+    "redirect.pizza": {"cname": "redirect.pizza", "body": "The redirect has not been found"},
+    "simplebooklet.com": {"cname": "simplebooklet.com", "body": "404 not found"},
+    "softr.io": {"cname": "softr.io", "body": "This site can't be reached. Please make sure you have published your site"},
+    "sprintful.com": {"cname": "sprintful.com", "body": "domain.*not configured for this account"},
+    "squadcast.fm": {"cname": "squadcast.fm", "body": "404 Show not found"},
+    "surveygizmo.com": {"cname": "surveygizmo.com", "body": "data_not_found"},
+    "surveysparrow.com": {"cname": "surveysparrow.com", "body": "Account not found"},
+    "wasabisys.com": {"cname": "s3.wasabisys.com", "body": "NoSuchBucket"},
+    "worksites.net": {"cname": "worksites.net", "body": "Hello! Sorry, but the website you're looking for doesn't exist"},
+    # W9 (2026-05-29) — DNS-only signal entries. `body` ignored when
+    # dns_only=True: the takeover signal is CNAME-resolves-but-target-NXDOMAIN.
+    # test_subdomain_takeover treats `dns_only` as bypass for HTTP body match.
+    "elasticbeanstalk-us-east-1": {
+        "cname": "us-east-1.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-us-east-2": {
+        "cname": "us-east-2.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-us-west-1": {
+        "cname": "us-west-1.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-us-west-2": {
+        "cname": "us-west-2.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-eu-west-1": {
+        "cname": "eu-west-1.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-eu-central-1": {
+        "cname": "eu-central-1.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-ap-southeast-1": {
+        "cname": "ap-southeast-1.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "elasticbeanstalk-ap-northeast-1": {
+        "cname": "ap-northeast-1.elasticbeanstalk.com",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "s3-us-west-2": {
+        "cname": "s3.us-west-2.amazonaws.com",
+        "body": "NoSuchBucket",
+        "dns_only": False,
+    },
+    "s3-eu-west-1": {
+        "cname": "s3.eu-west-1.amazonaws.com",
+        "body": "NoSuchBucket",
+        "dns_only": False,
+    },
+    "s3-ap-southeast-1": {
+        "cname": "s3.ap-southeast-1.amazonaws.com",
+        "body": "NoSuchBucket",
+        "dns_only": False,
+    },
+    "azure-tts-net": {
+        "cname": "trafficmanager.net",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "azure-cdn-net": {
+        "cname": "azureedge.net",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+    "azure-redis-cache": {
+        "cname": "redis.cache.windows.net",
+        "body": "(dns-only)",
+        "dns_only": True,
+    },
+}

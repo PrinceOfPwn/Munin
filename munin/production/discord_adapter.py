@@ -80,6 +80,7 @@ DISCORD_MAX_MESSAGE_CHARS = 1900   # 2000-char hard cap, headroom for markdown
 DISCORD_STATUS_MAX_CHARS = 1800
 DISCORD_TOOL_TAIL = 6              # last N tool events in the status message
 DISCORD_EMBED_BODY_MAX = 4000      # embed description cap with headroom
+DISCORD_HEARTBEAT_INTERVAL = 15.0  # visible liveness beat even with no new events
 
 # --- Command surface --------------------------------------------------------
 COMMAND_PREFIXES = ("/munin ", "!munin ")
@@ -367,8 +368,11 @@ class _RunSession:
         self._flush_task: asyncio.Task | None = None
         self._poster = _RateLimitedPoster(channel)
         self._final_consumed = False  # run_state provided canonical final text
+        self._heartbeat_at = time.monotonic()  # last event that changed ui state
+        self._last_seen = 0.0                  # monotonic when beat was rendered
 
     def add_reasoning(self, text: str) -> None:
+        self._heartbeat_at = time.monotonic()
         if text:
             self.reasoning_buffer += text
             self._dirty = True
@@ -409,6 +413,7 @@ class _RunSession:
 
     def add_tool_event(self, line: str) -> None:
         if line:
+            self._heartbeat_at = time.monotonic()
             self.tools.append(line)
             self._dirty = True
             # Tool events stay in the editable status message tail —
@@ -461,15 +466,32 @@ class _RunSession:
             )
         self._dirty = False
 
+    async def _last_activity_ago(self) -> float:
+        """Seconds since the last reasoning/tool event touched the UI state.
+
+        The engine itself may pass no new prompt tokens for a long stretch
+        (LLM think time, a slow HTTP tool, a paused approval), so this value
+        is the visible "am I alive?" marker for the operator.
+        """
+        return time.monotonic() - self._heartbeat_at
+
     async def flush_loop(self) -> None:
         while not self._closed:
             await asyncio.sleep(DISCORD_FLUSH_INTERVAL)
             if not self._dirty:
+                # heartbeat: even without new events, periodically re-edit the
+                # status embed so the operator sees the run is still alive
+                # (footer timestamp advances, "last activity" counter ticks).
+                now = time.monotonic()
+                if now - self._last_seen >= DISCORD_HEARTBEAT_INTERVAL:
+                    self._last_seen = now
+                    await self._flush()
                 continue
             await self._flush()
 
     async def _flush(self) -> None:
         self._dirty = False
+        self._last_seen = time.monotonic()
         embed = ui.build_run_status_embed(
             run_id=self.run_id,
             state="running",
@@ -477,6 +499,7 @@ class _RunSession:
             tools=self.tools,
             prompt=self.prompt,
             conversation_id=self.conversation_id,
+            last_activity_ago=await self._last_activity_ago(),
         )
         content = self._render_status()
         try:
@@ -547,6 +570,7 @@ class _RunSession:
                 tools=self.tools,
                 prompt=self.prompt,
                 conversation_id=self.conversation_id,
+                last_activity_ago=await self._last_activity_ago(),
             )
             if embed is not None and self.status_message is not None:
                 with contextlib.suppress(Exception):

