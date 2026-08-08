@@ -36,7 +36,15 @@ from datetime import datetime
 from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
-from munin.corvus.contracts import CorvusContractError, Post, create_post
+from munin.corvus.contracts import (
+    CorvusContractError,
+    Post,
+    PostState,
+    PostType,
+    Reaction,
+    create_post,
+    create_reaction,
+)
 from munin.corvus.transport import CorvusTransportError, RedisTransport
 
 __all__ = [
@@ -223,6 +231,240 @@ class CorvusBlackboard:
         return post
 
     # ------------------------------------------------------------------
+    # Public — post retrieval.
+    # ------------------------------------------------------------------
+
+    def get_post(self, post_id: str) -> Post:
+        """Fetch one post by exact key; never returns a payload or error echo.
+
+        Missing or empty storage raises ``CorvusNotFoundError``. A corrupt
+        payload (non-UTF-8 bytes, non-JSON, or invalid ``Post`` wire) raises a
+        stable ``CorvusError`` from ``None`` so no raw transport value leaks
+        as the exception cause. Transport failures collapse to a sanitized
+        ``CorvusError``.
+        """
+        try:
+            raw = self._transport.command("GET", self._post_key(post_id))
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        stored = self._decode_post_raw(raw)
+        return self._parse_post_wire(stored)
+
+    # ------------------------------------------------------------------
+    # Public — threaded reply.
+    # ------------------------------------------------------------------
+
+    def reply(
+        self,
+        *,
+        actor_id: str,
+        reply_to: str,
+        content: str,
+        topics: Iterable[str] | None = None,
+        confidence: float | None = None,
+        evidence_refs: Iterable[str] | None = None,
+        investigation_refs: Iterable[str] | None = None,
+    ) -> Post:
+        """Reply to a post, inheriting the parent's scope and threading.
+
+        Loads the parent (missing → ``CorvusNotFoundError``), derives the
+        thread root as ``parent.thread_root_id or parent.id``, creates a
+        ``PostType.REPLY`` post that inherits the parent's scope, normalizes
+        topics, then commits one atomic pipeline. Contract violations from
+        ``create_post`` collapse to ``CorvusError`` from ``None``; transport
+        failures collapse to a sanitized ``CorvusError``.
+        """
+        parent = self.get_post(reply_to)
+        thread_root = parent.thread_root_id or parent.id
+        normalized_topics = _normalize_topics(topics)
+        try:
+            post = create_post(
+                actor_id=actor_id,
+                post_type=PostType.REPLY,
+                scope=parent.scope,
+                content=content,
+                topics=normalized_topics,
+                confidence=confidence,
+                evidence_refs=evidence_refs,
+                investigation_refs=investigation_refs,
+                reply_to=reply_to,
+                thread_root_id=thread_root,
+                clock=self._clock,
+                timezone=self._timezone,
+            )
+        except CorvusContractError as exc:
+            raise CorvusError(str(exc)) from None
+        try:
+            self._transport.pipeline(
+                self._pipeline_commands(post), atomic=True
+            )
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        return post
+
+    # ------------------------------------------------------------------
+    # Public — thread retrieval.
+    # ------------------------------------------------------------------
+
+    def get_thread(self, post_id: str, *, limit: int = 100) -> tuple[Post, ...]:
+        """Resolve the thread for a post and return it in index order.
+
+        Validates ``limit`` as a non-``bool`` ``int`` in ``1..500`` *before* any
+        transport call. Loads the referenced post to derive its thread root,
+        reads the thread sorted-set with ``ZRANGE root 0 limit-1``, decodes the
+        member ids, then issues one non-atomic pipeline of ``GET`` commands —
+        one per member — and parses the results to a ``tuple[Post, ...]`` in
+        index order. A missing member raises ``CorvusNotFoundError``; a corrupt
+        payload raises a stable ``CorvusError`` from ``None``. No payload or
+        error echo ever surfaces.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise CorvusError("limit must be an int")
+        if limit < 1 or limit > 500:
+            raise CorvusError("limit must be between 1 and 500")
+        referenced = self.get_post(post_id)
+        root = referenced.thread_root_id or referenced.id
+        thread_key = f"{self._key_prefix}:thread:{root}"
+        try:
+            members = self._transport.command("ZRANGE", thread_key, 0, limit - 1)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        member_ids = self._decode_thread_members(members)
+        if not member_ids:
+            raise CorvusError("missing thread index") from None
+        get_commands = [
+            ["GET", self._post_key(member_id)] for member_id in member_ids
+        ]
+        try:
+            results = self._transport.pipeline(get_commands, atomic=False)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        if not isinstance(results, list) or len(results) != len(member_ids):
+            raise CorvusError("thread pipeline response cardinality mismatch")
+        posts: list[Post] = []
+        for raw in results:
+            stored = self._decode_post_raw(raw)
+            posts.append(self._parse_post_wire(stored))
+        return tuple(posts)
+
+    # ------------------------------------------------------------------
+    # Public — reaction.
+    # ------------------------------------------------------------------
+
+    def react(
+        self,
+        *,
+        post_id: str,
+        reaction_type: Any,
+        actor_id: str,
+    ) -> Reaction:
+        """React to a post atomically; returns the stored ``Reaction``.
+
+        Converts ``CorvusContractError`` from ``create_reaction`` to
+        ``CorvusError`` from ``None`` — so an invalid reaction type (e.g.
+        ``LIKE``) is rejected *before* any transport mutation. The target post
+        is verified via ``get_post`` (missing → ``CorvusNotFoundError``) before
+        the atomic pipeline writes the compact reaction JSON, the per-post
+        reactions index, and one global stream entry. Transport failures
+        collapse to a sanitized ``CorvusError``. No other writes.
+        """
+        try:
+            reaction = create_reaction(
+                post_id=post_id,
+                reaction_type=reaction_type,
+                actor_id=actor_id,
+                clock=self._clock,
+            )
+        except CorvusContractError as exc:
+            raise CorvusError(str(exc)) from None
+        self.get_post(post_id)
+        prefix = self._key_prefix
+        score = int(reaction.timestamp.timestamp() * 1000)
+        commands: list[list[Any]] = [
+            [
+                "SET",
+                f"{prefix}:reaction:{reaction.id}",
+                self._reaction_wire(reaction),
+            ],
+            ["ZADD", f"{prefix}:reactions:{reaction.post_id}", score, reaction.id],
+            [
+                "XADD",
+                f"{prefix}:stream",
+                "*",
+                "reaction_id",
+                reaction.id,
+                "post_id",
+                reaction.post_id,
+                "actor_id",
+                reaction.actor_id,
+            ],
+        ]
+        try:
+            self._transport.pipeline(commands, atomic=True)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        return reaction
+
+    # ------------------------------------------------------------------
+    # Public — resolve.
+    # ------------------------------------------------------------------
+
+    def resolve(self, *, post_id: str, actor_id: str) -> Post:
+        """Mark a post as resolved atomically; returns the updated ``Post``.
+
+        If the post is already ``RESOLVED``, returns the same object with no
+        pipeline. Otherwise builds a ``model_copy`` with ``status`` set to
+        ``PostState.RESOLVED`` and ``revision`` incremented by one, preserving
+        ``id``, ``published_at``, ``published_at_local``, ``timezone_name`` and
+        ``content``. The atomic pipeline rewrites the post key with the
+        canonical wire, removes the post from its old state index, adds it to
+        the resolved state index using the *original* publication epoch-ms,
+        and appends one global stream entry. No ``edited_at`` is fabricated.
+        Transport failures collapse to a sanitized ``CorvusError``.
+        """
+        post = self.get_post(post_id)
+        if post.status is PostState.RESOLVED:
+            return post
+        resolved = post.model_copy(
+            update={
+                "status": PostState.RESOLVED,
+                "revision": post.revision + 1,
+            }
+        )
+        prefix = self._key_prefix
+        score = int(post.published_at.timestamp() * 1000)
+        commands: list[list[Any]] = [
+            [
+                "SET",
+                self._post_key(post.id),
+                self._post_wire(resolved),
+            ],
+            ["ZREM", f"{prefix}:index:state:{post.status.value}", post.id],
+            [
+                "ZADD",
+                f"{prefix}:index:state:resolved",
+                score,
+                post.id,
+            ],
+            [
+                "XADD",
+                f"{prefix}:stream",
+                "*",
+                "post_id",
+                post.id,
+                "event",
+                "resolved",
+                "actor_id",
+                actor_id,
+            ],
+        ]
+        try:
+            self._transport.pipeline(commands, atomic=True)
+        except CorvusTransportError as exc:
+            raise _sanitized(exc) from None
+        return resolved
+
+    # ------------------------------------------------------------------
     # Pipeline construction — one atomic multi for stream, indexes, post.
     # ------------------------------------------------------------------
 
@@ -243,9 +485,9 @@ class CorvusBlackboard:
             ["ZADD", f"{prefix}:index:actor:{post.actor_id}", score, post.id],
             [
                 "ZADD",
-                f"{prefix}:thread:{post.id}",
+                f"{prefix}:thread:{post.thread_root_id or post.id}",
                 score,
-                self._thread_member(post),
+                post.id,
             ],
         ]
         for topic in post.topics:
@@ -261,12 +503,14 @@ class CorvusBlackboard:
         )
         return commands
 
-    def _thread_member(self, post: Post) -> str:
-        return post.thread_root_id or post.id
-
     def _post_wire(self, post: Post) -> str:
         return json.dumps(
             post.to_wire(), sort_keys=True, separators=(",", ":")
+        )
+
+    def _reaction_wire(self, reaction: Reaction) -> str:
+        return json.dumps(
+            reaction.to_wire(), sort_keys=True, separators=(",", ":")
         )
 
     # ------------------------------------------------------------------
@@ -346,3 +590,74 @@ class CorvusBlackboard:
 
     def _post_key(self, post_id: str) -> str:
         return f"{self._key_prefix}:post:{post_id}"
+
+    # ------------------------------------------------------------------
+    # Post/payload decode + parse helpers — no payload or error echo.
+    # ------------------------------------------------------------------
+
+    def _decode_post_raw(self, raw: Any) -> str:
+        """Decode a transport-read post payload to a UTF-8 string.
+
+        ``None`` or an empty/whitespace value is a missing post and raises
+        ``CorvusNotFoundError``. ``bytes`` are decoded as UTF-8. A non-UTF-8
+        ``bytes`` payload raises a stable ``CorvusError`` from ``None``. All
+        messages are stable generic text — no Redis key or caller-supplied
+        post id is ever echoed.
+        """
+        if raw is None:
+            raise CorvusNotFoundError("missing post") from None
+        if isinstance(raw, bytes):
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise CorvusError("corrupt post payload") from None
+            if not decoded.strip():
+                raise CorvusNotFoundError("missing post") from None
+            return decoded
+        if isinstance(raw, str):
+            if not raw.strip():
+                raise CorvusNotFoundError("missing post") from None
+            return raw
+        raise CorvusError("corrupt post payload") from None
+
+    def _parse_post_wire(self, stored: str) -> Post:
+        """Parse a stored JSON wire string into a ``Post``.
+
+        Non-JSON or invalid ``Post`` wire raises a stable ``CorvusError`` from
+        ``None`` — never a raw ``ValueError``/``TypeError`` and never an echo
+        of the payload itself, Redis key, or caller-supplied post id.
+        """
+        try:
+            wire = json.loads(stored)
+        except ValueError:
+            raise CorvusError("corrupt post payload") from None
+        try:
+            return Post.model_validate(wire)
+        except (ValueError, TypeError):
+            raise CorvusError("corrupt post payload") from None
+
+    def _decode_thread_members(self, raw: Any) -> list[str]:
+        """Decode a ``ZRANGE`` thread member list to ordered UTF-8 id strings.
+
+        A blank member is corruption, not a silently skipped entry. Messages
+        are stable generic text — no Redis key is ever echoed.
+        """
+        if raw is None:
+            return []
+        if isinstance(raw, (list, tuple)):
+            members: list[str] = []
+            for item in raw:
+                if isinstance(item, bytes):
+                    try:
+                        decoded = item.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise CorvusError("corrupt thread index") from None
+                elif isinstance(item, str):
+                    decoded = item
+                else:
+                    raise CorvusError("corrupt thread index") from None
+                if not decoded:
+                    raise CorvusError("corrupt thread index") from None
+                members.append(decoded)
+            return members
+        raise CorvusError("corrupt thread index") from None
